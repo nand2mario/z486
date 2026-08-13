@@ -4,7 +4,7 @@
 z486 is an 80486-class pipelined CPU core written in SystemVerilog. A fast
 frontend and hardwired implementations handle common instructions, while a
 microcoded control engine handles complex x86 operations. The core also includes
-a microcoded x87 floating-point unit.
+experimental, incomplete x87 support sufficient to run TurboQuake.
 
 In the z486_MiSTer system, the core runs the Doom timedemo at 29.1 FPS at
 maximum detail, compared with 21.0 FPS on ao486 using the same MiSTer setup.
