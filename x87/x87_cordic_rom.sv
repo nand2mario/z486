@@ -2,8 +2,8 @@
 // the constants to M10Ks; simulation uses the generated case table below.
 module x87_cordic_rom (
     input  logic               clk,
-    input  logic         [6:0] address,
-    output logic signed [82:0] value
+    input  logic         [6:0] address, // CORDIC iteration/atan table index.
+    output logic signed [82:0] value    // Registered Q80 arctangent constant.
 );
 
 `ifdef ALTERA_RESERVED_QIS

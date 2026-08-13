@@ -3,19 +3,19 @@ module x87_sequencer
 (
     input  logic          clk,
     input  logic          reset,
-    input  logic          start,
-    input  logic    [7:0] entry,
-    input  logic   [31:0] conditions,
-    output logic          active,
-    output logic          exec_valid,
-    output logic          done,
-    output logic    [7:0] uaddr,
-    output x87_uop_t   uop
+    input  logic          start,       // Launch entry; accepted only while executor is idle.
+    input  logic    [7:0] entry,       // Operation-specific control-store entry.
+    input  logic   [31:0] conditions,  // Predicates derived from registered executor state.
+    output logic          active,      // Numeric microprogram owns the executor.
+    output logic          exec_valid,  // Current uop may update its owned state.
+    output logic          done,        // FINISH pulse; commit is carried by current uop.
+    output logic    [7:0] uaddr,       // Current executing microcode address.
+    output x87_uop_t      uop          // Current horizontal control word.
 );
 
-logic [7:0] fetch_addr;
-logic [7:0] flow_addr;
-logic       condition_true;
+logic [7:0] fetch_addr;      // Address captured by synchronous control-store ROM.
+logic [7:0] flow_addr;       // Next address selected from current registered state.
+logic       condition_true;  // Predicate selected by the current uop.
 
 x87_ucode_rom control_store (
     .clk(clk),

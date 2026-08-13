@@ -4,8 +4,8 @@ module x87_command_rom
     import x87_ucode_pkg::*;
 (
     input  logic                    clk,
-    input  logic             [10:0] address,
-    output x87_command_decode_t      decode
+    input  logic             [10:0] address, // Complete or canonicalized architectural FOP.
+    output x87_command_decode_t     decode   // Registered command action and operands.
 );
 
 logic [22:0] raw_decode;

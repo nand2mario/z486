@@ -4,8 +4,8 @@ module x87_ucode_rom
     import x87_ucode_pkg::*;
 (
     input  logic          clk,
-    input  logic    [7:0] address,
-    output x87_uop_t   uop
+    input  logic    [7:0] address, // Address captured for the next execution cycle.
+    output x87_uop_t      uop      // 64-bit horizontal microinstruction.
 );
 
 logic [63:0] raw_uop;

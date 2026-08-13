@@ -2,11 +2,11 @@
 // synchronous read boundary keeps scratch data out of sequencer address logic.
 module x87_cordic_scratch (
     input  logic        clk,
-    input  logic  [3:0] read_addr_a,
+    input  logic  [3:0] read_addr_a, // Current coordinate or accumulator limb.
     output logic [27:0] read_data_a,
-    input  logic  [3:0] read_addr_b,
+    input  logic  [3:0] read_addr_b, // Adjacent shifted-source or constant limb.
     output logic [27:0] read_data_b,
-    input  logic        write_enable,
+    input  logic        write_enable, // Common write mirrored into both read copies.
     input  logic  [3:0] write_addr,
     input  logic [27:0] write_data
 );

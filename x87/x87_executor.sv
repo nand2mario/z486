@@ -39,19 +39,19 @@ module x87_executor
     output logic           [7:0] debug_uaddr         // Current x87 microcode address.
 );
 
-logic [7:0] entry;
-logic [31:0] conditions;
-logic seq_active;
-logic seq_exec_valid;
-logic seq_done;
-logic [7:0] uaddr;
-x87_uop_t uop;
+logic [7:0] entry;          // Numeric microprogram entry selected by exec_op.
+logic [31:0] conditions;    // Registered-state predicates visible to the sequencer.
+logic seq_active;           // Numeric microprogram is executing.
+logic seq_exec_valid;       // Current control-store word may update executor state.
+logic seq_done;             // FINISH pulse, aligned with commit_action.
+logic [7:0] uaddr;          // Current numeric microcode address.
+x87_uop_t uop;              // Current 64-bit horizontal control word.
 
-x87_reg_t result_r;
-logic [63:0] transfer_r;
-logic [67:0] work_r;
-logic [55:0] add_small_r;
-logic [5:0] count_r;
+x87_reg_t result_r;         // Provisional numeric result; never writes stack directly.
+logic [63:0] transfer_r;    // Provisional integer/IEEE store payload.
+logic [67:0] work_r;        // Shared significand, normalization, and rounding lane.
+logic [55:0] add_small_r;   // Exponent-aligned smaller add/sub operand with sticky bit.
+logic [5:0] count_r;        // Shared conversion/alignment/iteration counter.
 logic [5:0] restore_count_r;
 logic guard_r;
 logic round_r;
@@ -87,7 +87,7 @@ logic fild_shift_four;
 logic fist_shift_four;
 logic addsub_shift_four;
 logic work_shift_four;
-logic [105:0] mul_product;
+logic [105:0] mul_product;  // Exact assembled 53-by-53 significand product.
 logic [53:0] mul_p00;
 logic [53:0] mul_p01;
 logic [53:0] mul_p10;
@@ -99,9 +99,9 @@ logic [28:0] mul_limb2_sum;
 logic [26:0] mul_top_sum;
 logic [14:0] mul_exp_r;
 logic mul_result_sign_r;
-logic [52:0] divsqrt_divisor_r;
-logic [57:0] divsqrt_remainder_r;
-logic [55:0] divsqrt_result_bits_r;
+logic [52:0] divsqrt_divisor_r;    // Retained normalized divisor.
+logic [57:0] divsqrt_remainder_r;  // Shared restoring divide/sqrt remainder.
+logic [55:0] divsqrt_result_bits_r;// Quotient or root plus rounding bits.
 logic [53:0] sqrt_source_r;
 logic signed [16:0] divsqrt_exp_r;
 logic divsqrt_result_sign_r;
@@ -113,8 +113,8 @@ logic divsqrt_next_bit;
 logic divsqrt_remainder_nonzero;
 logic [52:0] trans_range_sig_r;
 logic [7:0] trans_count_r;
-logic [120:0] trans_range_remainder_r;
-logic [1:0] trans_quadrant_r;
+logic [120:0] trans_range_remainder_r; // Fixed-point pi/2 range-reduction state.
+logic [1:0] trans_quadrant_r;          // Low quotient bits from range reduction.
 logic trans_cordic_sub_r;
 logic [6:0] trans_atan_address_r;
 logic signed [82:0] trans_atan_value;
@@ -134,8 +134,8 @@ logic [120:0] trans_range_next;
 logic [1:0] trans_quadrant_next;
 logic signed [121:0] trans_reduced_q120;
 logic signed [82:0] trans_reduced_q80;
-logic [3:0] cordic_read_addr_a;
-logic [3:0] cordic_read_addr_b;
+logic [3:0] cordic_read_addr_a;     // First synchronous CORDIC scratch read.
+logic [3:0] cordic_read_addr_b;     // Second synchronous CORDIC scratch read.
 logic [27:0] cordic_read_data_a;
 logic [27:0] cordic_read_data_b;
 logic cordic_write_enable;
@@ -143,10 +143,10 @@ logic [3:0] cordic_write_addr;
 logic [27:0] cordic_write_data;
 logic [3:0] cordic_load_index_r;
 logic [1:0] cordic_limb_r;
-logic [6:0] cordic_iteration_r;
-logic [1:0] cordic_shift_word_r;
-logic [4:0] cordic_shift_bits_r;
-logic cordic_bank_r;
+logic [6:0] cordic_iteration_r;     // Angle-table index and shift distance.
+logic [1:0] cordic_shift_word_r;    // Whole 28-bit limbs in arithmetic shift.
+logic [4:0] cordic_shift_bits_r;    // Residual shift within adjacent limbs.
+logic cordic_bank_r;                // Ping-pong X/Y scratch bank containing current vector.
 logic cordic_carry_r;
 logic [27:0] cordic_lhs_r;
 logic [27:0] cordic_rhs_low_r;

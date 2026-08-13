@@ -6,23 +6,23 @@ module x87_unit #(
     input  logic        clk,
     input  logic        reset_n,
 
-    input  logic        req_valid,
-    input  logic        req_data_port,
-    input  logic        req_write,
+    input  logic        req_valid,          // Paging presents an x87 I/O cycle.
+    input  logic        req_data_port,      // 0=f8 command/status; 1=fc operand data.
+    input  logic        req_write,          // Direction of the CPU-side cycle.
     input  logic [3:0]  req_be,
     input  logic [31:0] req_wdata,
-    output logic        req_accepted,
-    output logic        req_complete,
+    output logic        req_accepted,       // Bridge captured the request.
+    output logic        req_complete,       // Bridge completed the protocol action.
     output logic        req_read_complete,
     output logic [31:0] req_rdata,
 
-    input  logic        direct_launch,
-    input  logic        direct_candidate,
-    input  logic        direct_allowed,
-    input  logic [10:0] direct_fop,
-    output logic        direct_active,
-    output logic        direct_mem_req,
-    output logic        direct_stall,
+    input  logic        direct_launch,      // Instruction issue checks the m32 overlay.
+    input  logic        direct_candidate,   // Recipe is an eligible m32 x87 form.
+    input  logic        direct_allowed,     // CR0 and runtime policy permit x87 use.
+    input  logic [10:0] direct_fop,         // FOP paired with the direct operand.
+    output logic        direct_active,      // One direct transport owns instruction issue.
+    output logic        direct_mem_req,     // Launch fault-checked demand read through paging.
+    output logic        direct_stall,       // Hold retirement until control accepts the operand.
 
     input  logic        mem_accepted,
     input  logic [1:0]  mem_addr_low,
@@ -30,7 +30,7 @@ module x87_unit #(
     input  logic        mem_servicing,
     input  logic [31:0] mem_rdata,
     input  logic [31:0] split_rdata,
-    input  logic        cancel,
+    input  logic        cancel,             // Fault, interrupt, or frontend squash.
 
     output logic        busy_n,
     output logic        pereq,
@@ -38,12 +38,12 @@ module x87_unit #(
     output logic [31:0] debug_state
 );
 
-logic        queue_safe;
-logic        direct_ready;
-logic        direct_issued_r;
-logic        direct_crossing_r;
-logic        direct_data_valid_r;
-logic [31:0] direct_data_r;
+logic        queue_safe;           // Masked-exception mode permits one queued command.
+logic        direct_ready;         // x87_control can capture the direct FOP/data pair.
+logic        direct_issued_r;      // Demand read has crossed the paging handshake.
+logic        direct_crossing_r;    // Dword spans two naturally aligned memory words.
+logic        direct_data_valid_r;  // Complete fault-checked operand is buffered.
+logic [31:0] direct_data_r;        // Buffered direct m32 operand.
 wire         direct_valid = direct_active && direct_data_valid_r;
 wire         direct_release = direct_valid && direct_ready;
 

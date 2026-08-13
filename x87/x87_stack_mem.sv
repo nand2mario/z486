@@ -3,13 +3,13 @@
 module x87_stack_mem (
     input  logic        clk,
 
-    input  logic [2:0]  addr_a,
-    input  logic        write_a,
-    input  logic [79:0] write_data_a,
-    output logic [79:0] read_data_a,
+    input  logic [2:0]  addr_a,        // Physical stack row, already adjusted by TOP.
+    input  logic        write_a,       // Primary stack/commit write port.
+    input  logic [79:0] write_data_a,  // Raw architectural temporary-real value.
+    output logic [79:0] read_data_a,   // Synchronous raw stack result.
 
-    input  logic [2:0]  addr_b,
-    input  logic        write_b,
+    input  logic [2:0]  addr_b,        // Concurrent ST(i) or state-stream row.
+    input  logic        write_b,       // Secondary FXCH/FRSTOR write port.
     input  logic [79:0] write_data_b,
     output logic [79:0] read_data_b
 );

@@ -10,22 +10,22 @@ typedef enum logic [2:0] {
 } x87_flow_t;
 
 typedef struct packed {
-    logic [7:0]  target;
-    logic [2:0]  flow;
-    logic [4:0]  condition;
-    logic [3:0]  alu_route;
-    logic [3:0]  shift_route;
-    logic [3:0]  prepare;
-    logic [3:0]  classify;
-    logic [3:0]  pack;
-    logic [4:0]  engine;
-    logic [3:0]  state;
+    logic [7:0]  target;        // Absolute branch/loop target.
+    logic [2:0]  flow;          // Sequencer action for this word.
+    logic [4:0]  condition;     // Registered predicate selector.
+    logic [3:0]  alu_route;     // Shared add/subtract work route.
+    logic [3:0]  shift_route;   // Work normalization/format shift.
+    logic [3:0]  prepare;       // Operation-specific initial state.
+    logic [3:0]  classify;      // Special-value and range checks.
+    logic [3:0]  pack;          // Provisional result/transfer packer.
+    logic [4:0]  engine;        // Iterative arithmetic phase.
+    logic [3:0]  state;         // Auxiliary exponent/count update.
     logic [1:0]  count;
     logic [1:0]  grs;
-    logic [2:0]  commit;
+    logic [2:0]  commit;        // Retirement action returned with done.
     logic [1:0]  flags;
-    logic [2:0]  scratch_read;
-    logic [2:0]  scratch_write;
+    logic [2:0]  scratch_read;  // CORDIC limb-RAM read route.
+    logic [2:0]  scratch_write; // CORDIC limb-RAM write route.
     logic [3:0]  reserved;
 } x87_uop_t;
 
@@ -78,18 +78,18 @@ typedef enum logic [4:0] {
 } x87_command_action_t;
 
 typedef struct packed {
-    logic                status_pending;
-    logic                arithmetic;
-    logic          [3:0] argument;
-    logic          [1:0] pop_count;
-    logic                reverse_operands;
-    logic                needs_sti;
-    logic                dest_sti;
-    logic                write_result;
-    logic                quiet_compare;
-    logic                compare;
-    x87_exec_op_t         exec_op;
-    x87_command_action_t  action;
+    logic                status_pending; // Command returns architectural status.
+    logic                arithmetic;     // BUSY# follows numeric command lifetime.
+    logic          [3:0] argument;       // Transfer kind, width, or constant selector.
+    logic          [1:0] pop_count;      // Stack entries retired after success.
+    logic                reverse_operands;// Swap ST0 and source arithmetic order.
+    logic                needs_sti;      // Second stack operand must be non-empty.
+    logic                dest_sti;       // Result replaces ST(i), not ST0.
+    logic                write_result;   // Successful arithmetic writes a value.
+    logic                quiet_compare;  // QNaN compare does not raise invalid.
+    logic                compare;        // Result updates C3/C2/C0.
+    x87_exec_op_t         exec_op;        // Numeric executor entry family.
+    x87_command_action_t  action;         // Hardwired control/transfer dispatch.
 } x87_command_decode_t;
 
 `include "x87_entries.svh"

@@ -13,10 +13,10 @@ module x87_control
     input  logic [10:0] cmd_fop,                // Encoded ESC opcode and ModR/M.
     output logic        cmd_ready,              // Core can accept cmd_fop now.
 
-    input  logic        direct_m32_valid,         // Direct path posts a fault-checked m32 operand.
-    input  logic [10:0] direct_m32_fop,           // Memory-form FOP for direct_m32_data.
-    input  logic [31:0] direct_m32_data,          // Operand returned by demand memory.
-    output logic        direct_m32_ready,         // One-entry direct command queue is available.
+    input  logic        direct_m32_valid,       // Direct path posts a fault-checked m32 operand.
+    input  logic [10:0] direct_m32_fop,         // Memory-form FOP for direct_m32_data.
+    input  logic [31:0] direct_m32_data,        // Operand returned by demand memory.
+    output logic        direct_m32_ready,       // One-entry direct command queue is available.
 
     input  logic        word_in_valid,          // Operand-transfer word is valid.
     input  logic  [3:0] word_in_be,             // Valid bytes in word_in_data.
@@ -66,20 +66,20 @@ typedef enum logic [1:0] {
     EXEC_MATH
 } convert_owner_t;
 
-logic [2:0] top;
-logic [15:0] control_word;
-logic [15:0] status_flags;
-logic [10:0] last_fop;
-logic [15:0] tag_word;
-logic        command_pending;
-logic [10:0] command_fop;
-x87_command_decode_t command_decode;
-logic        direct_m32_pending;
+logic [2:0] top;                       // Physical index of architectural ST(0).
+logic [15:0] control_word;             // Exception masks, PC, RC, and infinity control.
+logic [15:0] status_flags;             // Sticky exceptions, condition codes, ES, and B.
+logic [10:0] last_fop;                 // Most recently accepted architectural FOP.
+logic [15:0] tag_word;                 // Two architectural tag bits per physical stack row.
+logic        command_pending;          // Command ROM and stack RAM return next cycle.
+logic [10:0] command_fop;              // FOP retained through dispatch and status policy.
+x87_command_decode_t command_decode;   // Synchronous generated command descriptor.
+logic        direct_m32_pending;       // One direct FOP/data pair waiting for dispatch.
 logic [10:0] direct_m32_fop_r;
 logic [31:0] direct_m32_data_r;
 
-logic [2:0] stack_addr_a;
-logic [2:0] stack_addr_b;
+logic [2:0] stack_addr_a;              // Retained physical stack address for port A.
+logic [2:0] stack_addr_b;              // Retained physical stack address for port B.
 logic [2:0] stack_port_addr_a;
 logic [2:0] stack_port_addr_b;
 logic       stack_write_a;
@@ -91,17 +91,17 @@ logic [79:0] stack_read_raw_b;
 x87_reg_t    stack_read_data_a;
 x87_reg_t    stack_read_data_b;
 
-rx_kind_t rx_kind;
-logic [4:0] rx_index;
-logic [79:0] rx_payload;
-logic [3:0]  rx_byte_count;
-logic [159:0] rx_state_shift;
+rx_kind_t rx_kind;                     // Active CPU-to-x87 transfer format.
+logic [4:0] rx_index;                  // Environment/state stream position.
+logic [79:0] rx_payload;               // Byte-compacted current numeric operand.
+logic [3:0]  rx_byte_count;            // Valid bytes accumulated in rx_payload.
+logic [159:0] rx_state_shift;           // Two raw m80 values during FRSTOR.
 
 logic [1:0] tx_count;
 logic [3:0] tx_last_be;
-tx_kind_t tx_kind;
+tx_kind_t tx_kind;                     // Active x87-to-CPU transfer format.
 logic [4:0] tx_index;
-logic [159:0] tx_state_shift;
+logic [159:0] tx_state_shift;           // Value/state fragments awaiting FIFO production.
 logic         tx_generation_done;
 logic [2:0]   tx_byte_offset;
 logic         transfer_push_valid;
@@ -116,20 +116,20 @@ logic [35:0]  tx_produce_data;
 logic         tx_produce_fire;
 logic         tx_consume_fire;
 logic         status_read_pending;
-logic         command_complete_pulse;
-logic [1:0]   pereq_release_hold;
-logic         push_pending;
+logic         command_complete_pulse;  // Extends terminal PEREQ visibility.
+logic [1:0]   pereq_release_hold;       // Covers later 80386 CORWAIT sampling slots.
+logic         push_pending;            // Serialized architectural stack push.
 logic [79:0]  push_pending_raw;
 logic [1:0]   push_pending_tag;
 x87_reg_t     push_pending_value;
-logic         memory_math_pending;
+logic         memory_math_pending;     // FOP accepted; memory operand not converted yet.
 logic         memory_math_mul;
 logic         memory_math_div;
 logic         memory_math_compare;
 logic         memory_math_subtract;
 logic         memory_math_reverse;
 logic         memory_math_pop;
-logic         store_pending;
+logic         store_pending;           // ST0 conversion/transfer setup is pending.
 logic         store_integer;
 logic [1:0]   store_width;
 logic         store_pop;
@@ -137,17 +137,17 @@ logic         store_source_empty;
 x87_reg_t     store_source;
 logic [79:0]  store_source_raw;
 logic         pop_pending;
-logic         result_write_pending;
+logic         result_write_pending;    // Serialized architectural stack replacement.
 logic [2:0]   result_write_index;
 logic [79:0]  result_write_raw;
-logic                   v2_exec_pending;
-x87_exec_op_t     v2_exec_op;
-convert_owner_t         v2_exec_owner;
+logic                   v2_exec_pending; // Provisional numeric operation awaits start.
+x87_exec_op_t           v2_exec_op;      // Operation selected for x87_executor.
+convert_owner_t         v2_exec_owner;   // Load, store, or arithmetic retirement policy.
 logic             [1:0] v2_exec_size;
 logic            [63:0] v2_exec_transfer;
-logic                   v2_exec_busy;
-logic                   v2_exec_done;
-logic             [2:0] v2_exec_commit;
+logic                   v2_exec_busy;     // Numeric microsequencer is active.
+logic                   v2_exec_done;     // Registered terminal pulse from executor.
+logic             [2:0] v2_exec_commit;   // Provisional action; control applies exceptions.
 x87_reg_t               v2_exec_result;
 x87_reg_t               v2_exec_auxiliary_result;
 logic            [63:0] v2_exec_transfer_out;
@@ -163,7 +163,7 @@ logic                   v2_compare_unordered;
 logic                   v2_compare_less;
 logic                   v2_compare_equal;
 
-logic         arith_compare;
+logic         arith_compare;             // Current math result updates C3/C2/C0 only.
 logic         arith_quiet_compare;
 logic         arith_write_result;
 logic [1:0]   arith_pop_count;
@@ -173,9 +173,9 @@ x87_reg_t     arith_operand_b;
 logic         trans_cosine;
 logic         trans_tangent_pair;
 logic         trans_atan2;
-logic         fptan_trans_pending;
-logic         fptan_div_pending;
-logic         fptan_push_after_result;
+logic         fptan_trans_pending;       // CORDIC tangent pair has not returned.
+logic         fptan_div_pending;         // Shared divide is producing tan = sin/cos.
+logic         fptan_push_after_result;   // Tangent write precedes architectural push 1.0.
 logic   [7:0] v2_exec_uaddr;
 
 wire [15:0] status_word = {status_flags[15:14], top, status_flags[10:0]};

@@ -12,13 +12,13 @@ typedef enum logic [2:0] {
 // Extended exponent range with binary64-class precision. GRS bits are kept
 // separately so conversion and arithmetic can share one eventual rounder.
 typedef struct packed {
-    logic         sign;
-    logic [14:0]  exp;
-    logic [52:0]  sig;
-    logic         guard_bit;
-    logic         round_bit;
-    logic         sticky_bit;
-    x87_class_t   class_id;
+    logic         sign;       // Numeric sign.
+    logic [14:0]  exp;        // Extended-format biased exponent.
+    logic [52:0]  sig;        // Explicit leading bit plus 52 fraction bits.
+    logic         guard_bit;  // First discarded bit.
+    logic         round_bit;  // Second discarded bit.
+    logic         sticky_bit; // OR of all remaining discarded bits.
+    x87_class_t   class_id;   // Registered special-value classification.
 } x87_reg_t;
 
 function automatic x87_reg_t x87_empty();

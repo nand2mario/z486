@@ -3,9 +3,9 @@ module x87_bridge (
     input  logic        clk,
     input  logic        reset,
 
-    input  logic        req_valid,
-    input  logic        req_data_port,
-    input  logic        req_write,
+    input  logic        req_valid,          // Paging presents an x87 I/O cycle.
+    input  logic        req_data_port,      // 0=f8 command/status; 1=fc operand data.
+    input  logic        req_write,          // CPU-to-x87 when set.
     input  logic  [3:0] req_be,
     input  logic [31:0] req_wdata,
     output logic        req_accepted,
@@ -13,16 +13,16 @@ module x87_bridge (
     output logic        req_read_complete,
     output logic [31:0] req_rdata,
 
-    output logic        cmd_valid,
-    output logic [10:0] cmd_fop,
+    output logic        cmd_valid,          // Registered command-stream request.
+    output logic [10:0] cmd_fop,            // ESC opcode plus complete ModR/M FOP.
     input  logic        cmd_ready,
 
-    output logic        word_in_valid,
+    output logic        word_in_valid,      // CPU supplies one operand/state fragment.
     output logic  [3:0] word_in_be,
     output logic [31:0] word_in_data,
     input  logic        word_in_ready,
 
-    output logic        read_req_valid,
+    output logic        read_req_valid,     // CPU requests status or output fragment.
     output logic        read_req_data_port,
     output logic  [3:0] read_req_be,
     input  logic        read_req_ready,
@@ -37,12 +37,12 @@ typedef enum logic [2:0] {
     BR_COMPLETE
 } bridge_state_t;
 
-bridge_state_t state;
-logic          write_r;
-logic          data_port_r;
-logic [3:0]    be_r;
-logic [31:0]   wdata_r;
-logic [31:0]   rdata_r;
+bridge_state_t state;       // One registered CPU request from capture to completion.
+logic          write_r;     // Captured request direction.
+logic          data_port_r; // Captured f8/fc port selector.
+logic [3:0]    be_r;        // Captured byte lanes for partial transfers.
+logic [31:0]   wdata_r;     // Captured CPU write payload.
+logic [31:0]   rdata_r;     // Registered CPU read response.
 
 wire dispatch_ready = write_r ? (data_port_r ? word_in_ready : cmd_ready)
                               : read_req_ready;

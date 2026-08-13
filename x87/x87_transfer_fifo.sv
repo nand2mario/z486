@@ -3,22 +3,22 @@
 module x87_transfer_fifo (
     input  logic        clk,
     input  logic        reset,
-    input  logic        clear,
+    input  logic        clear,       // Abort the current directional transfer.
 
     input  logic        push_valid,
-    input  logic [35:0] push_data,
+    input  logic [35:0] push_data,   // {byte enables, 32-bit transfer word}.
     output logic        push_ready,
 
     output logic        pop_valid,
-    output logic [35:0] pop_data,
+    output logic [35:0] pop_data,    // Oldest byte-qualified transfer word.
     input  logic        pop_ready,
 
     output logic [1:0]  count
 );
 
-logic [35:0] words [0:2];
-logic [1:0] read_ptr;
-logic [1:0] write_ptr;
+logic [35:0] words [0:2]; // One maximum-width 80-bit operand plus byte enables.
+logic [1:0] read_ptr;     // Wraps modulo three.
+logic [1:0] write_ptr;    // Wraps modulo three.
 logic       push_fire;
 logic       pop_fire;
 
