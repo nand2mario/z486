@@ -8,6 +8,9 @@
 `ifdef Z386_INTERNAL_CACHE
 `define DHRY_INTERNAL_CPU_CACHE
 `endif
+`ifdef Z486_INTERNAL_CACHE
+`define DHRY_INTERNAL_CPU_CACHE
+`endif
 
 module tb_dhrystone;
     localparam SEG_ES = 0, SEG_CS = 1, SEG_SS = 2, SEG_DS = 3;
@@ -57,7 +60,11 @@ module tb_dhrystone;
             cpu_speed_sel = cpu_speed_arg[1:0];
     end
 
+`ifdef Z486_CURRENT_CORE
+    z486 dut (
+`else
     z386 dut (
+`endif
         .clk(clk),
         .reset_n(reset_n),
         .addr(read_addr),
@@ -347,10 +354,10 @@ module tb_dhrystone;
 
     string memfile;
 
-    function automatic z386_pkg::seg_desc_t build_seg_desc(
+    function automatic z486_pkg::seg_desc_t build_seg_desc(
         input [31:0] base, input [19:0] limit, input [15:0] flags
     );
-        z386_pkg::seg_desc_t desc;
+        z486_pkg::seg_desc_t desc;
         desc.base       = base;
         desc.limit      = limit;
         desc.seg_type   = flags[15:12];
@@ -362,7 +369,7 @@ module tb_dhrystone;
         desc.A          = flags[5];
 `ifdef Z386_LEGACY_SEG_DESC
         // z386_release keeps these fields redundantly in its descriptor cache.
-        // Current z386x derives them from seg_type instead.
+        // Current z486 derives them from seg_type instead.
         desc.executable = flags[15];
         desc.expand_down= ~flags[15] & flags[14];
         desc.conforming = flags[15] & flags[14];
@@ -426,7 +433,7 @@ module tb_dhrystone;
         force dut.EIP = 32'h0;
 
         begin
-            z386_pkg::seg_desc_t cs_desc;
+            z486_pkg::seg_desc_t cs_desc;
             cs_desc = build_seg_desc(LINEAR_BASE, SEG_LIMIT, DEFAULT_CODE_FLAGS);
             cs_desc.D_B = 1'b1;
             force dut.seg_unit.seg_init_cs = cs_desc;

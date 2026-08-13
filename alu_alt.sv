@@ -2,7 +2,7 @@
 // 80386 ALU variant written to encourage Intel/Altera carry-chain inference.
 //
 module alu_alt
-    import z386_pkg::*;
+    import z486_pkg::*;
 (
     input  [4:0]  op,           // ALUOPC
     input  [31:0] src,
@@ -15,7 +15,7 @@ module alu_alt
     output [31:0] flags_out,
     // 1 when this op updates ZF/SF/PF (see alu.sv)
     output        zsp_update,
-    // v50 timing-first: dedicated pre-assembled Z/S/P for the z386-level
+    // v50 timing-first: dedicated pre-assembled Z/S/P for the z486-level
     // eflags_ahead overlay (see alu.sv) - here tapped from the existing
     // raw_result flag wires (pre output assembly, not f2).
     output [2:0]  zsp_ahead    // {sf, zf, pf}

@@ -1,6 +1,6 @@
 # x87
 
-This directory contains the microcode-driven x87 implementation used by z386x.
+This directory contains the microcode-driven x87 implementation used by z486.
 The older operation-specific implementation has been retired; selected blocks
 remain under `tests/x87_reference` only as differential-test references.
 

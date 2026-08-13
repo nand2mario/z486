@@ -1,7 +1,7 @@
 `timescale 1ns/1ns
 
-// Testbench for z386 - Protected Mode Test Runner Generic testbench for protected mode tests with configurable segment descriptors and...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-tests-tb-protected-mode-sv-3
+// Testbench for z486 - Protected Mode Test Runner Generic testbench for protected mode tests with configurable segment descriptors and...
+// Details: doc/z486/implementation_notes.md#src-24-z486-tests-tb-protected-mode-sv-3
 
 /* verilator lint_off SYNCASYNCNET */
 
@@ -9,7 +9,7 @@ module tb_protected_mode #(
     parameter ENABLE_X87 = 0,
     parameter MEM_SIZE = 1 << 19
 );
-    // Segment cache array indices (from z386_pkg)
+    // Segment cache array indices (from z486_pkg)
     localparam SEG_ES = 0, SEG_CS = 1, SEG_SS = 2, SEG_DS = 3;
     localparam SEG_FS = 4, SEG_GS = 5, SEG_IDT = 6, SEG_TR = 8, SEG_GDT = 10;
     // Clock and reset
@@ -37,8 +37,8 @@ module tb_protected_mode #(
     wire        inta;
     wire        triple_fault_reset;
 
-    // Instantiate the z386 CPU
-    z386 #(
+    // Instantiate the z486 CPU
+    z486 #(
         .ENABLE_X87(ENABLE_X87)
     ) dut (
         .clk(clk),
@@ -440,10 +440,10 @@ module tb_protected_mode #(
     // Build seg_desc_t from flags
     // flags[15:12] = type, flags[11] = S, flags[10:9] = DPL, flags[8] = P,
     // flags[7] = D_B, flags[6] = G, flags[5] = A
-    function automatic z386_pkg::seg_desc_t build_seg_desc(
+    function automatic z486_pkg::seg_desc_t build_seg_desc(
         input [31:0] base, input [19:0] limit, input [15:0] flags
     );
-        z386_pkg::seg_desc_t desc;
+        z486_pkg::seg_desc_t desc;
         desc.base       = base;
         desc.limit      = limit;
         desc.seg_type   = flags[15:12];

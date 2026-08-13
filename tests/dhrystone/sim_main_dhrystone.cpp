@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
         tfp->close();
         delete tfp;
     }
-    top->final();   // run SV `final` blocks (e.g. z386x dead-slot breakdown)
+    top->final();   // run SV `final` blocks (e.g. z486 dead-slot breakdown)
     delete top;
     return 0;
 }

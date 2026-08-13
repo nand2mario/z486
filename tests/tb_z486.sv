@@ -1,14 +1,14 @@
 `timescale 1ns/1ns
 
 //
-// Testbench for z386 - Single Instruction Test Runner
+// Testbench for z486 - Single Instruction Test Runner
 // Based on z8086/tests/tb_z8086.sv but adapted for 32-bit
 //
 
-module tb_z386 #(
+module tb_z486 #(
     parameter ENABLE_X87 = 0
 );
-    // Segment cache array indices (from z386_pkg)
+    // Segment cache array indices (from z486_pkg)
     localparam SEG_ES = 0, SEG_CS = 1, SEG_SS = 2, SEG_DS = 3;
     localparam SEG_FS = 4, SEG_GS = 5, SEG_IDT = 6, SEG_TR = 8, SEG_GDT = 10;
 
@@ -37,8 +37,8 @@ module tb_z386 #(
     reg         nmi = 0;
     wire        inta;
 
-    // Instantiate the z386 CPU
-    z386 #(
+    // Instantiate the z486 CPU
+    z486 #(
         .ENABLE_X87(ENABLE_X87)
     ) dut (
         .clk(clk),
@@ -179,10 +179,10 @@ module tb_z386 #(
     // Build seg_desc_t from flags (same as tb_protected_mode.sv)
     // flags[15:12] = type, flags[11] = S, flags[10:9] = DPL, flags[8] = P,
     // flags[7] = D_B, flags[6] = G, flags[5] = A
-    function automatic z386_pkg::seg_desc_t build_seg_desc(
+    function automatic z486_pkg::seg_desc_t build_seg_desc(
         input [31:0] base, input [19:0] limit, input [15:0] flags
     );
-        z386_pkg::seg_desc_t desc;
+        z486_pkg::seg_desc_t desc;
         desc.base       = base;
         desc.limit      = limit;
         desc.seg_type   = flags[15:12];
@@ -196,7 +196,7 @@ module tb_z386 #(
     endfunction
 
     // Extract flags back from seg_desc_t (for readout)
-    function automatic [15:0] extract_seg_flags(input z386_pkg::seg_desc_t desc);
+    function automatic [15:0] extract_seg_flags(input z486_pkg::seg_desc_t desc);
         extract_seg_flags = {desc.seg_type, desc.S, desc.DPL, desc.P, desc.D_B, desc.G, desc.A, 5'b0};
     endfunction
 
@@ -374,16 +374,16 @@ module tb_z386 #(
         end else begin
             // Real mode: initialize segment caches from selector values
             begin
-                z386_pkg::seg_desc_t cs_desc;
-                cs_desc = z386_pkg::seg_desc_real_mode_code(cs_arg[15:0]);
+                z486_pkg::seg_desc_t cs_desc;
+                cs_desc = z486_pkg::seg_desc_real_mode_code(cs_arg[15:0]);
                 cs_desc.D_B = d_arg[0];
                 force dut.seg_unit.seg_init_cs = cs_desc;
             end
-            force dut.seg_unit.seg_init_ds = z386_pkg::seg_desc_real_mode(ds_arg[15:0]);
-            force dut.seg_unit.seg_init_es = z386_pkg::seg_desc_real_mode(es_arg[15:0]);
-            force dut.seg_unit.seg_init_ss = z386_pkg::seg_desc_real_mode(ss_arg[15:0]);
-            force dut.seg_unit.seg_init_fs = z386_pkg::seg_desc_real_mode(fs_arg[15:0]);
-            force dut.seg_unit.seg_init_gs = z386_pkg::seg_desc_real_mode(gs_arg[15:0]);
+            force dut.seg_unit.seg_init_ds = z486_pkg::seg_desc_real_mode(ds_arg[15:0]);
+            force dut.seg_unit.seg_init_es = z486_pkg::seg_desc_real_mode(es_arg[15:0]);
+            force dut.seg_unit.seg_init_ss = z486_pkg::seg_desc_real_mode(ss_arg[15:0]);
+            force dut.seg_unit.seg_init_fs = z486_pkg::seg_desc_real_mode(fs_arg[15:0]);
+            force dut.seg_unit.seg_init_gs = z486_pkg::seg_desc_real_mode(gs_arg[15:0]);
             // In real mode: physical address = (CS << 4) + IP
             force dut.prefetch_inst.pf_fetch_addr = (cs_arg << 4) + ip_arg;
         end
@@ -561,7 +561,7 @@ module tb_z386 #(
         end
     end
 
-    // Waveform dump initial begin if ($test$plusargs("trace")) begin $dumpfile("trace.vcd"); $dumpvars(0, tb_z386); end end
-    // Details: doc/z386x/implementation_notes.md#src-24-z386x-tests-tb-z386-sv-553
+    // Waveform dump initial begin if ($test$plusargs("trace")) begin $dumpfile("trace.vcd"); $dumpvars(0, tb_z486); end end
+    // Details: doc/z486/implementation_notes.md#src-24-z486-tests-tb-z486-sv-553
 
 endmodule

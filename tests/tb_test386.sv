@@ -1,7 +1,7 @@
 `timescale 1ns/1ns
 
 //
-// Testbench for z386 - test386.asm Program Test Runner
+// Testbench for z486 - test386.asm Program Test Runner
 // Runs the comprehensive test386 CPU test program
 //
 
@@ -29,8 +29,8 @@ module tb_test386;
     reg         nmi = 0;
     wire        inta;
 
-    // Instantiate the z386 CPU
-    z386 dut (
+    // Instantiate the z486 CPU
+    z486 dut (
         .clk(clk),
         .reset_n(reset_n),
         .addr(addr),

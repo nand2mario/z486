@@ -1,7 +1,7 @@
 // Owns the architectural address registers and their relocated linear form.
 // D2 supplies an effective address; segmentation supplies the active base/mask.
 module address_unit
-    import z386_pkg::*;
+    import z486_pkg::*;
 (
     input  logic        clk,
     input  logic        reset_n,

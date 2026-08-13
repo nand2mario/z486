@@ -1,5 +1,5 @@
 // Read-only physically indexed, physically tagged L1 instruction cache. CPU-side contract: * cpu_addr is a physical byte address. * A...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-l1-icache-sv-1
+// Details: doc/z486/implementation_notes.md#src-24-z486-l1-icache-sv-1
 module l1_icache #(
     parameter integer SET_BITS = 8   // 16KB icache (256 sets x 4 ways x 16 B); =7 was 8KB
 ) (
@@ -499,7 +499,7 @@ always_ff @(posedge clk) begin
                         line_r <= fill_line_next;
                         resp_valid_r <= 1'b1;
                         // Only write_cache_tag (above) sets valid for fill_way. Do NOT restore the other ways' valid bits from the fill-START snapshot: a snoop...
-                        // Details: doc/z386x/implementation_notes.md#src-24-z386x-l1-icache-sv-491
+                        // Details: doc/z486/implementation_notes.md#src-24-z486-l1-icache-sv-491
                         plru_set[fill_set] <= plru_update(fill_plru_r, fill_way);
                         state <= S_IDLE;
                         ready_r <= 1'b1;

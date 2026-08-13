@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Single-Step Test Runner for z386 (Real-Mode)
+Single-Step Test Runner for z486 (Real-Mode)
 
 Runs MOO format test files from SingleStepTests/v1_ex_real_mode directory.
-Tests the z386 CPU implementation against real 386EX hardware captures.
+Tests the z486 CPU implementation against real 386EX hardware captures.
 
 The 80386 opcode map can be found here:
 https://pdos.csail.mit.edu/6.828/2014/readings/i386/appa.htm
@@ -20,7 +20,7 @@ import os
 # Paths
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / 'tests'
-TB = Path(os.environ.get('Z386_TESTBENCH', TESTS / 'obj_dir' / 'Vtb_z386'))
+TB = Path(os.environ.get('Z486_TESTBENCH', TESTS / 'obj_dir' / 'Vtb_z486'))
 TEST_DIR = TESTS / 'singlestep_real' / 'v1_ex_real_mode'
 
 VERBOSE = False
@@ -186,11 +186,11 @@ def decode_cpu_state(mv, offset, length, cpu_name):
 
 def build_if_needed():
     """Build the testbench via make (handles dependency checking)."""
-    if os.environ.get('Z386_TESTBENCH'):
+    if os.environ.get('Z486_TESTBENCH'):
         if not TB.exists():
             raise SystemExit(f"Requested testbench does not exist: {TB}")
         return
-    sp.check_call(['make', '-s', 'obj_dir/Vtb_z386'], cwd=str(TESTS))
+    sp.check_call(['make', '-s', 'obj_dir/Vtb_z486'], cwd=str(TESTS))
 
 
 def write_memhex(ram_pairs):

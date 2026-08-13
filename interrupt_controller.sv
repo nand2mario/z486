@@ -1,6 +1,6 @@
 // Architectural interrupt latches and the STI/MOV-SS interrupt shadow.
 module interrupt_controller
-    import z386_pkg::*;
+    import z486_pkg::*;
 (
     input  logic       clk,
     input  logic       reset_n,

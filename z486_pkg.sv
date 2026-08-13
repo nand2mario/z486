@@ -1,11 +1,11 @@
 // 80386 Package - shared types and constants
-package z386_pkg;
+package z486_pkg;
 
 //=============================================================================
 // Decoded Instruction Entry Type
 //=============================================================================
 
-// z386x FAST-path class descriptor. V52 derives it from the registered
+// z486 FAST-path class descriptor. V52 derives it from the registered
 // microcode entry point instead of carrying these 16 bits in every decoded
 // instruction queue entry.
 typedef struct packed {
@@ -260,8 +260,8 @@ typedef enum logic [2:0] {
     PREFIX_GS    = 3'b110
 } prefix_seg_t;
 
-// z386x FAST-path classification (doc/z386x/design.md)
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-z386-pkg-sv-118
+// z486 FAST-path classification (doc/z486/design.md)
+// Details: doc/z486/implementation_notes.md#src-24-z486-z486-pkg-sv-118
 
 
 function automatic fast_class_t dec_fast_class(input dec_entry_t e);
@@ -323,7 +323,7 @@ function automatic fast_class_t dec_fast_class(input dec_entry_t e);
                 r.keep_slot = 1'b1; r.uses_ea = 1'b1;
             end else if (!e.opcode[2] && e.has_modrm) begin
                 // Memory forms: only the read-only shapes are FAST. ALU r,m (d=1, groups 0-6): 027 RD/DLY/OPR_R->TMPB/ALU+RNI CMP r,m / CMP m,r (group...
-                // Details: doc/z386x/implementation_notes.md#src-24-z386x-z386-pkg-sv-182
+                // Details: doc/z486/implementation_notes.md#src-24-z486-z486-pkg-sv-182
                 if (e.opcode[1]) begin
                     r.fast = 1'b1; r.multi_word = 1'b1; r.uses_ea = 1'b1;
                     r.commit_sel = (grp != 3'b111) ? FAST_COMMIT_ALU : FAST_COMMIT_NONE;
@@ -333,7 +333,7 @@ function automatic fast_class_t dec_fast_class(input dec_entry_t e);
                     r.writes_flags = 1'b1;
                 end else begin
                     // ALU m,r RMW (d=0, groups 0-6): M5 F-RMW retimed ucode 04A RD / 04B DLY+JMP / 04C ALU(OPR_R,SRCREG) / 046 SIGMA->OPR_W+WR+RNI / 047 DLY....
-                    // Details: doc/z386x/implementation_notes.md#src-24-z386x-z386-pkg-sv-196
+                    // Details: doc/z486/implementation_notes.md#src-24-z486-z486-pkg-sv-196
                     r.fast = 1'b1; r.multi_word = 1'b1; r.uses_ea = 1'b1;
                     r.keep_slot = 1'b1; r.writes_flags = 1'b1;
                 end
@@ -344,7 +344,7 @@ function automatic fast_class_t dec_fast_class(input dec_entry_t e);
             r.writes_flags = 1'b1;
         end else if (e.opcode[7:4] == 4'h7) begin
             // 70-7F Jcc rel8: not-taken flow is 065 JNcond -> 066 RNi(+PREF suppressed) - chainJ fires at 065 on the settled condition. Taken flow...
-            // Details: doc/z386x/implementation_notes.md#src-24-z386x-z386-pkg-sv-213
+            // Details: doc/z486/implementation_notes.md#src-24-z486-z486-pkg-sv-213
             r.fast = 1'b1; r.jcc = 1'b1; r.multi_word = 1'b1;
             r.reads_flags = 1'b1; r.br_rel = 1'b1;
         end else if (e.opcode[7:3] == 5'b01010) begin
@@ -480,7 +480,7 @@ function automatic fast_class_t dec_fast_class(input dec_entry_t e);
                      && (e.modrm[5:3] != 3'b010) && (e.modrm[5:3] != 3'b011)
                      && (e.modrm[5:3] != 3'b110)) begin
             // C0/C1 shift r,imm; D0/D1 shift r,1; D2/D3 shift r,CL - two-word routines (0F9/0FF): SHIFT1 count capture, then SHIFT2 with RNI; the...
-            // Details: doc/z386x/implementation_notes.md#src-24-z386x-z386-pkg-sv-349
+            // Details: doc/z486/implementation_notes.md#src-24-z486-z486-pkg-sv-349
             r.fast = 1'b1; r.multi_word = 1'b1; r.commit_sel = FAST_COMMIT_SHIFT;
             r.reads_dst = 1'b1; r.writes_flags = 1'b1;
             r.reads_ecx = e.opcode[1] && (e.opcode[7:2] == 6'b110100); // D2/D3 r,CL
@@ -489,7 +489,7 @@ function automatic fast_class_t dec_fast_class(input dec_entry_t e);
     dec_fast_class = r;
 endfunction
 
-// EA register decode helpers (moved from z386.sv; shared with the decoder).
+// EA register decode helpers (moved from z486.sv; shared with the decoder).
 
 function automatic [7:0] decode_base_register_32(input [7:0] modrm_byte, input [7:0] sib_byte, input has_sib);
     reg [1:0] mod;
@@ -583,7 +583,7 @@ function automatic [15:0] dec_ea_onehots(input dec_entry_t e);
 endfunction
 
 // Segment Descriptor Cache
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-z386-pkg-sv-457
+// Details: doc/z486/implementation_notes.md#src-24-z486-z486-pkg-sv-457
 
 // Segment register indices
 localparam [3:0] SEG_ES  = 4'd0;
@@ -998,8 +998,8 @@ localparam ALUSRC_IMM = 6'h09;        // Full immediate
 localparam ALUSRC_TMPB = 6'h0B;
 localparam ALUSRC_TMPC = 6'h0C;
 localparam ALUSRC_TMPD = 6'h0D;
-// z386x extension (M5 F-ALUM): OPR_R as an ALU source. 0x0F is unused as a consumed ALU source in the base CROM (only 880/88E carry it,...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-z386-pkg-sv-857
+// z486 extension (M5 F-ALUM): OPR_R as an ALU source. 0x0F is unused as a consumed ALU source in the base CROM (only 880/88E carry it,...
+// Details: doc/z486/implementation_notes.md#src-24-z486-z486-pkg-sv-857
 localparam ALUSRC_OPR_R = 6'h0F;
 localparam ALUSRC_ALLONES = 6'h10;    // 0xFFFFFFFF mask
 localparam ALUSRC_TMPG = 6'h12;
@@ -1014,7 +1014,7 @@ localparam ALUSRC_CONST_F0000 = 6'h1B; // 0xF0000
 localparam ALUSRC_CONST_0D = 6'h1C;    // 0x0D (13)
 localparam ALUSRC_CONST_5D = 6'h1D;    // 0x5D (93)
 // The immutable ROM uses 1e for both the historical f8 coprocessor port and
-// z386x's SIGMA path. ucode_rom supplies q_fpu_f8 to distinguish them.
+// z486's SIGMA path. ucode_rom supplies q_fpu_f8 to distinguish them.
 localparam ALUSRC_SIGMA = 6'h1E;
 localparam ALUSRC_CONST_FC = 6'h1F;    // 0x800000fc (FPU port address)
 localparam ALUSRC_CONST_70 = 6'h20;    // 0x70
@@ -1484,7 +1484,7 @@ localparam PF_W = 1;      // 0=read, 1=write
 localparam PF_U = 2;      // 0=supervisor, 1=user
 
 // Protection Unit (PLA4) Test Constants
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-z386-pkg-sv-1339
+// Details: doc/z486/implementation_notes.md#src-24-z486-z486-pkg-sv-1339
 
 // Selector validation tests (PLA4 test constants 0x00-0x0F)
 localparam logic [5:0] TST_SEL_NONSS    = 6'h00;  // Non-stack segment selector (DS/ES/FS/GS)
@@ -1560,7 +1560,7 @@ localparam logic [11:0] PROT_STACK_FAULT        = 12'h863;  // Stack Fault (#SS)
 localparam logic [11:0] PROT_SEGMENT_NOT_PRESENT= 12'h871;  // Segment Not Present (#NP)
 localparam logic [11:0] PROT_GATE_HANDLER       = 12'h5B3;  // Gate handler (not a fault)
 
-// Segment selection helpers (used by both z386.sv encoder and segmentation_unit)
+// Segment selection helpers (used by both z486.sv encoder and segmentation_unit)
 
 // Determine default segment based on ModR/M and SIB addressing mode
 function automatic [3:0] calc_default_seg_type(

@@ -1,7 +1,7 @@
 // Integer Data Unit. Owns integer register state, source/destination selection,
 // arithmetic engines, and architectural/microcode flags.
 module data_unit
-    import z386_pkg::*;
+    import z486_pkg::*;
 (
     input  logic        clk,
     input  logic        reset_n,
@@ -994,7 +994,7 @@ end
 // Arithmetic engines
 //=============================================================================
 
-`ifdef Z386_ALTERA_ALU
+`ifdef Z486_ALTERA_ALU
 alu_alt alu_inst (
 `else
 alu alu_inst (

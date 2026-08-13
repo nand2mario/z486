@@ -5,7 +5,7 @@
 `timescale 1ns/1ns
 
 module paging_walker
-    import z386_pkg::*;
+    import z486_pkg::*;
 (
     input               clk,
     input               reset_n,

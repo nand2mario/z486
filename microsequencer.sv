@@ -1,7 +1,7 @@
 // Microcode ROM pipeline and control-flow state. Producers retain their
 // timing-critical target generation; this unit owns final address arbitration.
 module microsequencer
-    import z386_pkg::*;
+    import z486_pkg::*;
 (
     input  logic        clk,
     input  logic        reset_n,

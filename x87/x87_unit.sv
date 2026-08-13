@@ -1,5 +1,5 @@
 // CPU-facing x87 adapter. It owns the 386-compatible port bridge and the FAST
-// m32 demand-read transport; paging/cache arbitration remains in z386.
+// m32 demand-read transport; paging/cache arbitration remains in z486.
 module x87_unit #(
     parameter ENABLE_X87 = 0
 )(

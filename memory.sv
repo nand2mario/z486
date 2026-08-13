@@ -1,4 +1,4 @@
-// z386x cache and external-memory fabric.
+// z486 cache and external-memory fabric.
 // Owns both L1 caches, A20 masking, refill arbitration, and response tracking.
 module memory #(
     parameter PROTECT_UMA_ROM = 0,

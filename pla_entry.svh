@@ -1,5 +1,5 @@
 // Generated opcode-to-microcode-entry PLA from doc/microcode/decoder23.txt.
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-pla-entry-svh-1
+// Details: doc/z486/implementation_notes.md#src-24-z486-pla-entry-svh-1
 function automatic logic [15:0] pla_entry_lookup(
     input [12:0] addr_in
 );
@@ -549,7 +549,7 @@ function automatic logic [15:0] pla_entry_lookup(
 endfunction
 
 // Generated second-level group PLA; do not edit by hand.
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-pla-entry-svh-561
+// Details: doc/z486/implementation_notes.md#src-24-z486-pla-entry-svh-561
 function automatic logic [5:0] pla_group_lookup(
     input [10:0] addr_in
 );

@@ -1,9 +1,9 @@
 // TLB (Translation Lookaside Buffer) for 80386 Paging Unit 32-entry 4-way set-associative cache with PLRU replacement per set 8 sets × 4...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-paging-tlb-sv-1
+// Details: doc/z486/implementation_notes.md#src-24-z486-paging-tlb-sv-1
 `timescale 1ns/1ns
 
 module paging_tlb
-    import z386_pkg::*;
+    import z486_pkg::*;
 (
     input               clk,
     input               reset_n,
@@ -44,7 +44,7 @@ tlb_entry_t tlb [7:0][3:0];
 reg vga_mem [7:0][3:0];
 
 // PLRU bits per set: 3 bits each for 4-way replacement [B0] B0: 0=left subtree, 1=right subtree / \ [B1] [B2] B1: 0=way0, 1=way1 / \ / \...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-paging-tlb-sv-50
+// Details: doc/z486/implementation_notes.md#src-24-z486-paging-tlb-sv-50
 reg [2:0] plru [7:0];
 
 localparam bit TRACE_PAGING_EN = 1'b0;
@@ -73,8 +73,8 @@ wire [1:0] hit_way = hit0 ? 2'd0 :
                      hit2 ? 2'd2 :
                      hit3 ? 2'd3 : 2'd0;
 
-// Live demand lookup address decomposition. linear_addr_live (z386 paging_live_linear) is a very high-fanout net: its set bits drive the...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-paging-tlb-sv-77
+// Live demand lookup address decomposition. linear_addr_live (z486 paging_live_linear) is a very high-fanout net: its set bits drive the...
+// Details: doc/z486/implementation_notes.md#src-24-z486-paging-tlb-sv-77
 (* keep *) wire [31:0] lal_w0 = linear_addr_live;
 (* keep *) wire [31:0] lal_w1 = linear_addr_live;
 (* keep *) wire [31:0] lal_w2 = linear_addr_live;
@@ -185,7 +185,7 @@ wire [2:0]  update_set = update_vpn[2:0];
 wire [2:0]  update_plru = plru[update_set];
 
 // If the VPN is already present in the set, update that way in place. Blind PLRU allocation creates duplicate entries, and the hit...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-paging-tlb-sv-187
+// Details: doc/z486/implementation_notes.md#src-24-z486-paging-tlb-sv-187
 wire [16:0] update_tag = update_vpn[19:3];
 wire match0 = tlb[update_set][0].valid && (tlb[update_set][0].tag == update_tag);
 wire match1 = tlb[update_set][1].valid && (tlb[update_set][1].tag == update_tag);

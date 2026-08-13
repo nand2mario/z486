@@ -1,7 +1,7 @@
 // Microcode ROM with predecode. The physical ROM stores a 37-bit native microcode word plus a 3-bit v52 D2 early kind. Execution still...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-ucode-rom-sv-1
+// Details: doc/z486/implementation_notes.md#src-24-z486-ucode-rom-sv-1
 module ucode_rom
-    import z386_pkg::*;
+    import z486_pkg::*;
 #(
     parameter INIT_HEX = "ucode.hex"
 ) (
@@ -33,7 +33,7 @@ reg [2:0] q_dly_source_r;
 (* preserve *) reg [8:0] q_mem_ctrl_r;
 reg q_fpu_f8_r;
 
-// ALU source 1e is the historical 0x800000f8 coprocessor command port. z386x
+// ALU source 1e is the historical 0x800000f8 coprocessor command port. z486
 // also reuses that encoding for SIGMA in non-FPU words, so keep the distinction
 // as a compact ROM-delay sideband rather than restoring a wide ALU mux input.
 function automatic logic fpu_f8_predecode(input [36:0] w);
@@ -180,7 +180,7 @@ function automatic [8:0] mem_ctrl_predecode(input [36:0] w);
     end
 endfunction
 
-`ifdef Z386_QUARTUS_M10K_UCODE
+`ifdef Z486_QUARTUS_M10K_UCODE
 wire [39:0] q_mem;
 reg  [50:0] q_r;
 
@@ -229,7 +229,7 @@ assign q = q_r;
 assign q_early = {ucode_predecode(q_mem[36:0]), q_mem[36:0]};
 assign q_kind_early = q_mem[39:37];
 `else
-`ifdef Z386_QUARTUS_LOGIC_UCODE
+`ifdef Z486_QUARTUS_LOGIC_UCODE
 (* ramstyle = "logic" *) reg [39:0] microcode_rom [0:2559];
 `else
 (* ram_style = "block" *) reg [39:0] microcode_rom [0:2559] /* synthesis syn_ramstyle = "block_ram" */;

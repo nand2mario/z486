@@ -1,7 +1,7 @@
-// Z386 Instruction Decoder
+// Z486 Instruction Decoder
 
 module decoder
-    import z386_pkg::*;
+    import z486_pkg::*;
 (
     input               clk,
     input               reset_n,

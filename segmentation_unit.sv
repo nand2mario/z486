@@ -1,7 +1,7 @@
-// Segmentation Unit for z386 This contains: - Descriptor Cache array (ES/CS/SS/DS/FS/GS/IDT/TR/LDT/GDT) - Segment selection and address...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-segmentation-unit-sv-1
+// Segmentation Unit for z486 This contains: - Descriptor Cache array (ES/CS/SS/DS/FS/GS/IDT/TR/LDT/GDT) - Segment selection and address...
+// Details: doc/z486/implementation_notes.md#src-24-z486-segmentation-unit-sv-1
 module segmentation_unit
-    import z386_pkg::*;
+    import z486_pkg::*;
 (
     input              clk,
     input              reset_n,
@@ -30,7 +30,7 @@ module segmentation_unit
     output     [31:0]  llim_result,        // LLIM combinational readback (keyed by seg_target)
     output     [31:0]  lbas_result,        // LBAS combinational readback (keyed by seg_target)
 
-    // Segment state (set by commands, used by address translation and z386)
+    // Segment state (set by commands, used by address translation and z486)
     output reg [3:0]   seg_sel,            // Active segment for memory ops
     output reg         seg_is_io,          // seg_sel == SEG_IO, mirrored at every seg_sel write
                                            // (keeps the 4-bit compare out of the stall/uc_exec cone)
@@ -49,7 +49,7 @@ module segmentation_unit
     input              is_write,           // Write operation (needs writable check)
 
     output     [31:0]  seg_base_pending,   // Next seg_base_r (this cycle's pending base),
-                                           // so z386 can pre-register linear_address = base+IND
+                                           // so z486 can pre-register linear_address = base+IND
     output             eff_mask_pending,   // Next (addr_size || is_dtable): 0 => mask offset to 16b
     output             seg_fault,          // Segment limit/protection fault
     output             is_stack_fault      // Fault is on SS (→ #SS not #GP)
@@ -122,7 +122,7 @@ wire [31:0] GS_base = desc_cache[SEG_GS].base;
 wire [31:0] eff_offset = (addr_size || is_dtable) ? offset : {16'h0, offset[15:0]};
 
 // Pending base: the value seg_base_r will hold next cycle. Mirrors exactly the seg_base_r next-state in the always_ff below (same...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-segmentation-unit-sv-83
+// Details: doc/z486/implementation_notes.md#src-24-z486-segmentation-unit-sv-83
 reg [31:0] seg_base_pending_c;
 reg        addr_size_pending_c;
 reg        is_dtable_pending_c;
@@ -253,7 +253,7 @@ function automatic [3:0] effective_target(input [3:0] target);
     effective_target = (target == SEG_NONE) ? desc_write_seg : target;
 endfunction
 
-// LAR/LLIM/LBAS: z386 routes these to IND in same cycle
+// LAR/LLIM/LBAS: z486 routes these to IND in same cycle
 seg_desc_t lar_desc;
 wire [7:0] lar_ar_byte = {lar_desc.P, lar_desc.DPL, lar_desc.S, lar_desc.seg_type};
 assign lar_desc = desc_for(seg_target);
@@ -468,7 +468,7 @@ always_ff @(posedge clk) begin
         i_stack_op_r <= 1'b0;
     end else if (seg_cmd_valid) begin
         // seg_base_r / addr_size / is_dtable next-state is computed ONCE in the always_comb above (seg_base_pending_c / addr_size_pending_c /...
-        // Details: doc/z386x/implementation_notes.md#src-24-z386x-segmentation-unit-sv-384
+        // Details: doc/z486/implementation_notes.md#src-24-z486-segmentation-unit-sv-384
         seg_base_r <= seg_base_pending_c;
         addr_size  <= addr_size_pending_c;
         is_dtable  <= is_dtable_pending_c;

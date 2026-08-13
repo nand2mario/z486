@@ -1,5 +1,5 @@
 // Generate and exhaustively verify the mode-correct BRAM image for pla_entry_lookup.
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-scripts-gen-pla-entry-rom-sv-1
+// Details: doc/z486/implementation_notes.md#src-24-z486-scripts-gen-pla-entry-rom-sv-1
 module gen_pla_entry_rom;
 `include "pla_entry.svh"
     localparam int N = 1024;            // 2^10 = {opcode, prefix_rep, prefix_0f}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and run the freestanding Dhrystone benchmark on z386 revisions."""
+"""Compare the released z386 and current z486 cores with Dhrystone."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from pathlib import Path
 THIS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = THIS_DIR.parents[2]
 DEFAULT_Z386_RELEASE_DIR = REPO_ROOT / "z386_MiSTer/src/z386"
-DEFAULT_Z386_CURRENT_DIR = THIS_DIR.parents[1]  # the core dir containing this tests/ tree (24.z386x)
+DEFAULT_Z486_CURRENT_DIR = THIS_DIR.parents[1]  # core containing this tests/ tree
 DEFAULT_Z386_CACHE = REPO_ROOT / "z386_MiSTer/src/memory/l1_cache.sv"
 BUILD_DIR = THIS_DIR / "build"
 BIN_FILE = BUILD_DIR / "dhrystone.bin"
@@ -25,10 +25,8 @@ CODE_PHYS_BASE = 0x00010000
 LINEAR_BASE = 0x00010000
 PAGE_COUNT = 16
 
-COMMON_RTL = [
-    "z386_pkg.sv",
+BASE_RTL = [
     "ucode_rom.sv",
-    "z386.sv",
     "alu.sv",
     "paging_unit.sv",
     "paging_tlb.sv",
@@ -38,8 +36,9 @@ COMMON_RTL = [
     "segmentation_unit.sv",
 ]
 
-CORE_RTL = {
-    "z386": ["decoder.sv", "prefetch.sv"],
+CORE_FILES = {
+    "z386_release": ("z386_pkg.sv", "z386.sv"),
+    "z486_current": ("z486_pkg.sv", "z486.sv"),
 }
 
 X87_RTL = [
@@ -160,11 +159,15 @@ def build_memory_image() -> None:
 
 
 def rtl_sources(core: str, core_dir: Path) -> list[Path]:
-    names = COMMON_RTL.copy()
-    names += CORE_RTL[core]
+    package_name, top_name = CORE_FILES[core]
+    names = [package_name, *BASE_RTL, "decoder.sv", "prefetch.sv", top_name]
     for optional_name in (
         "cpu_throttle.sv",
         "interrupt_controller.sv",
+        "microsequencer.sv",
+        "fast_issue.sv",
+        "data_unit.sv",
+        "address_unit.sv",
         "shifter.sv",
         "mul_div.sv",
         "biu.sv",
@@ -175,14 +178,14 @@ def rtl_sources(core: str, core_dir: Path) -> list[Path]:
     x87_dir = core_dir / "x87"
     legacy_x87_dir = core_dir / "x87_v1"
     if (x87_dir / "x87_pkg.sv").exists():
-        # Packages must precede z386.sv; implementation modules may follow.
+        # Packages must precede the CPU top; implementation modules may follow.
         sources.insert(1, x87_dir / "x87_pkg.sv")
         sources.insert(2, x87_dir / "x87_ucode_pkg.sv")
         sources.extend(x87_dir / name for name in X87_RTL)
         if (x87_dir / "x87_unit.sv").exists():
             sources.append(x87_dir / "x87_unit.sv")
     elif (legacy_x87_dir / "x87_pkg.sv").exists():
-        # The package must precede z386.sv; implementation modules may follow.
+        # The package must precede the CPU top; implementation modules may follow.
         sources.insert(1, legacy_x87_dir / "x87_pkg.sv")
         sources.extend(legacy_x87_dir / name for name in LEGACY_X87_RTL)
     elif (core_dir / "x87_pkg.sv").exists():
@@ -260,11 +263,16 @@ def build_core(
 
     sources = [
         THIS_DIR / "tb_dhrystone.sv",
-        *rtl_sources("z386", core_dir),
+        *rtl_sources(label, core_dir),
         THIS_DIR / "sim_main_dhrystone.cpp",
     ]
     if (core_dir / "l1_cache.sv").exists():
-        cmd.insert(cmd.index("--top-module"), "+define+Z386_INTERNAL_CACHE")
+        cache_define = (
+            "+define+Z486_INTERNAL_CACHE"
+            if label == "z486_current"
+            else "+define+Z386_INTERNAL_CACHE"
+        )
+        cmd.insert(cmd.index("--top-module"), cache_define)
     else:
         cache_src = DEFAULT_Z386_CACHE.resolve()
         if not cache_src.exists():
@@ -272,6 +280,8 @@ def build_core(
         sources.append(cache_src)
     if label == "z386_release":
         cmd.insert(cmd.index("--top-module"), "+define+Z386_LEGACY_SEG_DESC")
+    else:
+        cmd.insert(cmd.index("--top-module"), "+define+Z486_CURRENT_CORE")
     cmd.extend(str(path) for path in sources)
     run_checked(cmd, cwd=core_build_dir, verbose=verbose)
     return exe
@@ -349,14 +359,14 @@ def print_results(iters: int, results: list[RunResult]) -> None:
         print(f"{result.core:<12} | {status:<7} | {cycles:>7} | {instructions:>7} | {cpi:>5}")
 
     by_core = {result.core: result for result in results}
-    if "z386_release" in by_core and "z386_current" in by_core:
+    if "z386_release" in by_core and "z486_current" in by_core:
         z386_release = by_core["z386_release"]
-        z386_current = by_core["z386_current"]
-        if z386_release.cycles and z386_current.cycles:
+        z486_current = by_core["z486_current"]
+        if z386_release.cycles and z486_current.cycles:
             print()
             print(
-                "z386 current cycle speedup vs release: "
-                f"{z386_release.cycles / z386_current.cycles:.3f}x"
+                "z486 cycle speedup vs released z386: "
+                f"{z386_release.cycles / z486_current.cycles:.3f}x"
             )
 
 
@@ -370,8 +380,8 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=120, help="host timeout in seconds")
     parser.add_argument(
         "--core",
-        choices=("both", "z386_release", "z386_current"),
-        default="z386_current",
+        choices=("both", "z386_release", "z486_current"),
+        default="z486_current",
         help="core revision(s) to run",
     )
     parser.add_argument(
@@ -381,10 +391,12 @@ def main() -> int:
         help="released z386 core source directory",
     )
     parser.add_argument(
+        "--z486-current-dir",
         "--z386-current-dir",
+        dest="z486_current_dir",
         type=Path,
-        default=DEFAULT_Z386_CURRENT_DIR,
-        help="current z386 core source directory",
+        default=DEFAULT_Z486_CURRENT_DIR,
+        help="current z486 core source directory",
     )
     parser.add_argument("--no-build", action="store_true", help="reuse existing Dhrystone binary")
     parser.add_argument("--no-build-cores", action="store_true", help="reuse existing Verilator core binaries")
@@ -417,10 +429,10 @@ def main() -> int:
         build_benchmark_binary(args.iters, verbose=args.verbose)
     build_memory_image()
 
-    cores = ["z386_release", "z386_current"] if args.core == "both" else [args.core]
+    cores = ["z386_release", "z486_current"] if args.core == "both" else [args.core]
     core_dirs = {
         "z386_release": args.z386_release_dir,
-        "z386_current": args.z386_current_dir,
+        "z486_current": args.z486_current_dir,
     }
 
     exes: dict[str, Path] = {}

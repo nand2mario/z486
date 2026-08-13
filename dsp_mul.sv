@@ -1,5 +1,5 @@
 // DSP-Based 32x32 Multiplier
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-dsp-mul-sv-1
+// Details: doc/z486/implementation_notes.md#src-24-z486-dsp-mul-sv-1
 module dsp_mul (
     input               clk,
     input               reset_n,
@@ -13,7 +13,7 @@ module dsp_mul (
     input        [31:0] multiplicand,   // MULTMP
     input        [31:0] multiplier,     // TMPB
 
-    // Result - positioned for z386 compatibility
+    // Result - positioned for z486 compatibility
     output reg   [63:0] product,        // Full 64-bit result
     output              done,           // Result valid for this cycle
     output reg          active          // Multiplication in progress (only for 32-bit)

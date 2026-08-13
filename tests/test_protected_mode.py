@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Protected Mode Test Runner for z386
+Protected Mode Test Runner for z486
 
 Runs assembly tests in protected mode with configurable segment descriptors
 and paging. Tests report results via I/O ports.
@@ -24,7 +24,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 TESTS_DIR = SCRIPT_DIR / "programs"
 VERILATOR_EXE = Path(os.environ.get(
-    "Z386_TESTBENCH", SCRIPT_DIR / "obj_dir/Vtb_protected_mode"
+    "Z486_TESTBENCH", SCRIPT_DIR / "obj_dir/Vtb_protected_mode"
 ))
 
 # I/O port results
@@ -175,7 +175,7 @@ TESTS = load_tests(TESTS_DIR)
 
 def build_testbench(verbose=False):
     """Build or refresh the protected-mode Verilator testbench."""
-    if os.environ.get("Z386_TESTBENCH"):
+    if os.environ.get("Z486_TESTBENCH"):
         if VERILATOR_EXE.exists():
             print(f"Using protected-mode testbench: {VERILATOR_EXE}")
             return True
@@ -418,7 +418,7 @@ def run_test(test_name, verbose=False, trace=False, keep_files=False, cycles=20_
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Run z386 protected mode tests',
+        description='Run z486 protected mode tests',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
@@ -455,14 +455,14 @@ Examples:
 
     # Determine tests to run
     tests_to_run = args.tests if args.tests else list(TESTS.keys())
-    if os.environ.get("Z386_ENABLE_X87") != "1":
+    if os.environ.get("Z486_ENABLE_X87") != "1":
         requested_x87 = [name for name in tests_to_run
                          if TESTS[name].get("requires_x87", False)]
         if args.tests and requested_x87:
             print("Error: x87 test(s) require the x87-enabled testbench: "
                   + ", ".join(requested_x87))
-            print("Run `make test-x87-integration` or set Z386_ENABLE_X87=1 "
-                  "and Z386_TESTBENCH to obj_dir_x87/Vtb_protected_mode.")
+            print("Run `make test-x87-integration` or set Z486_ENABLE_X87=1 "
+                  "and Z486_TESTBENCH to obj_dir_x87/Vtb_protected_mode.")
             return 1
         tests_to_run = [name for name in tests_to_run
                         if not TESTS[name].get("requires_x87", False)]

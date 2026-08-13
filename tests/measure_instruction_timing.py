@@ -84,7 +84,7 @@ STEADY_PHASES = [
     SteadyPhase("shift_reg_imm", "shr eax, 4", 3.0, (0x1905, 0x1908, 0x190B, 0x190E, 0x1911, 0x1914, 0x1917, 0x191A)),
     SteadyPhase("alu_reg_imm", "cmp ebx, imm32", 2.0, (0x1A05, 0x1A0B, 0x1A11, 0x1A17, 0x1A1D, 0x1A23, 0x1A29, 0x1A2F)),
     # rep movsb of REP_COUNT(64) bytes + 3-mov ESI/EDI/ECX reset per copy.
-    # 80386 ref ~ 5 + 4*count; 64B ~= 261.  z386 currently ~333 (~5.2 cyc/byte).
+    # 80386 ref ~ 5 + 4*count; 64B ~= 261.  z486 currently ~333 (~5.2 cyc/byte).
     SteadyPhase("rep_movsb", "rep movsb (64B)", 261.0, (0x1B10, 0x1B21, 0x1B32, 0x1B43, 0x1B54, 0x1B65, 0x1B76, 0x1B87)),
     SteadyPhase("alu_mem_rmw", "add [edi], eax", 7.0, (0x1C10, 0x1C12, 0x1C14, 0x1C16, 0x1C18, 0x1C1A, 0x1C1C, 0x1C1E)),
     SteadyPhase("shld_reg_imm", "shld r32, r32, 8", 3.0, (0x1D1E, 0x1D22, 0x1D26, 0x1D2A, 0x1D2E, 0x1D32, 0x1D36, 0x1D3A)),
@@ -98,8 +98,8 @@ BRANCH_PHASES = [
 ]
 
 
-# Best-case z386 0.4 baseline (= 21.z386 / 24.z386x M0), measured 20260705
-# (doc/z386x/m0.md).  Constants so the script shows progress vs the pre-FAST
+# Best-case z386 0.4 baseline (= 21.z386 / 24.z486 M0), measured 20260705
+# (doc/z486/m0.md).  Constants so the script shows progress vs the pre-FAST
 # starting point.
 Z386_04_MIN_CYCLES = {
     "load": 3.0,
@@ -134,7 +134,7 @@ Z386_04_MIN_CYCLES = {
     "call_taken": 7.0,
 }
 
-# 80486 targets: the 24.z386x design goals (doc/z386x/ideas.md table) plus
+# 80486 targets: the 24.z486 design goals (doc/z486/ideas.md table) plus
 # published i486 cycle counts where the design table is silent.
 TARGET_486_CYCLES = {
     "load": 1.0,
@@ -233,7 +233,7 @@ def apply_changes(
     i_first_id = ids["i_first"]
     eip_value = parse_bit_value(state.get(eip_id, ""))
     # One event per instruction start. Normally that is an i_first rising
-    # edge, but z386x FAST->FAST chains keep i_first high across consecutive
+    # edge, but z486 FAST->FAST chains keep i_first high across consecutive
     # instructions — there, each instruction start shows as an EIP change
     # while i_first stays 1 (EIP advances at every chained i_pop).
     i_first_rise = (
@@ -345,7 +345,7 @@ def format_table_row(columns: list[str], widths: list[int]) -> str:
 
 
 def print_comparison_table(results: list[PhaseResult], color_enabled: bool) -> None:
-    headers = ["Instruction class", "80386 target", "80486 target", "z386 0.4", "z386 current"]
+    headers = ["Instruction class", "80386 target", "80486 target", "z386 0.4", "z486 current"]
     rows: list[list[str]] = []
 
     for result in results:

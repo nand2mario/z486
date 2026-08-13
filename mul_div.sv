@@ -1,7 +1,7 @@
 // Microcode-driven integer multiply/divide unit. It owns the DSP multiplier,
 // private product/quotient state, and one non-restoring divide iteration.
 module mul_div
-    import z386_pkg::*;
+    import z486_pkg::*;
 (
     input  logic        clk,
     input  logic        reset_n,

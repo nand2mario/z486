@@ -1,5 +1,5 @@
-// Physically indexed, physically tagged L1 cache for z386 0.3. CPU-side contract: * cpu_addr is a physical byte address. * A cache-hit...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-l1-cache-sv-1
+// Physically indexed, physically tagged L1 cache for z486. CPU-side contract: * cpu_addr is a physical byte address. * A cache-hit...
+// Details: doc/z486/implementation_notes.md#src-24-z486-l1-cache-sv-1
 module l1_cache #(
     // Four ways, 16 bytes per line. SET_BITS=8 gives a 16KB data cache
     // (256 sets x 4 ways x 16 B); =7 was 8KB.
@@ -270,7 +270,7 @@ assign cpu_dout = lookup_read_hit_now ? lookup_forward_data : dout_r;
 assign cpu_resp_valid = lookup_read_hit_now || resp_valid_r;
 
 // Store-queue drain issue, decoupled from the FSM: drains may launch while the FSM is accepting or patching, so back-to-back writes are...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-l1-cache-sv-280
+// Details: doc/z486/implementation_notes.md#src-24-z486-l1-cache-sv-280
 // Uncacheable reads cannot bypass posted stores.  Besides preserving normal
 // memory ordering, VGA reads depend on all earlier planar writes being visible.
 // Keep draining while such a read waits, then reserve the memory port once the
@@ -283,10 +283,10 @@ wire drain_issue_now = !storeq_empty && !storeq_draining && !mem_valid_r &&
                        !mem_busy && !drain_block_state;
 
 // Coalesce a store (enqueued during its S_LOOKUP cycle, from registered request state) into the most recent queue entry when it targets...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-l1-cache-sv-292
+// Details: doc/z486/implementation_notes.md#src-24-z486-l1-cache-sv-292
 wire [STOREQ_IDX_BITS-1:0] storeq_prev = storeq_prev_idx(storeq_head);
 // TIMING: no drain_issue_now here. Its !mem_busy / drain_block_state / lookup_hit legs carried the TLB-and-arbiter cone into every...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-l1-cache-sv-298
+// Details: doc/z486/implementation_notes.md#src-24-z486-l1-cache-sv-298
 wire storeq_merge_lookup = !storeq_empty && storeq_valid[storeq_prev] &&
                            (storeq_addr[storeq_prev] == req_addr_r[31:2]) &&
                            !req_uncacheable_r &&

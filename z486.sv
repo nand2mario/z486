@@ -1,4 +1,4 @@
-// z386x - An x86 core with the original 386 microcode and some 486-style pipelining 
+// z486 - An x86 core with the original 386 microcode and 486-style pipelining
 //
 // nand2mario, July 2026
 //
@@ -14,8 +14,8 @@
 //   9. Address and Data Units (EA, ALU, register file, shifter, flags)
 //  10. x87 Coprocessor
 
-module z386
-    import z386_pkg::*;
+module z486
+    import z486_pkg::*;
 #(
     parameter PROTECT_UMA_ROM = 0,
     parameter DCACHE_SET_BITS = 8,   // dcache size: 8 = 16KB, 7 = 8KB
@@ -182,7 +182,7 @@ wire       q_flush;                 // Flush queue (branch/jump) - combinational
 wire       pe_mode_toggle_now;      // CR0.PE changed this cycle: re-decode next bytes in new mode
 wire       uc_ctl_pref;             // Previous-cycle predecode: current uop is BUSOP_PREF
 
-// The live compare read dest_value[0] -- doc/z386x/core_notes_v51.md #1
+// The live compare read dest_value[0] -- doc/z486/core_notes_v51.md #1
 wire cr0_wr_bit0 = (uc_source == SRC_MDTMP) ? muldiv_result[0] :
                    (uc_source == SRC_SIGMA) ? SIGMA[0]  : 1'b0;
 assign pe_mode_toggle_now = uc_exec && (uc_dest == DEST_CR0) && (cr0_wr_bit0 != CR0[0]);
@@ -333,7 +333,7 @@ reg        stack_init_pending;      // Cycle after i_pop for a stack operation
 wire       prot_test_inflight;      // Protection test is waiting for a result
 wire [31:0] COUNTR;                 // Data Unit counter register
 
-// z386x FAST path (doc/z386x/design.md): a FAST instruction completes in its
+// z486 FAST path (doc/z486/design.md): a FAST instruction completes in its
 // entry microcode word; hardware commits the result in that same cycle, so the
 // RNI delay slot carries no work and its (stale) ROM word must not execute.
 fast_exec_state_t fast_state;       // current instruction's FAST execution state
@@ -555,7 +555,7 @@ prefetch prefetch_inst (
     .pf_suspend(page_fault),
     .halt_speculative(decq_has_jmp_call),
 
-    // z386x speculative branch-target line
+    // z486 speculative branch-target line
     .spec_req(pf_spec_req),
     .spec_linear(spec_target_lin),
     .spec_owner(pf_spec_owner_r),
@@ -564,7 +564,7 @@ prefetch prefetch_inst (
     .spec_global_kill(pf_spec_global_kill)
 );
 
-// z386x speculative branch-target fetch
+// z486 speculative branch-target fetch
 wire        spec_br_rel8   = !i_bus.has_0f && (i_bus.opcode[7:4] == 4'h7 || i_bus.opcode == 8'hEB);
 wire [31:0] spec_disp      = spec_br_rel8 ? {{24{i_bus.displacement[7]}}, i_bus.displacement[7:0]}
                                           : i_bus.displacement;
@@ -697,7 +697,7 @@ endfunction
 ea_dec_t ea_dec_cur;    // queue head (i_entry latch source, chain2 target)
 assign ea_dec_cur = ea_decode_of(i_bus);
 
-// z386x chain-INTO memory/LEA (EA reg-match): the target's i_p
+// z486 chain-INTO memory/LEA (EA reg-match): the target's i_p
 ea_dec_t fast_ea_dec2;  // chain1 target = the entry behind the head
 assign fast_ea_dec2 = ea_decode_of(i_bus2);
 
@@ -824,7 +824,7 @@ always_ff @(posedge clk) begin
         early_kind_probe_r <= d2_kind;
 end
 
-// z386x: at a chained PUSH's RNI cycle, SIGMA holds the post-push ESP
+// z486: at a chained PUSH's RNI cycle, SIGMA holds the post-push ESP
 // (precomputed at its i_pop) - the minimal ESP tracker. push;push chains
 // read it here for their own i_pop precompute and stack addressing.
 wire        fast_esp_fwd = fast_last && (fast_state.commit_sel == FAST_COMMIT_ESP);
@@ -1554,7 +1554,7 @@ wire        br_is_rel8     = !i.has_0f && (i.opcode[7:4] == 4'b0111 || i.opcode 
 wire [31:0] br_disp        = br_is_rel8 ? {{24{i.displacement[7]}}, i.displacement[7:0]}
                                         : i.displacement;
 wire [31:0] br_target      = EIP + br_disp;
-`ifdef Z386_DEBUG_BRANCH_TARGET
+`ifdef Z486_DEBUG_BRANCH_TARGET
 // synthesis translate_off
 always @(posedge clk) begin
     // Validate the microcode-PREF flush path
@@ -2085,7 +2085,7 @@ always_ff @(posedge clk) begin
     end else if (branch_ustep_redirect) begin
         EIP <= ea_reg;
     end else if (i_pop && !halted /*&& (~uc_active || i_rni_delay)*/) begin
-        // z386x: a chained i_pop can land on a control transfer's fina -- doc/z386x/core_notes_v51.md #25
+        // z486: a chained i_pop can land on a control transfer's fina -- doc/z486/core_notes_v51.md #25
         if (uc_exec && fast_last && (uc_dest == DEST_eIP)) begin
             automatic logic [31:0] tgt = is_dword
                                        ? eip_source_value
@@ -2099,7 +2099,7 @@ always_ff @(posedge clk) begin
         else
             EIP <= {16'h0, EIP[15:0] + {11'b0, i_bus.length}};
     end else if (uc_exec && (uc_dest == DEST_EIP || uc_dest == DEST_eIP || uc_dest == DEST_IP)) begin
-        // Microcode destination write to EIP -- doc/z386x/core_notes_v51.md #26
+        // Microcode destination write to EIP -- doc/z486/core_notes_v51.md #26
         if (uc_dest == DEST_EIP) begin
             if (D)
                 EIP <= eip_source_value;
@@ -2526,7 +2526,7 @@ data_unit data_unit_inst (
     .div_overflow(div_overflow)
 );
 
-// Debug tap (read by tb_z386 hierarchically; not used in the core).
+// Debug tap (read by tb_z486 hierarchically; not used in the core).
 wire use_shifter_result = (uc_aluop == ALUJMP_SHIFT2) || (uc_aluop == ALUJMP_SHIFT);
 
 

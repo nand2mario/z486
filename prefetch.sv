@@ -1,8 +1,8 @@
-// Prefetch Unit - 32-byte circular buffer, filled one 16-byte cache line at a time M2v2 two-cursor read protocol (doc/z386x/m2v2.md): *...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-prefetch-sv-1
+// Prefetch Unit - 32-byte circular buffer, filled one 16-byte cache line at a time M2v2 two-cursor read protocol (doc/z486/m2v2.md): *...
+// Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-1
 
 module prefetch
-    import z386_pkg::*;
+    import z486_pkg::*;
 (
     input             clk,
     input             reset_n,
@@ -41,8 +41,8 @@ module prefetch
     input             pf_suspend,    // external suspend (e.g. page fault handler active)
     input             halt_speculative, // decode queue holds a taken JMP/CALL: stop fetching past it
 
-    // z386x speculative branch-target line (doc/z386x/m4.md). spec_req at a relative branch's i_pop latches the target line address; the...
-    // Details: doc/z386x/implementation_notes.md#src-24-z386x-prefetch-sv-54
+    // z486 speculative branch-target line (doc/z486/m4.md). spec_req at a relative branch's i_pop latches the target line address; the...
+    // Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-54
     input             spec_req,
     input      [31:0] spec_linear,
     input             spec_owner,    // the currently-executing instruction is the
@@ -74,7 +74,7 @@ reg        pf_drop_inflight;         // Drop next prefetch result (flush during 
 reg [31:0] pf_fetch_addr;            // Next LINEAR cache-line address to prefetch
 
 // Speculative branch-target line buffer. spec_addr is the line address of the OUTSTANDING or BUFFERED fetch and only updates at launch; a...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-prefetch-sv-87
+// Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-87
 reg         spec_pend;               // latched request waiting for the port
 reg  [31:0] spec_pend_addr;          // requested target (full: line + in-line offset)
 reg  [31:4] spec_addr;               // line address of the in-flight/buffered fetch
@@ -161,16 +161,16 @@ assign ifetch_fault_code = pf_fault_code_r;
 assign ifetch_fault_addr = pf_fault_addr_r;
 
 // Spec fetch launch: takes priority over sequential prefetch for the shared port; never launches during a flush or while a request is...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-prefetch-sv-165
+// Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-165
 wire spec_match_now = spec_req && spec_valid && !spec_poison && !spec_inflight &&
                       (spec_addr == spec_linear[31:4]);
 wire spec_want   = ((spec_req && !spec_match_now) || spec_pend);
 // !pf_redirect_queued/!pf_drop_inflight: the queued-redirect handshake makes pf_inflight look idle (req toggled back to ack) while the...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-prefetch-sv-178
+// Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-178
 wire spec_launch = spec_want && !pf_inflight && !q_flush && !pf_suspend &&
                    !pf_redirect_queued && !pf_drop_inflight;
 // Flush-time spec outcomes (evaluated during q_flush): Hit decision is OWNERSHIP, not an address compare: the flushing branch is the same...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-prefetch-sv-185
+// Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-185
 wire spec_line_match   = spec_valid && !spec_poison && spec_owner;
 wire spec_adopt        = spec_inflight && !spec_poison && !pf_ack_edge && spec_owner;
 wire spec_data_now     = spec_inflight && !spec_poison && pf_ack_edge && !pf_fault &&
@@ -324,7 +324,7 @@ end
 // synthesis translate_on
 
 // D1 window: registered from the queue's NEXT state at the NEXT cursor, so the decoder always sees the byte rotate of the new cursor...
-// Details: doc/z386x/implementation_notes.md#src-24-z386x-prefetch-sv-342
+// Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-342
 wire [31:0] d1_word_cur_next = queue_next[ptr_idx(d1_word_next)];
 wire [31:0] d1_word_nxt_next = queue_next[ptr_idx(d1_word_next + 4'd1)];
 wire [31:0] d1_word_2nd_next = queue_next[ptr_idx(d1_word_next + 4'd2)];
@@ -397,7 +397,7 @@ always_ff @(posedge clk or negedge reset_n) begin
                 pf_fetch_word_start <= 2'd0;
                 pf_linear_addr <= {pf_flush_addr[31:4], 4'b0000} + 32'd16;
                 // A sequential prefetch may still be in flight down the OLD path: its fill would land on top of the freshly seeded queue (at the...
-                // Details: doc/z386x/implementation_notes.md#src-24-z386x-prefetch-sv-403
+                // Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-403
                 if (pf_inflight && !pf_ack_edge && !spec_inflight) begin
                     pf_drop_inflight <= 1'b1;
                     pf_redirect_queued <= 1'b1;
@@ -417,11 +417,11 @@ always_ff @(posedge clk or negedge reset_n) begin
             end
             spec_pend <= 1'b0;
             // spec_valid deliberately SURVIVES the flush: the buffered line's data is linear-tagged and stays correct (CR3/CR0 changes and...
-            // Details: doc/z386x/implementation_notes.md#src-24-z386x-prefetch-sv-428
+            // Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-428
             if (spec_adopt || (spec_inflight && pf_ack_edge))
                 spec_inflight <= 1'b0;
             // Track the adopted fill so its arriving line is ALSO captured into the buffer (spec_addr/spec_off still hold the target): otherwise a...
-            // Details: doc/z386x/implementation_notes.md#src-24-z386x-prefetch-sv-438
+            // Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-438
             spec_adopted_r <= spec_adopt;
             if (spec_data_now) begin
                 // Ack in the flush cycle itself: seed consumed it; buffer too.
@@ -477,7 +477,7 @@ always_ff @(posedge clk or negedge reset_n) begin
         end
 
         // Latch a spec request; a newer request replaces an older PENDING one but never the address of a fetch already in flight. Ownership-based...
-        // Details: doc/z386x/implementation_notes.md#src-24-z386x-prefetch-sv-489
+        // Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-489
         if (spec_req && !q_flush) begin
             if (spec_match_now) begin
                 // Buffered line already holds this target: re-own, no refetch.
@@ -497,7 +497,7 @@ always_ff @(posedge clk or negedge reset_n) begin
         if (spec_kill) begin
             spec_valid <= 1'b0;
             // Also cancel a pending adopted-fill capture: after an adopting flush spec_inflight is already clear (no poison path), but the arriving...
-            // Details: doc/z386x/implementation_notes.md#src-24-z386x-prefetch-sv-512
+            // Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-512
             spec_adopted_r <= 1'b0;
             if (spec_inflight)
                 spec_poison <= 1'b1;
@@ -526,7 +526,7 @@ always_ff @(posedge clk or negedge reset_n) begin
                 pf_linear_addr <= pf_fetch_addr + 32'd16;
             end else begin
                 // Testbenches seed pf_fetch_addr directly to CS.base+EIP. If that initial address is in the middle of a cache line, derive the queue...
-                // Details: doc/z386x/implementation_notes.md#src-24-z386x-prefetch-sv-545
+                // Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-545
                 pf_linear_addr <= {pf_fetch_addr[31:4], 4'b0000};
                 if (q_empty && pf_fetch_addr[3:0] != 4'h0) begin
                     pf_fetch_word_start <= pf_fetch_addr[3:2];

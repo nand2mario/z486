@@ -1,7 +1,7 @@
 // FAST instruction classification, chaining, hazard checks, and bounded
 // branch-uStep control. Chain decisions remain combinational into the ROM.
 module fast_issue
-    import z386_pkg::*;
+    import z486_pkg::*;
 (
     input  logic        clk,
     input  logic        reset_n,
@@ -66,7 +66,7 @@ logic jcc_pop_valid_r;
 logic fast_off = 1'b0;
 
 // synthesis translate_off
-initial if ($test$plusargs("z386x_fast_off")) fast_off = 1'b1;
+initial if ($test$plusargs("z486_fast_off")) fast_off = 1'b1;
 // synthesis translate_on
 
 assign pop_class = recipe_fast_class(pop_instr);
@@ -273,7 +273,7 @@ always @(posedge clk) begin
     end
 end
 final if (ds_total > 0)
-    $display("z386x dead-slot breakdown: total=%0d empty=%0d seq=%0d flags=%0d ea=%0d memc=%0d intr=%0d other1w=%0d other=%0d keepslot=%0d",
+    $display("z486 dead-slot breakdown: total=%0d empty=%0d seq=%0d flags=%0d ea=%0d memc=%0d intr=%0d other1w=%0d other=%0d keepslot=%0d",
              ds_total, ds_empty, ds_seq, ds_flags, ds_ea, ds_memc, ds_intr,
              ds_other_1w, ds_other, ds_keepslot);
 // synthesis translate_on

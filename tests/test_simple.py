@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Single-Instruction Test Runner for z386
+Single-Instruction Test Runner for z486
 
 Runs "386" single-instruction test set for 32-bit 80386 instructions.
 Based on z8086/tests/test8088.py but adapted for 32-bit architecture.
@@ -16,7 +16,7 @@ import os
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / 'tests'
-TB = Path(os.environ.get('Z386_TESTBENCH', TESTS / 'obj_dir' / 'Vtb_z386'))
+TB = Path(os.environ.get('Z486_TESTBENCH', TESTS / 'obj_dir' / 'Vtb_z486'))
 TEST_DIR = TESTS / 'simple'
 VERBOSE = False
 
@@ -74,19 +74,19 @@ OPCODE_NAMES = [
 
 def build_if_needed():
     """Build the testbench if it doesn't exist or source files have changed."""
-    if os.environ.get('Z386_TESTBENCH'):
+    if os.environ.get('Z486_TESTBENCH'):
         if not TB.exists():
             raise SystemExit(f"Requested testbench does not exist: {TB}")
         return
 
     # Source files to check (matching Makefile)
     source_files = [
-        ROOT / 'z386_pkg.sv',
-        ROOT / 'z386.sv',
+        ROOT / 'z486_pkg.sv',
+        ROOT / 'z486.sv',
         ROOT / 'decoder.sv',
         ROOT / 'alu.sv',
         ROOT / 'segmentation.sv',
-        TESTS / 'tb_z386.sv',
+        TESTS / 'tb_z486.sv',
         TESTS / 'sim_main.cpp',
         # Include header files
         ROOT / 'pla_entry.svh',
@@ -230,7 +230,7 @@ def run_case(case):
 
 def main():
     global VERBOSE
-    ap = argparse.ArgumentParser(description='Run 80386 instruction tests on z386 core')
+    ap = argparse.ArgumentParser(description='Run 80386 instruction tests on z486 core')
     ap.add_argument('--file', '-f', help='Run only this JSON test file (basename or path)')
     ap.add_argument('--idx', '-i', type=int, help='Run only this case index within the JSON file')
     ap.add_argument('--limit', '-n', type=int, default=10, help='Max cases per file (default: 10)')

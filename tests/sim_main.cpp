@@ -1,5 +1,5 @@
-// Simple Verilator C++ wrapper for z386 testbench
-#include "Vtb_z386.h"
+// Simple Verilator C++ wrapper for z486 testbench
+#include "Vtb_z486.h"
 #include "verilated.h"
 #include "verilated_vcd_c.h"
 #include <iostream>
@@ -8,7 +8,7 @@ int main(int argc, char **argv) {
     auto contextp = new VerilatedContext;
     contextp->commandArgs(argc, argv);
 
-    Vtb_z386 *tb = new Vtb_z386{contextp};
+    Vtb_z486 *tb = new Vtb_z486{contextp};
     VerilatedVcdC *tfp = nullptr;
 
     // Enable tracing unless +notrace is specified

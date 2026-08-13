@@ -1,8 +1,8 @@
-# z386 Dhrystone revision comparison
+# z386/z486 Dhrystone comparison
 
 This directory contains a freestanding Dhrystone 2.1 build for the
 local protected-mode Verilator harness. It can build and run both the
-released `z386` core and the current `24.z386x` core side-by-side.
+released `z386` core and the current `24.z486` core side-by-side.
 
 The imported Dhrystone sources are `dhry.h`, `dhry_1.c`, and `dhry_2.c`.
 They are based on the public Dhrystone 2.1 C sources from the SiFive
@@ -14,7 +14,7 @@ They are based on the public Dhrystone 2.1 C sources from the SiFive
   validation, and testbench I/O markers.
 * `support.c` provides the small C library subset needed by the benchmark.
 
-Build both core simulators and run from `21.z386/tests`:
+Build both core simulators and run from `24.z486/tests`:
 
 ```sh
 make dhrystone
@@ -37,7 +37,7 @@ SDRAM-like timing model so CPI is closer to the board memory path. Use
 `--mem-model simple` for the old fast behavioral memory when only checking
 functionality.
 
-By default the runner builds and runs the local `24.z386x` core. To compare a
+By default the runner builds and runs the local `24.z486` core. To compare a
 386-faithful release tree explicitly, use:
 
 ```bash
@@ -48,10 +48,10 @@ The source-directory defaults are:
 
 ```text
 z386_release -> ../../../z386_MiSTer/src/z386
-z386_current -> ../..
+z486_current -> ../..
 ```
 
-Override them with `--z386-release-dir` and `--z386-current-dir` when comparing
+Override them with `--z386-release-dir` and `--z486-current-dir` when comparing
 different trees. The Verilator binaries and memory image are kept under
 `dhrystone/build/`, with separate build directories for each core.
 

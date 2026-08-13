@@ -1,16 +1,16 @@
-# Makefile for z386 Testing
+# Makefile for z486 testing
 #
-# Builds and runs single-instruction tests for the z386 core
+# Builds and runs single-instruction tests for the z486 core
 
 # Paths
-Z386_DIR := ..
+Z486_DIR := ..
 VERILATOR := verilator
 
 # Source files
 # Note: muldiv.sv and bus_prefetch.sv are standalone modules that can optionally
-# replace the inline mul/div and bus/prefetch code in z386.sv.
-# Currently z386.sv uses inline code; uncomment modules below when integrating.
-X87_DIR := $(Z386_DIR)/x87
+# replace the inline mul/div and bus/prefetch code in z486.sv.
+# Currently z486.sv uses inline code; uncomment modules below when integrating.
+X87_DIR := $(Z486_DIR)/x87
 X87_REF_DIR := x87_reference
 X87_UCODE_GEN := $(X87_DIR)/x87_ucode.svh \
 			$(X87_DIR)/x87_ucode.mif \
@@ -32,22 +32,22 @@ X87_RTL := $(X87_DIR)/x87_pkg.sv \
 			$(X87_DIR)/x87_control.sv \
 			$(X87_DIR)/x87_unit.sv
 
-RTL_SRCS := $(Z386_DIR)/z386_pkg.sv $(X87_DIR)/x87_pkg.sv \
-			$(X87_DIR)/x87_ucode_pkg.sv $(Z386_DIR)/z386.sv \
-			$(Z386_DIR)/cpu_throttle.sv $(Z386_DIR)/interrupt_controller.sv \
-			$(Z386_DIR)/ucode_rom.sv $(Z386_DIR)/microsequencer.sv $(Z386_DIR)/fast_issue.sv \
-			$(Z386_DIR)/data_unit.sv $(Z386_DIR)/address_unit.sv \
-			$(Z386_DIR)/shifter.sv $(Z386_DIR)/mul_div.sv \
-			$(Z386_DIR)/decoder.sv \
-			$(Z386_DIR)/alu.sv $(Z386_DIR)/prefetch.sv \
-			$(Z386_DIR)/paging_unit.sv $(Z386_DIR)/paging_tlb.sv $(Z386_DIR)/paging_walker.sv \
-			$(Z386_DIR)/memory.sv $(Z386_DIR)/l1_cache.sv $(Z386_DIR)/l1_icache.sv \
+RTL_SRCS := $(Z486_DIR)/z486_pkg.sv $(X87_DIR)/x87_pkg.sv \
+			$(X87_DIR)/x87_ucode_pkg.sv $(Z486_DIR)/z486.sv \
+			$(Z486_DIR)/cpu_throttle.sv $(Z486_DIR)/interrupt_controller.sv \
+			$(Z486_DIR)/ucode_rom.sv $(Z486_DIR)/microsequencer.sv $(Z486_DIR)/fast_issue.sv \
+			$(Z486_DIR)/data_unit.sv $(Z486_DIR)/address_unit.sv \
+			$(Z486_DIR)/shifter.sv $(Z486_DIR)/mul_div.sv \
+			$(Z486_DIR)/decoder.sv \
+			$(Z486_DIR)/alu.sv $(Z486_DIR)/prefetch.sv \
+			$(Z486_DIR)/paging_unit.sv $(Z486_DIR)/paging_tlb.sv $(Z486_DIR)/paging_walker.sv \
+			$(Z486_DIR)/memory.sv $(Z486_DIR)/l1_cache.sv $(Z486_DIR)/l1_icache.sv \
 			$(filter-out $(X87_DIR)/x87_pkg.sv $(X87_DIR)/x87_ucode_pkg.sv,$(X87_RTL)) \
-			$(Z386_DIR)/dsp_mul.sv $(Z386_DIR)/protection.sv $(Z386_DIR)/segmentation_unit.sv
-RTL_DEPS := $(Z386_DIR)/ucode_recipes.svh $(X87_GEN)
+			$(Z486_DIR)/dsp_mul.sv $(Z486_DIR)/protection.sv $(Z486_DIR)/segmentation_unit.sv
+RTL_DEPS := $(Z486_DIR)/ucode_recipes.svh $(X87_GEN)
 # Optional modules (not yet integrated):
-# RTL_SRCS += $(Z386_DIR)/muldiv.sv $(Z386_DIR)/bus_prefetch.sv
-TB_SRCS := tb_z386.sv
+# RTL_SRCS += $(Z486_DIR)/muldiv.sv $(Z486_DIR)/bus_prefetch.sv
+TB_SRCS := tb_z486.sv
 CPP_SRCS := sim_main.cpp
 
 # Verilator flags (common, no --top-module — set per target)
@@ -57,7 +57,7 @@ VFLAGS_BASE += -cc --exe
 VFLAGS_BASE += -O3
 VFLAGS_BASE += --build
 VFLAGS_BASE += -j 0
-VFLAGS_BASE += -I$(Z386_DIR)
+VFLAGS_BASE += -I$(Z486_DIR)
 VFLAGS_BASE += -I$(X87_DIR)
 VFLAGS_BASE += -I$(X87_REF_DIR)
 VFLAGS_BASE += -CFLAGS "-std=c++14 -O3"
@@ -103,7 +103,7 @@ CPP_X87_FIFO_SRCS := sim_main_x87_transfer_fifo.cpp
 # PLA4 verification testbench sources
 TB_PLA4_SRCS := tb_protection_pla4.sv
 CPP_PLA4_SRCS := sim_main_pla4.cpp
-PLA4_RTL := $(Z386_DIR)/protection.sv
+PLA4_RTL := $(Z486_DIR)/protection.sv
 
 # Targets
 .PHONY: all build test-simple test-full test-386 test-186 test-protected test-pla4 test-l1-cache test-l1-icache test-x87-bridge test-x87-sequencer test-x87-executor test-x87-testfloat test-x87-fifo test-x87-core test-x87-integration test-x87-integer dhrystone clean help
@@ -111,13 +111,13 @@ PLA4_RTL := $(Z386_DIR)/protection.sv
 all: build
 
 # Build all testbenches
-build: obj_dir/Vtb_z386 obj_dir/Vtb_protected_mode
+build: obj_dir/Vtb_z486 obj_dir/Vtb_protected_mode
 
-obj_dir/Vtb_z386: $(RTL_SRCS) $(RTL_DEPS) $(TB_SRCS) $(CPP_SRCS)
-	@echo "Building z386 testbench with Verilator..."
+obj_dir/Vtb_z486: $(RTL_SRCS) $(RTL_DEPS) $(TB_SRCS) $(CPP_SRCS)
+	@echo "Building z486 testbench with Verilator..."
 	cp -f ../*.hex .
-	$(VERILATOR) $(VFLAGS) --top-module tb_z386 $(TB_SRCS) $(RTL_SRCS) $(CPP_SRCS)
-	@echo "Build complete: obj_dir/Vtb_z386"
+	$(VERILATOR) $(VFLAGS) --top-module tb_z486 $(TB_SRCS) $(RTL_SRCS) $(CPP_SRCS)
+	@echo "Build complete: obj_dir/Vtb_z486"
 
 obj_dir/Vtb_protected_mode: $(RTL_SRCS) $(RTL_DEPS) $(TB_PROT_SRCS) $(CPP_PROT_SRCS)
 	@echo "Building protected mode testbench with Verilator..."
@@ -140,12 +140,12 @@ obj_dir_quake/Vtb_protected_mode: $(RTL_SRCS) $(RTL_DEPS) $(TB_PROT_SRCS) $(CPP_
 		$(TB_PROT_SRCS) $(RTL_SRCS) $(CPP_QUAKE_SNAPSHOT_SRCS)
 	@echo "Build complete: obj_dir_quake/Vtb_protected_mode"
 
-obj_dir_x87_int/Vtb_z386: $(RTL_SRCS) $(RTL_DEPS) $(TB_SRCS) $(CPP_SRCS)
+obj_dir_x87_int/Vtb_z486: $(RTL_SRCS) $(RTL_DEPS) $(TB_SRCS) $(CPP_SRCS)
 	@echo "Building x87-enabled integer testbench with Verilator..."
 	cp -f ../*.hex .
-	$(VERILATOR) $(VFLAGS) --Mdir obj_dir_x87_int -GENABLE_X87=1 --top-module tb_z386 \
+	$(VERILATOR) $(VFLAGS) --Mdir obj_dir_x87_int -GENABLE_X87=1 --top-module tb_z486 \
 		$(TB_SRCS) $(RTL_SRCS) $(CPP_SRCS)
-	@echo "Build complete: obj_dir_x87_int/Vtb_z386"
+	@echo "Build complete: obj_dir_x87_int/Vtb_z486"
 
 obj_dir/Vtb_test386: $(RTL_SRCS) $(RTL_DEPS) $(TB386_SRCS) $(CPP386_SRCS)
 	@echo "Building test386 testbench with Verilator..."
@@ -153,14 +153,14 @@ obj_dir/Vtb_test386: $(RTL_SRCS) $(RTL_DEPS) $(TB386_SRCS) $(CPP386_SRCS)
 	$(VERILATOR) $(VFLAGS_FST) --top-module tb_test386 $(TB386_SRCS) $(RTL_SRCS) $(CPP386_SRCS)
 	@echo "Build complete: obj_dir/Vtb_test386"
 
-obj_dir/Vtb_l1_cache: $(Z386_DIR)/l1_cache.sv $(TB_L1_SRCS) $(CPP_L1_SRCS)
+obj_dir/Vtb_l1_cache: $(Z486_DIR)/l1_cache.sv $(TB_L1_SRCS) $(CPP_L1_SRCS)
 	@echo "Building L1 cache unit test with Verilator..."
-	$(VERILATOR) $(VFLAGS_NOTRACE) --top-module tb_l1_cache $(TB_L1_SRCS) $(Z386_DIR)/l1_cache.sv $(CPP_L1_SRCS)
+	$(VERILATOR) $(VFLAGS_NOTRACE) --top-module tb_l1_cache $(TB_L1_SRCS) $(Z486_DIR)/l1_cache.sv $(CPP_L1_SRCS)
 	@echo "Build complete: obj_dir/Vtb_l1_cache"
 
-obj_dir/Vtb_l1_icache: $(Z386_DIR)/l1_icache.sv $(TB_L1I_SRCS) $(CPP_L1I_SRCS)
+obj_dir/Vtb_l1_icache: $(Z486_DIR)/l1_icache.sv $(TB_L1I_SRCS) $(CPP_L1I_SRCS)
 	@echo "Building L1 instruction cache unit test with Verilator..."
-	$(VERILATOR) $(VFLAGS_NOTRACE) --top-module tb_l1_icache $(TB_L1I_SRCS) $(Z386_DIR)/l1_icache.sv $(CPP_L1I_SRCS)
+	$(VERILATOR) $(VFLAGS_NOTRACE) --top-module tb_l1_icache $(TB_L1I_SRCS) $(Z486_DIR)/l1_icache.sv $(CPP_L1I_SRCS)
 	@echo "Build complete: obj_dir/Vtb_l1_icache"
 
 obj_dir/Vtb_x87_bridge: $(X87_DIR)/x87_bridge.sv $(TB_X87_BRIDGE_SRCS) $(CPP_X87_BRIDGE_SRCS)
@@ -260,11 +260,11 @@ test: test-simple
 
 # Run tests
 test-simple: build
-	@echo "Running z386 simple instruction tests..."
+	@echo "Running z486 simple instruction tests..."
 	./test_simple.py
 
 test-full: build
-	@echo "Running z386 full instruction tests..."
+	@echo "Running z486 full instruction tests..."
 	./test_full_singlestep.py
 
 test-protected: obj_dir/Vtb_protected_mode
@@ -314,13 +314,13 @@ test-x87-core: obj_dir_x87_core/Vtb_x87_core
 
 test-x87-integration: obj_dir_x87/Vtb_protected_mode
 	@echo "Running x87-enabled CPU protocol tests..."
-	Z386_ENABLE_X87=1 Z386_TESTBENCH=$(CURDIR)/obj_dir_x87/Vtb_protected_mode ./test_protected_mode.py x87_protocol x87_env32 x87_arithmetic x87_m32_page_fault x87_heap32 x87_qemu_special x87_qemu_exceptions
+	Z486_ENABLE_X87=1 Z486_TESTBENCH=$(CURDIR)/obj_dir_x87/Vtb_protected_mode ./test_protected_mode.py x87_protocol x87_env32 x87_arithmetic x87_m32_page_fault x87_heap32 x87_qemu_special x87_qemu_exceptions
 
-test-x87-integer: obj_dir_x87_int/Vtb_z386
+test-x87-integer: obj_dir_x87_int/Vtb_z486
 	@echo "Running integer regressions with x87 enabled..."
-	Z386_TESTBENCH=$(CURDIR)/obj_dir_x87_int/Vtb_z386 ./test_simple.py --no-color
-	Z386_TESTBENCH=$(CURDIR)/obj_dir_x87_int/Vtb_z386 ./test_singlestep_real.py --no-color
-	Z386_TESTBENCH=$(CURDIR)/obj_dir_x87_int/Vtb_z386 ./test_singlestep_protected.py -nt
+	Z486_TESTBENCH=$(CURDIR)/obj_dir_x87_int/Vtb_z486 ./test_simple.py --no-color
+	Z486_TESTBENCH=$(CURDIR)/obj_dir_x87_int/Vtb_z486 ./test_singlestep_real.py --no-color
+	Z486_TESTBENCH=$(CURDIR)/obj_dir_x87_int/Vtb_z486 ./test_singlestep_protected.py -nt
 
 dhrystone:
 	$(MAKE) -C dhrystone compare
@@ -339,7 +339,7 @@ clean:
 
 # Help
 help:
-	@echo "z386 Test Makefile"
+	@echo "z486 Test Makefile"
 	@echo "=================="
 	@echo ""
 	@echo "Targets:"
@@ -352,6 +352,6 @@ help:
 	@echo "  make test-x87-core - Run x87 state and transfer unit test"
 	@echo "  make test-x87-testfloat - Check arithmetic with Berkeley TestFloat"
 	@echo "  make test-x87-integration - Run x87-enabled CPU protocol test"
-	@echo "  make dhrystone      - Compare z386 0.1 and current z386 on Dhrystone"
+	@echo "  make dhrystone      - Compare released z386 and current z486 on Dhrystone"
 	@echo "  make clean          - Remove build artifacts"
 	@echo "  make help           - Show this help message"
