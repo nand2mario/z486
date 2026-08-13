@@ -1,10 +1,10 @@
-// Registered adapter between paging's reserved-I/O requests and x87 streams.
+// Registered adapter between paging's preclassified x87 requests and streams.
 module x87_bridge (
     input  logic        clk,
     input  logic        reset,
 
     input  logic        req_valid,
-    input  logic [31:0] req_addr,
+    input  logic        req_data_port,
     input  logic        req_write,
     input  logic  [3:0] req_be,
     input  logic [31:0] req_wdata,
@@ -44,13 +44,11 @@ logic [3:0]    be_r;
 logic [31:0]   wdata_r;
 logic [31:0]   rdata_r;
 
-wire selected_addr = (req_addr == 32'h8000_00f8) ||
-                     (req_addr == 32'h8000_00fc);
 wire dispatch_ready = write_r ? (data_port_r ? word_in_ready : cmd_ready)
                               : read_req_ready;
 
 always_comb begin
-    req_accepted = (state == BR_IDLE) && req_valid && selected_addr;
+    req_accepted = (state == BR_IDLE) && req_valid;
     req_complete = (state == BR_COMPLETE);
     req_read_complete = req_complete && !write_r;
     req_rdata = rdata_r;
@@ -78,9 +76,9 @@ always_ff @(posedge clk) begin
     end else begin
         case (state)
             BR_IDLE: begin
-                if (req_valid && selected_addr) begin
+                if (req_valid) begin
                     write_r <= req_write;
-                    data_port_r <= req_addr[2];
+                    data_port_r <= req_data_port;
                     be_r <= req_be;
                     wdata_r <= req_wdata;
                     state <= BR_DISPATCH;

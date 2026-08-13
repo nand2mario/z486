@@ -33,7 +33,9 @@ COND = {
     "SHIFT_RIGHT": 13,
     "SHIFT_RIGHT_MORE": 14,
     "ADDSUB_NORMALIZE_MORE": 15,
-    "CORDIC_SHIFT_MORE": 16,
+    "CORDIC_LIMB_MORE": 16,
+    "CORDIC_LOAD_MORE": 17,
+    "CORDIC_ALIGN_MORE": 18,
     # Operation-local aliases preserve the existing condition encoding. These values
     # are never tested by the same microprogram as their generic names.
     "TRANS_NEEDS_AUX": 3,
@@ -93,9 +95,17 @@ ENGINE = {
     "SQRT_ITERATE": 4,
     "TRANS_RANGE_ITERATE": 5,
     "TRANS_RANGE_FINALIZE": 6,
-    "TRANS_ALIGN": 7,
     "TRANS_CORDIC_PREP": 8,
+    "CORDIC_ALIGN_PREP": 9,
     "ADDSUB_ALIGN": 10,
+    "CORDIC_X_PREP": 11,
+    "CORDIC_Y_PREP": 12,
+    "CORDIC_Z_PREP": 13,
+    "CORDIC_NEXT": 14,
+    "CORDIC_OUTPUT_PREP": 15,
+    "CORDIC_AUX_PREP": 16,
+    "CORDIC_BEGIN": 17,
+    "CORDIC_OUTPUT_CAPTURE": 18,
 }
 
 PACK = {
@@ -125,9 +135,6 @@ ALU_ROUTE = {
     "PREP_ROUND_MUL": 5,
     "PREP_ROUND_DIVSQRT": 6,
     "PREP_ROUND_TRANS": 7,
-    "CORDIC_X": 8,
-    "CORDIC_Y": 9,
-    "CORDIC_Z": 10,
 }
 
 SHIFT_ROUTE = {
@@ -135,8 +142,6 @@ SHIFT_ROUTE = {
     "LEFT": 1,
     "RIGHT": 2,
     "FORMAT": 3,
-    "CORDIC_LOAD": 4,
-    "CORDIC_STEP": 5,
 }
 COUNT = {"HOLD": 0, "LOAD": 1, "INC": 2, "DEC": 3}
 GRS = {"HOLD": 0, "LOAD": 1, "SHIFT": 2, "CLEAR": 3}
@@ -148,6 +153,28 @@ COMMIT = {
     "TRANSFER": 4,
 }
 SIDE = {"NONE": 0, "SET_STATUS": 1, "QUIET_NAN": 2, "SET_INEXACT": 3}
+
+SCRATCH_READ = {
+    "HOLD": 0,
+    "ALIGN": 1,
+    "X_LOW": 2,
+    "X_HIGH": 3,
+    "Y_LOW": 4,
+    "Y_HIGH": 5,
+    "Z": 6,
+    "OUTPUT": 7,
+}
+
+SCRATCH_WRITE = {
+    "HOLD": 0,
+    "LOAD": 1,
+    "ALIGN": 2,
+    "X": 3,
+    "Y": 4,
+    "Z": 5,
+    "PRIMARY": 6,
+    "AUX": 7,
+}
 
 
 @dataclass(frozen=True)
@@ -169,6 +196,8 @@ class UOp:
     grs: str = "HOLD"
     commit: str = "NONE"
     flags: int = 0
+    scratch_read: str = "HOLD"
+    scratch_write: str = "HOLD"
     side_effect: str = "NONE"  # Transitional generator annotation only.
 
 
@@ -378,23 +407,57 @@ PROGRAM: list[ProgramItem] = [
                          engine="TRANS_RANGE_ITERATE", count="DEC")),
     (None, UOp(engine="TRANS_RANGE_FINALIZE")),
     (None, UOp(flow="JUMP", target="trans_cordic_prepare")),
-    ("trans_atan_start", UOp(flow="BRANCH",
-                              target="trans_cordic_prepare",
-                              condition="COUNT_ZERO")),
-    ("trans_atan_align", UOp(flow="LOOP", target="trans_atan_align",
-                              condition="COUNT_MORE",
-                              engine="TRANS_ALIGN", count="DEC")),
-    ("trans_cordic_prepare", UOp(engine="TRANS_CORDIC_PREP",
-                                  count="LOAD")),
-    ("trans_cordic", UOp(shift_route="CORDIC_LOAD")),
-    ("trans_cordic_shift", UOp(
-        flow="LOOP", target="trans_cordic_shift",
-        condition="CORDIC_SHIFT_MORE", shift_route="CORDIC_STEP")),
-    (None, UOp(alu_route="CORDIC_X")),
-    (None, UOp(alu_route="CORDIC_Y")),
-    (None, UOp(flow="LOOP", target="trans_cordic",
-               condition="COUNT_MORE", alu_route="CORDIC_Z",
+    ("trans_atan_start", UOp(flow="JUMP", target="trans_cordic_prepare")),
+    ("trans_cordic_prepare", UOp(engine="TRANS_CORDIC_PREP")),
+    ("trans_cordic_load", UOp(
+        flow="LOOP", target="trans_cordic_load",
+        condition="CORDIC_LOAD_MORE", scratch_write="LOAD")),
+    (None, UOp(flow="BRANCH", target="trans_atan_align_check",
+               condition="TRANS_ATAN2")),
+    (None, UOp(flow="JUMP", target="trans_cordic_begin")),
+    ("trans_atan_align_check", UOp(
+        flow="BRANCH", target="trans_cordic_begin",
+        condition="COUNT_ZERO")),
+    ("trans_atan_align_prepare", UOp(engine="CORDIC_ALIGN_PREP")),
+    ("trans_atan_align_read", UOp(scratch_read="ALIGN")),
+    ("trans_atan_align_write", UOp(
+        flow="LOOP", target="trans_atan_align_read",
+        condition="CORDIC_ALIGN_MORE", scratch_write="ALIGN")),
+    (None, UOp(flow="LOOP", target="trans_atan_align_prepare",
+               condition="COUNT_MORE", count="DEC")),
+    ("trans_cordic_begin", UOp(engine="CORDIC_BEGIN")),
+    ("trans_cordic_x_prepare", UOp(engine="CORDIC_X_PREP")),
+    ("trans_cordic_x_low", UOp(scratch_read="X_LOW")),
+    (None, UOp(scratch_read="X_HIGH")),
+    ("trans_cordic_x_write", UOp(
+        flow="LOOP", target="trans_cordic_x_low",
+        condition="CORDIC_LIMB_MORE", scratch_write="X")),
+    (None, UOp(engine="CORDIC_Y_PREP")),
+    ("trans_cordic_y_low", UOp(scratch_read="Y_LOW")),
+    (None, UOp(scratch_read="Y_HIGH")),
+    ("trans_cordic_y_write", UOp(
+        flow="LOOP", target="trans_cordic_y_low",
+        condition="CORDIC_LIMB_MORE", scratch_write="Y")),
+    (None, UOp(engine="CORDIC_Z_PREP")),
+    ("trans_cordic_z_read", UOp(scratch_read="Z")),
+    ("trans_cordic_z_write", UOp(
+        flow="LOOP", target="trans_cordic_z_read",
+        condition="CORDIC_LIMB_MORE", scratch_write="Z")),
+    (None, UOp(flow="LOOP", target="trans_cordic_x_prepare",
+               condition="COUNT_MORE", engine="CORDIC_NEXT",
                count="DEC")),
+    (None, UOp(engine="CORDIC_OUTPUT_PREP")),
+    ("trans_cordic_output_read", UOp(scratch_read="OUTPUT")),
+    (None, UOp(engine="CORDIC_OUTPUT_CAPTURE")),
+    ("trans_cordic_output_write", UOp(
+        flow="LOOP", target="trans_cordic_output_read",
+        condition="CORDIC_LIMB_MORE", scratch_write="PRIMARY")),
+    (None, UOp(engine="CORDIC_AUX_PREP")),
+    ("trans_cordic_aux_read", UOp(scratch_read="OUTPUT")),
+    (None, UOp(engine="CORDIC_OUTPUT_CAPTURE")),
+    ("trans_cordic_aux_write", UOp(
+        flow="LOOP", target="trans_cordic_aux_read",
+        condition="CORDIC_LIMB_MORE", scratch_write="AUX")),
     (None, UOp(state="TRANS_SELECT")),
     ("trans_normalize_enter", UOp(flow="BRANCH", target="trans_commit",
                                    condition="ZERO")),
@@ -468,7 +531,8 @@ def validate_horizontal_controls(address: int, uop: UOp) -> None:
 
     count_dec_engines = {
         "HOLD", "MUL_ACCUMULATE", "DIV_ITERATE", "SQRT_ITERATE",
-        "TRANS_RANGE_ITERATE", "TRANS_ALIGN", "ADDSUB_ALIGN",
+        "TRANS_RANGE_ITERATE", "ADDSUB_ALIGN",
+        "CORDIC_NEXT",
     }
     if (uop.count == "DEC" and
         (uop.state != "HOLD" or
@@ -516,7 +580,11 @@ def assemble() -> tuple[list[int], dict[str, int], list[str]]:
             (enum_value(GRS, uop.grs, "grs"), 2, "grs"),
             (enum_value(COMMIT, uop.commit, "commit"), 3, "commit"),
             (uop.flags, 2, "flags"),
-            (0, 10, "reserved"),
+            (enum_value(SCRATCH_READ, uop.scratch_read,
+                        "scratch_read"), 3, "scratch_read"),
+            (enum_value(SCRATCH_WRITE, uop.scratch_write,
+                        "scratch_write"), 3, "scratch_write"),
+            (0, 4, "reserved"),
         ]
         word = 0
         for value, width, field in fields:
@@ -532,7 +600,7 @@ def assemble() -> tuple[list[int], dict[str, int], list[str]]:
             f"{uop.flow:<7} {uop.prepare:<16} {uop.classify:<12} "
             f"{uop.pack:<20} {uop.engine:<22} {uop.state:<20} "
             f"{uop.alu_route:<22} {uop.shift_route:<8} "
-            f"{uop.commit}"
+            f"{uop.scratch_read:<8} {uop.scratch_write:<8} {uop.commit}"
         )
 
     if len(words) > 256:
@@ -606,6 +674,14 @@ def write_entries(path: Path, labels: dict[str, int]) -> None:
         lines.append(f"localparam logic [1:0] X87_GRS_{name} = 2'd{value};")
     for name, value in COMMIT.items():
         lines.append(f"localparam logic [2:0] X87_COMMIT_{name} = 3'd{value};")
+    for name, value in SCRATCH_READ.items():
+        lines.append(
+            f"localparam logic [2:0] X87_SCRATCH_READ_{name} = 3'd{value};"
+        )
+    for name, value in SCRATCH_WRITE.items():
+        lines.append(
+            f"localparam logic [2:0] X87_SCRATCH_WRITE_{name} = 3'd{value};"
+        )
     for label, address in labels.items():
         if label.startswith("entry_"):
             name = "X87_" + label.upper()

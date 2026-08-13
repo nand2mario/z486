@@ -25,6 +25,7 @@ module paging_unit
     output logic        mem_accepted,      // Ready: demand request may be handed off this cycle
     output reg          mem_servicing,     // High while accepted request is in flight
     output              mem_complete_now,  // Completion shortcut (disabled: use registered mem_servicing clear)
+    output              mem_read_complete, // Demand operand read, excluding walker traffic
     output reg          mem_dly_grace,     // Pulse: dcache lookup cycle of an optimistic demand read;
                                            // a pure-DLY uop may execute this cycle (data lands end of cycle)
     output              mem_write_dly_grace, // PG_MEM_TLB cycle of a write that posts THIS cycle (no fault,
@@ -76,6 +77,7 @@ module paging_unit
     output logic [31:0] dcache_req_wdata,     // Write data (pre-positioned on bus)
     output logic        dcache_req_is_io,     // Request is IO space
     output logic        dcache_req_is_inta,   // Request is INTA cycle
+    output logic        dcache_req_is_x87,    // Registered reserved x87 pseudo-I/O request
     output logic        dcache_req_is_vga_mem,// Physical VGA aperture
 
     input               dcache_req_accepted,  // Demand-side request accepted this cycle
@@ -232,6 +234,7 @@ reg [3:0]  dcache_req_be_r;
 reg [31:0] dcache_req_wdata_r;
 reg        dcache_req_is_io_r;
 reg        dcache_req_is_inta_r;
+reg        dcache_req_is_x87_r;
 reg        icache_req_valid_r;
 reg [31:0] icache_req_phys_addr_r;
 
@@ -321,6 +324,8 @@ reg        fast_path_pending; // A fast-path BIU request is in flight
 // PIPT cache completion is deliberately registered through mem_servicing clear.
 // Do not feed cache response/tag-compare timing back into the microsequencer.
 assign mem_complete_now = 1'b0;
+assign mem_read_complete = dcache_read_complete && !opr_is_walk_r &&
+                           !opr_is_write_r && !opr_suppress_r;
 
 assign pf_ack_bypass = ((state == PG_PF_BIU_WAIT) || pf_fast_pending) &&
                        icache_req_complete;
@@ -328,6 +333,9 @@ assign pf_ack_bypass = ((state == PG_PF_BIU_WAIT) || pf_fast_pending) &&
 wire idle_mem_crossing = access_crosses_dword(mem_op_size, linear_addr[1:0]);
 wire idle_io_crossing = mem_is_io && idle_mem_crossing;
 wire [31:0] idle_request_linear = idle_inta_req ? mem_inta_addr : linear_addr;
+wire idle_x87_io_req = mem_is_io &&
+                       (idle_request_linear[31:3] == 29'h1000_001f) &&
+                       (idle_request_linear[1:0] == 2'b00);
 wire cache_lookup_granted = 1'b1;
 wire idle_mem_ready = s_idle && !mem_servicing;
 wire req_tlb_dirty_ok = !req_is_write || tlb_dirty;
@@ -393,6 +401,9 @@ wire        early_rd_present   = early_rd_idx_drive && mem_ea_read && !idle_mem_
 wire        early_wr_idx_drive = idle_data_req && mem_write && !mem_is_io;
 wire        early_wr_present   = early_wr_idx_drive && !idle_mem_crossing &&
                                  !mem_check_only && live_write_posts;
+// Write data depends on request intent, not on the TLB/permission result that
+// gates early_present. A previously registered request retains ownership.
+wire        early_wr_data_drive = early_wr_idx_drive && !dcache_req_valid_r;
 wire        early_idx_drive    = early_rd_idx_drive || early_wr_idx_drive;
 wire [31:0] early_phys         = pg_enable ? {live_tlb_physical[31:12], linear_addr[11:0]}
                                           : linear_addr;
@@ -422,7 +433,7 @@ assign dcache_req_be = early_present ? mem_be :
                        (req_crossing ? calc_be_first(req_op_size, req_offset) :
                                        calc_be(req_op_size, req_offset)) :
                        dcache_req_be_r;
-assign dcache_req_wdata = early_wr_present ?
+assign dcache_req_wdata = early_wr_data_drive ?
                           shift_write_data(mem_wdata, mem_op_size, linear_addr[1:0]) :
                           req_mem_present ?
                           (req_crossing ? split_write_first(req_wdata, req_offset, req_op_size) :
@@ -430,6 +441,7 @@ assign dcache_req_wdata = early_wr_present ?
                           dcache_req_wdata_r;
 assign dcache_req_is_io = (early_present || req_mem_present) ? 1'b0 : dcache_req_is_io_r;
 assign dcache_req_is_inta = (early_present || req_mem_present) ? 1'b0 : dcache_req_is_inta_r;
+assign dcache_req_is_x87 = (early_present || req_mem_present) ? 1'b0 : dcache_req_is_x87_r;
 assign dcache_req_is_vga_mem = early_present ? early_is_vga_mem :
                                req_mem_present ? req_is_vga_mem :
                                (dcache_req_phys_addr_r[31:17] == 15'h5);
@@ -557,6 +569,7 @@ always_ff @(posedge clk or negedge reset_n) begin
         dcache_req_valid_r <= 1'b0;
         dcache_req_is_io_r <= 1'b0;
         dcache_req_is_inta_r <= 1'b0;
+        dcache_req_is_x87_r <= 1'b0;
         icache_req_valid_r <= 1'b0;
         icache_req_phys_addr_r <= 32'h0;
         page_fault <= 1'b0;
@@ -607,6 +620,7 @@ always_ff @(posedge clk or negedge reset_n) begin
             dcache_req_valid_r <= 1'b0;
             dcache_req_is_io_r <= 1'b0;
             dcache_req_is_inta_r <= 1'b0;
+            dcache_req_is_x87_r <= 1'b0;
         end
         if (icache_req_accepted)
             icache_req_valid_r <= 1'b0;
@@ -669,6 +683,7 @@ always_ff @(posedge clk or negedge reset_n) begin
                             dcache_req_write_r <= mem_write;
                             dcache_req_be_r <= mem_be;
                             dcache_req_wdata_r <= shift_write_data(mem_wdata, mem_op_size, idle_request_linear[1:0]);
+                            dcache_req_is_x87_r <= !idle_inta_req && idle_x87_io_req;
                             // First INTA cycle (addr=4) is dummy — suppress OPR_R update.
                             // Second INTA (addr=0) delivers the vector to OPR_R.
                             latch_biu_meta(2'd0, op_size_bytes_m1(mem_op_size), mem_write,
@@ -730,6 +745,7 @@ always_ff @(posedge clk or negedge reset_n) begin
                             dcache_req_is_inta_r <= idle_inta_req;
                             fast_path_pending <= 1'b1;
                         end else begin
+                            dcache_req_is_x87_r <= 1'b0;
                             dcache_req_is_io_r <= 1'b1;
                             dcache_req_is_inta_r <= 1'b0;
                             state <= PG_CROSS_WAIT1;

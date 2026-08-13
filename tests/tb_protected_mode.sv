@@ -6,7 +6,8 @@
 /* verilator lint_off SYNCASYNCNET */
 
 module tb_protected_mode #(
-    parameter ENABLE_X87 = 0
+    parameter ENABLE_X87 = 0,
+    parameter MEM_SIZE = 1 << 19
 );
     // Segment cache array indices (from z386_pkg)
     localparam SEG_ES = 0, SEG_CS = 1, SEG_SS = 2, SEG_DS = 3;
@@ -64,17 +65,70 @@ module tb_protected_mode #(
         .dbg_EIP(),
         .dbg_pe(),
         .dbg_vm(),
+        .dbg_x87_state(),
         .triple_fault_reset(triple_fault_reset)
     );
 
-    // Memory: 512KB for protected mode testing
-    localparam MEM_SIZE = 1 << 19;  // 512KB
+    // The regular tests use 512KB. Snapshot replay overrides this parameter
+    // with the captured physical-memory size.
     reg [7:0] mem [0:MEM_SIZE-1];
 
     // Instruction counting
     wire instruction_boundary = dut.uc_is_rni && dut.uc_active;
     reg prev_instruction_boundary = 0;
     longint instruction_count = 0;
+    longint x87_command_count = 0;
+    longint x87_direct_load_count = 0;
+    longint x87_control_busy_cycles = 0;
+    longint x87_executor_busy_cycles = 0;
+    longint x87_wait_stall_cycles = 0;
+    longint x87_fop_count [0:2047];
+    longint x87_direct_load_fop_count [0:2047];
+    event load_snapshot_x87_state;
+
+    generate
+    if (ENABLE_X87) begin : gen_snapshot_x87_counters
+        always @(posedge clk) begin
+            if (reset_n) begin
+                if (dut.gen_x87.cmd_valid && dut.gen_x87.cmd_ready) begin
+                    x87_command_count <= x87_command_count + 1;
+                    x87_fop_count[dut.gen_x87.cmd_fop] <=
+                        x87_fop_count[dut.gen_x87.cmd_fop] + 1;
+                end
+                if (dut.x87_direct_m32_valid && dut.x87_direct_m32_ready) begin
+                    x87_direct_load_count <= x87_direct_load_count + 1;
+                    x87_direct_load_fop_count[dut.x87_direct_m32_fop_r] <=
+                        x87_direct_load_fop_count[dut.x87_direct_m32_fop_r] + 1;
+                end
+                if (!dut.x87_busy_n)
+                    x87_control_busy_cycles <= x87_control_busy_cycles + 1;
+                if (dut.gen_x87.control.executor.busy)
+                    x87_executor_busy_cycles <= x87_executor_busy_cycles + 1;
+                if (dut.stall_wio)
+                    x87_wait_stall_cycles <= x87_wait_stall_cycles + 1;
+            end
+        end
+    end
+    endgenerate
+
+    generate
+    if (ENABLE_X87) begin : gen_snapshot_x87_init
+        always @(load_snapshot_x87_state) begin
+            dut.gen_x87.control.control_word = x87_control_arg;
+            dut.gen_x87.control.status_flags = x87_status_arg;
+            dut.gen_x87.control.top = x87_top_arg;
+            dut.gen_x87.control.tag_word = x87_tag_arg;
+            dut.gen_x87.control.stack_mem.mem[0] = x87_fpr_arg[0];
+            dut.gen_x87.control.stack_mem.mem[1] = x87_fpr_arg[1];
+            dut.gen_x87.control.stack_mem.mem[2] = x87_fpr_arg[2];
+            dut.gen_x87.control.stack_mem.mem[3] = x87_fpr_arg[3];
+            dut.gen_x87.control.stack_mem.mem[4] = x87_fpr_arg[4];
+            dut.gen_x87.control.stack_mem.mem[5] = x87_fpr_arg[5];
+            dut.gen_x87.control.stack_mem.mem[6] = x87_fpr_arg[6];
+            dut.gen_x87.control.stack_mem.mem[7] = x87_fpr_arg[7];
+        end
+    end
+    endgenerate
 
     // The 386-gate path clears the gate-width flag before common stack setup.
     reg cmisc2_executed = 1'b0;
@@ -347,12 +401,30 @@ module tb_protected_mode #(
     end
 
     // Configuration from plusargs
-    string memfile;
+    string memfile, raw_memfile;
+    integer raw_mem_fd, raw_mem_bytes;
     int eip_arg;
-    int cr0_arg, cr3_arg;
+    int cr0_arg, cr2_arg, cr3_arg;
     int code_phys_base;  // Physical address where code is loaded (for prefetch)
     int start_protected; // 1: force protected-mode entry state, 0: start in real mode
     int d_init;          // Initial default operand size flag
+    bit snapshot_mode;
+    bit stop_eip_valid;
+    int stop_eip, stop_cs;
+    int checksum_start, checksum_bytes;
+
+    logic [31:0] init_eax, init_ebx, init_ecx, init_edx;
+    logic [31:0] init_esi, init_edi, init_ebp, init_esp, init_eflags;
+    logic [15:0] init_ldtr, init_tr;
+    logic [31:0] init_gdt_base, init_idt_base;
+    logic [19:0] init_gdt_limit, init_idt_limit;
+    logic [31:0] ldt_base, tr_base;
+    logic [19:0] ldt_limit, tr_limit;
+    logic [15:0] ldt_flags, tr_flags;
+
+    logic [15:0] x87_control_arg, x87_status_arg, x87_tag_arg;
+    logic [2:0]  x87_top_arg;
+    logic [79:0] x87_fpr_arg [0:7];
 
     // Initial visible segment selectors
     int init_cs, init_ds, init_ss, init_es, init_fs, init_gs;
@@ -394,18 +466,38 @@ module tb_protected_mode #(
     localparam RM_CODE_FLAGS = 16'hA900;       // type=1010(RX), S=1, DPL=0, P=1, D_B=0, G=0
 
     initial begin
-        // Initialize memory to 0
-        for (int i = 0; i < MEM_SIZE; i++)
-            mem[i] = 8'h00;
-
-        // Get memory file (hex format)
-        if ($value$plusargs("mem=%s", memfile)) begin
+        // Snapshot RAM is already complete, so avoid clearing a 64MB array
+        // before loading it. Small instruction tests retain the hex path.
+        if ($value$plusargs("raw_mem=%s", raw_memfile)) begin
+            raw_mem_fd = $fopen(raw_memfile, "rb");
+            if (!raw_mem_fd) begin
+                $display("[TB] ERROR: Could not open raw memory %s", raw_memfile);
+                $finish;
+            end
+            raw_mem_bytes = $fread(mem, raw_mem_fd);
+            $fclose(raw_mem_fd);
+            if (raw_mem_bytes != MEM_SIZE) begin
+                $display("[TB] ERROR: Raw memory size %0d, expected %0d",
+                         raw_mem_bytes, MEM_SIZE);
+                $finish;
+            end
+            $display("[TB] Loaded %0d raw memory bytes from %s",
+                     raw_mem_bytes, raw_memfile);
+        end else if ($value$plusargs("mem=%s", memfile)) begin
+            for (int i = 0; i < MEM_SIZE; i++)
+                mem[i] = 8'h00;
             $readmemh(memfile, mem);
             $display("[TB] Loaded memory from %s", memfile);
         end else begin
-            $display("[TB] ERROR: No memory file specified (+mem=file.hex)");
+            $display("[TB] ERROR: No memory file specified (+mem= or +raw_mem=)");
             $finish;
         end
+
+        snapshot_mode = $test$plusargs("snapshot");
+        for (int i = 0; i < 2048; i++)
+            x87_fop_count[i] = 0;
+        for (int i = 0; i < 2048; i++)
+            x87_direct_load_fop_count[i] = 0;
 
         // Get max cycles
         if ($value$plusargs("cycles=%d", max_cycles))
@@ -418,8 +510,9 @@ module tb_protected_mode #(
         // Get initial EIP (default 0)
         if (!$value$plusargs("eip=%d", eip_arg)) eip_arg = 0;
 
-        // Get CR0/CR3
+        // Get control registers
         if (!$value$plusargs("cr0=%d", cr0_arg)) cr0_arg = 32'h80000001;  // PE=1, PG=1
+        if (!$value$plusargs("cr2=%d", cr2_arg)) cr2_arg = 32'h00000000;
         if (!$value$plusargs("cr3=%d", cr3_arg)) cr3_arg = 32'h00000000;  // Page dir at 0
 
         // Get physical address where code is loaded (prefetch bypasses paging)
@@ -493,6 +586,58 @@ module tb_protected_mode #(
         if (!$value$plusargs("d_init=%d", d_init))
             d_init = start_protected ? 1 : 0;
 
+        init_eax = 0; init_ebx = 0; init_ecx = 0; init_edx = 0;
+        init_esi = 0; init_edi = 0; init_ebp = 0; init_esp = 32'h0000ff00;
+        init_eflags = 32'h00000002;
+        void'($value$plusargs("init_eax=%h", init_eax));
+        void'($value$plusargs("init_ebx=%h", init_ebx));
+        void'($value$plusargs("init_ecx=%h", init_ecx));
+        void'($value$plusargs("init_edx=%h", init_edx));
+        void'($value$plusargs("init_esi=%h", init_esi));
+        void'($value$plusargs("init_edi=%h", init_edi));
+        void'($value$plusargs("init_ebp=%h", init_ebp));
+        void'($value$plusargs("init_esp=%h", init_esp));
+        void'($value$plusargs("init_eflags=%h", init_eflags));
+
+        init_ldtr = 0; init_tr = 0;
+        init_gdt_base = 0; init_gdt_limit = 20'h003ff;
+        init_idt_base = 0; init_idt_limit = 20'h003ff;
+        ldt_base = 0; ldt_limit = 0; ldt_flags = 0;
+        tr_base = 0; tr_limit = 0; tr_flags = 0;
+        void'($value$plusargs("init_ldtr=%h", init_ldtr));
+        void'($value$plusargs("init_tr=%h", init_tr));
+        void'($value$plusargs("gdt_base=%h", init_gdt_base));
+        void'($value$plusargs("gdt_limit=%h", init_gdt_limit));
+        void'($value$plusargs("idt_base=%h", init_idt_base));
+        void'($value$plusargs("idt_limit=%h", init_idt_limit));
+        void'($value$plusargs("ldt_base=%h", ldt_base));
+        void'($value$plusargs("ldt_limit=%h", ldt_limit));
+        void'($value$plusargs("ldt_flags=%h", ldt_flags));
+        void'($value$plusargs("tr_base=%h", tr_base));
+        void'($value$plusargs("tr_limit=%h", tr_limit));
+        void'($value$plusargs("tr_flags=%h", tr_flags));
+
+        stop_eip_valid = $value$plusargs("stop_eip=%h", stop_eip);
+        if (!$value$plusargs("stop_cs=%h", stop_cs)) stop_cs = init_cs;
+        if (!$value$plusargs("checksum_start=%h", checksum_start)) checksum_start = 0;
+        if (!$value$plusargs("checksum_bytes=%h", checksum_bytes)) checksum_bytes = 0;
+
+        x87_control_arg = 16'h037f; x87_status_arg = 0;
+        x87_tag_arg = 16'hffff; x87_top_arg = 0;
+        for (int i = 0; i < 8; i++) x87_fpr_arg[i] = 0;
+        void'($value$plusargs("x87_control=%h", x87_control_arg));
+        void'($value$plusargs("x87_status=%h", x87_status_arg));
+        void'($value$plusargs("x87_tag=%h", x87_tag_arg));
+        void'($value$plusargs("x87_top=%h", x87_top_arg));
+        void'($value$plusargs("x87_fpr0=%h", x87_fpr_arg[0]));
+        void'($value$plusargs("x87_fpr1=%h", x87_fpr_arg[1]));
+        void'($value$plusargs("x87_fpr2=%h", x87_fpr_arg[2]));
+        void'($value$plusargs("x87_fpr3=%h", x87_fpr_arg[3]));
+        void'($value$plusargs("x87_fpr4=%h", x87_fpr_arg[4]));
+        void'($value$plusargs("x87_fpr5=%h", x87_fpr_arg[5]));
+        void'($value$plusargs("x87_fpr6=%h", x87_fpr_arg[6]));
+        void'($value$plusargs("x87_fpr7=%h", x87_fpr_arg[7]));
+
         $display("[TB] Configuration:");
         $display("[TB]   mode=%s", start_protected ? "protected-start" : "real-start");
         $display("[TB]   EIP=0x%08X CR0=0x%08X CR3=0x%08X", eip_arg, cr0_arg, cr3_arg);
@@ -519,6 +664,8 @@ module tb_protected_mode #(
         dut.ES = init_es[15:0];
         dut.FS = init_fs[15:0];
         dut.GS = init_gs[15:0];
+        dut.LDTR = init_ldtr;
+        dut.TR = init_tr;
 
         dut.EIP = eip_arg;
 
@@ -528,26 +675,38 @@ module tb_protected_mode #(
         dut.seg_unit.desc_cache[0] = build_seg_desc(es_base, es_limit[19:0], es_flags);
         dut.seg_unit.desc_cache[4] = build_seg_desc(fs_base, fs_limit[19:0], fs_flags);
         dut.seg_unit.desc_cache[5] = build_seg_desc(gs_base, gs_limit[19:0], gs_flags);
+        dut.seg_unit.desc_cache[6] = build_seg_desc(tr_base, tr_limit, tr_flags);
+        dut.seg_unit.desc_cache[7] = build_seg_desc(ldt_base, ldt_limit, ldt_flags);
+        dut.seg_unit.gdt_base = init_gdt_base;
+        dut.seg_unit.gdt_limit = init_gdt_limit;
+        dut.seg_unit.idt_base = init_idt_base;
+        dut.seg_unit.idt_limit = init_idt_limit;
         dut.seg_unit.desc_cache[1].D_B = d_init[0];
 
-        // Set prefetch to physical address where code resides
-        // (prefetch currently bypasses paging, so we use physical address directly)
-        dut.prefetch_inst.pf_fetch_addr = code_phys_base + eip_arg;
+        // Snapshot restore supplies architectural linear state. Ordinary tests
+        // retain their existing direct physical-code initialization.
+        dut.prefetch_inst.pf_fetch_addr = snapshot_mode ?
+                                           cs_base + eip_arg :
+                                           code_phys_base + eip_arg;
 
         // General registers = 0
-        dut.EAX = 32'h0;
-        dut.ECX = 32'h0;
-        dut.EDX = 32'h0;
-        dut.EBX = 32'h0;
-        dut.ESP = 32'h0000FF00;  // Stack pointer in SS
-        dut.EBP = 32'h0;
-        dut.ESI = 32'h0;
-        dut.EDI = 32'h0;
+        dut.EAX = init_eax;
+        dut.ECX = init_ecx;
+        dut.EDX = init_edx;
+        dut.EBX = init_ebx;
+        dut.ESP = init_esp;
+        dut.EBP = init_ebp;
+        dut.ESI = init_esi;
+        dut.EDI = init_edi;
 
         // Flags and control
-        dut.EFLAGS = 32'h00000002;
+        dut.EFLAGS = init_eflags;
         dut.CR0 = cr0_arg;
+        dut.CR2 = cr2_arg;
         dut.CR3 = cr3_arg;
+
+        if (snapshot_mode)
+            -> load_snapshot_x87_state;
 
         $display("[TB] CPU reset complete, starting execution");
         $display("");
@@ -572,6 +731,47 @@ module tb_protected_mode #(
             prev_instruction_boundary <= instruction_boundary;
             if (instruction_boundary && !prev_instruction_boundary)
                 instruction_count <= instruction_count + 1;
+
+            // Snapshot completion is the first instruction at the saved
+            // return address. EIP still names that instruction on i_pop.
+            if (stop_eip_valid && dut.i_pop &&
+                (dut.CS == stop_cs[15:0]) && (dut.EIP == stop_eip)) begin
+                longint unsigned checksum;
+                checksum = 64'hcbf29ce484222325;
+                for (int i = 0; i < checksum_bytes; i++) begin
+                    if ((checksum_start + i) < MEM_SIZE) begin
+                        checksum = checksum ^ mem[checksum_start + i];
+                        checksum = checksum * 64'h00000100000001b3;
+                    end
+                end
+                $display("");
+                $display("========================================");
+                $display("  SNAPSHOT COMPLETE");
+                $display("  Total cycles: %0d", cycle);
+                $display("  Total instructions: %0d", instruction_count);
+                $display("  CPI: %f", instruction_count ?
+                         real'(cycle) / real'(instruction_count) : 0.0);
+                $display("  x87 commands: %0d", x87_command_count);
+                $display("  x87 direct loads: %0d", x87_direct_load_count);
+                $display("  x87 control busy cycles: %0d", x87_control_busy_cycles);
+                $display("  x87 executor busy cycles: %0d", x87_executor_busy_cycles);
+                $display("  x87 WAIT stall cycles: %0d", x87_wait_stall_cycles);
+                if ($test$plusargs("profile_x87")) begin
+                    for (int i = 0; i < 2048; i++) begin
+                        if (x87_fop_count[i] != 0)
+                            $display("X87_FOP protocol %03x %0d", i, x87_fop_count[i]);
+                        if (x87_direct_load_fop_count[i] != 0)
+                            $display("X87_FOP direct-load %03x %0d", i,
+                                     x87_direct_load_fop_count[i]);
+                    end
+                end
+                $display("  FNV64[%08x+%08x]: %016x",
+                         checksum_start, checksum_bytes, checksum);
+                $display("  CS:EIP: %04X:%08X", dut.CS, dut.EIP);
+                $display("========================================");
+                #50;
+                $finish;
+            end
 
             // Test completed
             if (test_done) begin

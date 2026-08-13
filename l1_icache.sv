@@ -23,13 +23,14 @@ module l1_icache #(
     input         mem_ready,
     input         mem_resp_valid,
 
-    // Physical-address snoop.  Data-bearing CPU store snoops patch matching
-    // cached words; address-only external snoops invalidate matching lines.
-    input  [31:0] snoop_addr,
-    input  [31:0] snoop_data,
-    input   [3:0] snoop_be,
-    input         snoop_patch,
-    input         snoop_valid,
+    // CPU stores patch matching cached words; external DMA writes only
+    // invalidate. Separate addresses keep DMA out of the hit-response cone.
+    input  [31:0] patch_addr,
+    input  [31:0] patch_data,
+    input   [3:0] patch_be,
+    input         patch_valid,
+    input  [31:0] invalidate_addr,
+    input         invalidate_valid,
 
     input         cache_enable
 );
@@ -55,9 +56,9 @@ localparam integer TAG_DW_MSB = TAG_MSB - BYTE_OFFSET_BITS;
 
 wire [TAG_BITS-1:0] cpu_tag = cpu_addr[TAG_MSB:TAG_LSB];
 wire [SET_BITS-1:0] cpu_set = cpu_addr[SET_MSB:SET_LSB];
-wire [TAG_BITS-1:0] snoop_tag = snoop_addr[TAG_MSB:TAG_LSB];
-wire [SET_BITS-1:0] snoop_set = snoop_addr[SET_MSB:SET_LSB];
-wire [WORD_OFFSET_BITS-1:0] snoop_word = snoop_addr[LINE_OFFSET_BITS-1:BYTE_OFFSET_BITS];
+wire [TAG_BITS-1:0] patch_tag = patch_addr[TAG_MSB:TAG_LSB];
+wire [SET_BITS-1:0] patch_set = patch_addr[SET_MSB:SET_LSB];
+wire [WORD_OFFSET_BITS-1:0] patch_word = patch_addr[LINE_OFFSET_BITS-1:BYTE_OFFSET_BITS];
 // The prefetcher consumes whole 16-byte lines.  Unlike demand data accesses,
 // an instruction fetch cannot be satisfied by a single uncacheable DWORD
 // bypass without corrupting branch targets in the middle of the line.
@@ -253,11 +254,13 @@ wire [3:0] lookup_hit_vec = {
 wire lookup_hit = |lookup_hit_vec;
 wire [1:0] lookup_way = way_encode(lookup_hit_vec);
 wire [127:0] lookup_way_line = way_line_mux(lookup_way, rd_line0_r, rd_line1_r, rd_line2_r, rd_line3_r);
-// A snoop can arrive after the synchronous RAM lookup captured a valid line.
-// Reject that stale hit and refill; data-bearing snoops patch the refill below.
+// A CPU store can arrive after the synchronous RAM lookup captured a valid
+// line, so reject that live collision. External DMA invalidation is held and
+// reaches the registered snoop before the pending DMA write can commit; keeping
+// it out of this hit cone avoids a system-to-prefetch timing path.
 wire lookup_snoop_conflict =
     (snoop_valid_r && (snoop_tag_r == req_tag_r) && (snoop_set_r == req_set_r)) ||
-    (snoop_valid && (snoop_tag == req_tag_r) && (snoop_set == req_set_r));
+    (patch_valid && (patch_tag == req_tag_r) && (patch_set == req_set_r));
 wire lookup_hit_usable = lookup_hit && !lookup_snoop_conflict;
 wire can_accept_cpu = (state == S_IDLE) && !reset;
 wire accept_cpu = cpu_valid && ready_r && can_accept_cpu;
@@ -284,14 +287,14 @@ always_comb begin
     end
     if (snoop_valid_r && snoop_patch_r && word_match_dw(snoop_addr_dw_r, fill_tag, fill_set, fill_count))
         fill_word_next = merge32(fill_word_next, snoop_data_r, snoop_be_r);
-    if (snoop_valid && snoop_patch && word_match_dw(snoop_addr[31:2], fill_tag, fill_set, fill_count))
-        fill_word_next = merge32(fill_word_next, snoop_data, snoop_be);
+    if (patch_valid && word_match_dw(patch_addr[31:2], fill_tag, fill_set, fill_count))
+        fill_word_next = merge32(fill_word_next, patch_data, patch_be);
 
     fill_line_base = fill_line;
     if (snoop_valid_r && snoop_patch_r && line_match_dw(snoop_addr_dw_r, fill_tag, fill_set))
         fill_line_base = patch_line_word_be(fill_line_base, snoop_word_r, snoop_data_r, snoop_be_r);
-    if (snoop_valid && snoop_patch && line_match_dw(snoop_addr[31:2], fill_tag, fill_set))
-        fill_line_base = patch_line_word_be(fill_line_base, snoop_word, snoop_data, snoop_be);
+    if (patch_valid && line_match_dw(patch_addr[31:2], fill_tag, fill_set))
+        fill_line_base = patch_line_word_be(fill_line_base, patch_word, patch_data, patch_be);
     fill_line_next = patch_line_word(fill_line_base, fill_count, fill_word_next);
 end
 
@@ -365,15 +368,23 @@ always_ff @(posedge clk) begin
     end else begin
         ready_r <= (state == S_IDLE);
         resp_valid_r <= 1'b0;
-        snoop_valid_r <= snoop_valid;
-        if (snoop_valid) begin
-            snoop_tag_r <= snoop_tag;
-            snoop_set_r <= snoop_set;
-            snoop_word_r <= snoop_word;
-            snoop_addr_dw_r <= snoop_addr[31:2];
-            snoop_data_r <= snoop_data;
-            snoop_be_r <= snoop_be;
-            snoop_patch_r <= snoop_patch;
+        snoop_valid_r <= invalidate_valid || patch_valid;
+        if (invalidate_valid) begin
+            snoop_tag_r <= invalidate_addr[TAG_MSB:TAG_LSB];
+            snoop_set_r <= invalidate_addr[SET_MSB:SET_LSB];
+            snoop_word_r <= invalidate_addr[LINE_OFFSET_BITS-1:BYTE_OFFSET_BITS];
+            snoop_addr_dw_r <= invalidate_addr[31:2];
+            snoop_data_r <= 32'h0;
+            snoop_be_r <= 4'h0;
+            snoop_patch_r <= 1'b0;
+        end else if (patch_valid) begin
+            snoop_tag_r <= patch_tag;
+            snoop_set_r <= patch_set;
+            snoop_word_r <= patch_word;
+            snoop_addr_dw_r <= patch_addr[31:2];
+            snoop_data_r <= patch_data;
+            snoop_be_r <= patch_be;
+            snoop_patch_r <= 1'b1;
         end
 
         if (mem_valid_r && mem_ready)

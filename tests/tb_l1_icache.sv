@@ -19,11 +19,12 @@ module tb_l1_icache;
     wire mem_valid;
     reg mem_resp_valid = 1'b0;
 
-    reg [31:0] snoop_addr = 32'h0;
-    reg [31:0] snoop_data = 32'h0;
-    reg [3:0] snoop_be = 4'h0;
-    reg snoop_patch = 1'b0;
-    reg snoop_valid = 1'b0;
+    reg [31:0] patch_addr = 32'h0;
+    reg [31:0] patch_data = 32'h0;
+    reg [3:0] patch_be = 4'h0;
+    reg patch_valid = 1'b0;
+    reg [31:0] invalidate_addr = 32'h0;
+    reg invalidate_valid = 1'b0;
 
     l1_icache #(.SET_BITS(3)) dut (
         .clk(clk),
@@ -41,11 +42,12 @@ module tb_l1_icache;
         .mem_valid(mem_valid),
         .mem_ready(mem_ready),
         .mem_resp_valid(mem_resp_valid),
-        .snoop_addr(snoop_addr),
-        .snoop_data(snoop_data),
-        .snoop_be(snoop_be),
-        .snoop_patch(snoop_patch),
-        .snoop_valid(snoop_valid),
+        .patch_addr(patch_addr),
+        .patch_data(patch_data),
+        .patch_be(patch_be),
+        .patch_valid(patch_valid),
+        .invalidate_addr(invalidate_addr),
+        .invalidate_valid(invalidate_valid),
         .cache_enable(1'b1)
     );
 
@@ -131,15 +133,13 @@ module tb_l1_icache;
         mem_put32(32'h40, 32'hDEAD_BEEF);
         cpu_addr = 32'h40;
         cpu_valid = 1'b1;
-        snoop_addr = 32'h40;
-        snoop_data = 32'hDEAD_BEEF;
-        snoop_be = 4'hF;
-        snoop_patch = 1'b1;
-        snoop_valid = 1'b1;
+        patch_addr = 32'h40;
+        patch_data = 32'hDEAD_BEEF;
+        patch_be = 4'hF;
+        patch_valid = 1'b1;
         @(negedge clk);
         cpu_valid = 1'b0;
-        snoop_valid = 1'b0;
-        snoop_patch = 1'b0;
+        patch_valid = 1'b0;
         if (cpu_resp_valid) begin
             $display("L1 ICACHE SNOOP RACE exposed stale hit %032x", cpu_line);
             $fatal(1);
@@ -147,6 +147,38 @@ module tb_l1_icache;
         do @(negedge clk); while (!cpu_resp_valid);
         if (cpu_line !== 128'h00FF_EEDD_CCBB_AA99_8877_6655_DEAD_BEEF) begin
             $display("L1 ICACHE SNOOP RACE FAIL got=%032x", cpu_line);
+            $fatal(1);
+        end
+
+        // External DMA snoops are address-only and invalidate through the
+        // registered snoop stage. A later fetch must refill the modified line.
+        mem_put32(32'h44, 32'hCAFE_BABE);
+        @(negedge clk);
+        invalidate_addr = 32'h44;
+        invalidate_valid = 1'b1;
+        @(negedge clk);
+        invalidate_valid = 1'b0;
+        repeat (2) @(negedge clk);
+        cache_read(32'h40, 128'h00FF_EEDD_CCBB_AA99_CAFE_BABE_DEAD_BEEF);
+
+        // An address-only invalidation that coincides with lookup must also
+        // suppress the stale hit and force a refill through the registered stage.
+        do @(negedge clk); while (!cpu_ready);
+        mem_put32(32'h48, 32'h1234_5678);
+        cpu_addr = 32'h40;
+        cpu_valid = 1'b1;
+        invalidate_addr = 32'h48;
+        invalidate_valid = 1'b1;
+        @(negedge clk);
+        cpu_valid = 1'b0;
+        invalidate_valid = 1'b0;
+        if (cpu_resp_valid) begin
+            $display("L1 ICACHE INVALIDATE RACE exposed stale hit %032x", cpu_line);
+            $fatal(1);
+        end
+        do @(negedge clk); while (!cpu_resp_valid);
+        if (cpu_line !== 128'h00FF_EEDD_1234_5678_CAFE_BABE_DEAD_BEEF) begin
+            $display("L1 ICACHE INVALIDATE RACE FAIL got=%032x", cpu_line);
             $fatal(1);
         end
 

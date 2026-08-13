@@ -1,30 +1,42 @@
-// Area-oriented x87 state, transfer, and arithmetic scheduler. This module is
-// the sole owner of architectural stack and status updates.
-module x87_core
+// x87 data interface and control unit: command decode, microsequencing,
+// environment/status state, CPU transfers, and the 8-entry register stack.
+// The Intel 80387 block diagram places the stack inside the FPU; keeping its
+// RAM here lets stack and transfer control share one owner. Arithmetic is
+// delegated to x87_executor.
+module x87_control
     import x87_pkg::*, x87_ucode_pkg::*;
 (
-    input  logic        clk,
-    input  logic        reset,
+    input  logic        clk,                    // Core/system clock.
+    input  logic        reset,                  // Synchronous active-high reset.
 
-    input  logic        cmd_valid,
-    input  logic [10:0] cmd_fop,
-    output logic        cmd_ready,
+    input  logic        cmd_valid,              // CPU presents an x87 command.
+    input  logic [10:0] cmd_fop,                // Encoded ESC opcode and ModR/M.
+    output logic        cmd_ready,              // Core can accept cmd_fop now.
 
-    input  logic        word_in_valid,
-    input  logic  [3:0] word_in_be,
-    input  logic [31:0] word_in_data,
-    output logic        word_in_ready,
+    input  logic        direct_m32_valid,       // CPU posts a fault-checked m32 operand.
+    input  logic [10:0] direct_m32_fop,         // Memory-form FOP for direct_m32_data.
+    input  logic [31:0] direct_m32_data,        // Operand returned by demand memory.
+    output logic        direct_m32_ready,       // One-entry direct command queue is available.
 
-    input  logic        read_req_valid,
-    input  logic        read_req_data_port,
-    input  logic  [3:0] read_req_be,
-    output logic        read_req_ready,
-    output logic        read_resp_valid,
-    output logic [31:0] read_resp_data,
+    input  logic        word_in_valid,          // Operand-transfer word is valid.
+    input  logic  [3:0] word_in_be,             // Valid bytes in word_in_data.
+    input  logic [31:0] word_in_data,           // CPU-to-x87 transfer data.
+    output logic        word_in_ready,          // Core can accept a transfer word.
 
-    output logic        busy_n,
-    output logic        pereq,
-    output logic        error_n
+    input  logic        read_req_valid,         // CPU requests status or result data.
+    input  logic        read_req_data_port,     // 1=result data; 0=status word.
+    input  logic  [3:0] read_req_be,            // Requested result-data byte lanes.
+    output logic        read_req_ready,         // Core can accept the read request.
+    output logic        read_resp_valid,        // read_resp_data is valid.
+    output logic [31:0] read_resp_data,         // x87-to-CPU status/result data.
+
+    output logic        busy_n,                 // Active-low arithmetic busy status.
+    output logic        pereq,                  // CPU operand-transfer/completion request.
+    output logic        error_n,                // Active-low unmasked-error status.
+    output logic        queue_safe,             // Masked exceptions permit one queued command.
+
+    // Low-rate hardware diagnostics; sampled only by the MiSTer watchdog.
+    output logic [31:0] debug_state             // Packed command/executor progress.
 );
 
 typedef enum logic [3:0] {
@@ -61,6 +73,10 @@ logic [10:0] last_fop;
 logic [15:0] tag_word;
 logic        command_pending;
 logic [10:0] command_fop;
+x87_command_decode_t command_decode;
+logic        direct_m32_pending;
+logic [10:0] direct_m32_fop_r;
+logic [31:0] direct_m32_data_r;
 
 logic [2:0] stack_addr_a;
 logic [2:0] stack_addr_b;
@@ -81,7 +97,6 @@ logic [79:0] rx_payload;
 logic [3:0]  rx_byte_count;
 logic [159:0] rx_state_shift;
 
-logic [31:0] tx_words [0:2];
 logic [1:0] tx_count;
 logic [3:0] tx_last_be;
 tx_kind_t tx_kind;
@@ -126,7 +141,6 @@ logic         result_write_pending;
 logic [2:0]   result_write_index;
 logic [79:0]  result_write_raw;
 logic                   v2_exec_pending;
-logic                   v2_exec_start;
 x87_exec_op_t     v2_exec_op;
 convert_owner_t         v2_exec_owner;
 logic             [1:0] v2_exec_size;
@@ -162,24 +176,20 @@ logic         trans_atan2;
 logic         fptan_trans_pending;
 logic         fptan_div_pending;
 logic         fptan_push_after_result;
+logic   [7:0] v2_exec_uaddr;
 
 wire [15:0] status_word = {status_flags[15:14], top, status_flags[10:0]};
 wire [2:0] st0_index = top;
 wire [2:0] cmd_st_index = top + command_fop[2:0];
+assign debug_state = {
+    busy_n, cmd_ready, command_pending, v2_exec_busy,
+    v2_exec_done, v2_exec_pending, v2_exec_owner,
+    v2_exec_uaddr, last_fop, rx_kind, (tx_kind != TX_NONE)
+};
 assign stack_read_data_a = x87_from_m80(stack_read_raw_a);
 assign stack_read_data_b = x87_from_m80(stack_read_raw_b);
 assign push_pending_value = x87_from_m80(push_pending_raw);
-wire command_is_arithmetic = fop_is_addsub(command_fop) ||
-                             fop_is_compare(command_fop) ||
-                             fop_is_mul(command_fop) ||
-                             fop_is_div(command_fop) ||
-                             fop_is_memory_math(command_fop) ||
-                             (command_fop == 11'h1fa) ||
-                             (command_fop == 11'h1f2) ||
-                             (command_fop == 11'h1f3) ||
-                             (command_fop == 11'h1fe) ||
-                             (command_fop == 11'h1ff) ||
-                             (command_fop == 11'h1fc);
+wire command_is_arithmetic = command_decode.arithmetic;
 wire v2_exec_math_done = v2_exec_done &&
                             (v2_exec_owner == EXEC_MATH);
 wire trans_done = v2_exec_math_done &&
@@ -268,8 +278,18 @@ function automatic logic [10:0] fop_decode_key(input logic [10:0] fop);
     return {fop[10:8], 2'b00, fop[5:3], 3'b000};
 endfunction
 
-wire [10:0] cmd_fop_key = fop_decode_key(cmd_fop);
-wire [10:0] command_fop_key = fop_decode_key(command_fop);
+function automatic logic m32_is_normal(input logic [31:0] raw);
+    return (raw[30:23] != 8'h00) && (raw[30:23] != 8'hff);
+endfunction
+
+function automatic logic [79:0] normal_m32_to_m80(input logic [31:0] raw);
+    logic [14:0] extended_exp;
+    begin
+        extended_exp = {7'h0, raw[30:23]} + 15'd16256;
+        return {raw[31], extended_exp, 1'b1, raw[22:0], 40'h0};
+    end
+endfunction
+
 
 function automatic logic [15:0] architectural_tag_word();
     return tag_word;
@@ -306,84 +326,6 @@ function automatic logic [159:0] pack_state_pair(
         saved_odd = stack_empty(even_index + 3'd1)
                   ? x87_to_m80(x87_empty()) : odd_value;
         return {saved_odd, saved_even};
-    end
-endfunction
-
-function automatic logic fop_mask_match(
-    input logic [10:0] fop,
-    input logic [10:0] value,
-    input logic [10:0] mask
-);
-    return (fop & mask) == value;
-endfunction
-
-function automatic logic fop_is_addsub(input logic [10:0] fop);
-    logic register_form;
-    logic supported_group;
-    logic [2:0] operation;
-    begin
-        register_form = fop[7:6] == 2'b11;
-        supported_group = (fop[10:8] == 3'd0) ||
-                          (fop[10:8] == 3'd4) ||
-                          (fop[10:8] == 3'd6);
-        operation = fop[5:3];
-        return register_form && supported_group &&
-               ((operation == 3'd0) || (operation == 3'd4) ||
-                (operation == 3'd5));
-    end
-endfunction
-
-function automatic logic fop_is_compare_pop2(input logic [10:0] fop);
-    return (fop == 11'h2e9) || // FUCOMPP
-           (fop == 11'h6d9);   // FCOMPP
-endfunction
-
-function automatic logic fop_is_compare(input logic [10:0] fop);
-    logic register_form;
-    begin
-        register_form = fop[7:6] == 2'b11;
-        return (register_form && (fop[10:8] == 3'd0) &&
-                ((fop[5:3] == 3'd2) || (fop[5:3] == 3'd3))) ||
-               (register_form && (fop[10:8] == 3'd5) &&
-                ((fop[5:3] == 3'd4) || (fop[5:3] == 3'd5))) ||
-               fop_is_compare_pop2(fop) || (fop == 11'h1e4);
-    end
-endfunction
-
-function automatic logic fop_is_mul(input logic [10:0] fop);
-    logic register_form;
-    logic supported_group;
-    begin
-        register_form = fop[7:6] == 2'b11;
-        supported_group = (fop[10:8] == 3'd0) ||
-                          (fop[10:8] == 3'd4) ||
-                          (fop[10:8] == 3'd6);
-        return register_form && supported_group &&
-               (fop[5:3] == 3'd1);
-    end
-endfunction
-
-function automatic logic fop_is_div(input logic [10:0] fop);
-    logic register_form;
-    logic supported_group;
-    begin
-        register_form = fop[7:6] == 2'b11;
-        supported_group = (fop[10:8] == 3'd0) ||
-                          (fop[10:8] == 3'd4) ||
-                          (fop[10:8] == 3'd6);
-        return register_form && supported_group &&
-               ((fop[5:3] == 3'd6) || (fop[5:3] == 3'd7));
-    end
-endfunction
-
-function automatic logic fop_is_memory_math(input logic [10:0] fop);
-    logic supported_group;
-    begin
-        supported_group = (fop[10:8] == 3'd0) || // m32real
-                          (fop[10:8] == 3'd2) || // m32int
-                          (fop[10:8] == 3'd4) || // m64real
-                          (fop[10:8] == 3'd6);   // m16int
-        return (fop[7:6] != 2'b11) && supported_group;
     end
 endfunction
 
@@ -569,11 +511,14 @@ endtask
 // RPTI may replay a memory command after the x87 has accepted it but before
 // the CPU transfers the first operand word. Re-arming that exact empty receive
 // transaction is idempotent; unrelated commands remain blocked.
-wire restartable_rx_command = (rx_kind != RX_NONE) &&
+wire core_cmd_direct = direct_m32_pending;
+wire core_cmd_valid = core_cmd_direct || cmd_valid;
+wire [10:0] core_cmd_fop = core_cmd_direct ? direct_m32_fop_r : cmd_fop;
+wire restartable_rx_command = !core_cmd_direct && (rx_kind != RX_NONE) &&
                               (tx_kind == TX_NONE) &&
                               (transfer_count == 2'd0) &&
-                              (cmd_fop == last_fop);
-assign cmd_ready = ((rx_kind == RX_NONE) || restartable_rx_command) &&
+                              (core_cmd_fop == last_fop);
+wire core_cmd_ready = ((rx_kind == RX_NONE) || restartable_rx_command) &&
                    (tx_kind == TX_NONE) &&
                    (transfer_count == 2'd0) &&
                    !command_pending && !stack_write_a && !stack_write_b &&
@@ -581,10 +526,14 @@ assign cmd_ready = ((rx_kind == RX_NONE) || restartable_rx_command) &&
                    (!memory_math_pending || restartable_rx_command) &&
                    !store_pending && !pop_pending &&
                    !result_write_pending &&
-                   !v2_exec_pending && !v2_exec_start &&
+                   !v2_exec_pending &&
                    !v2_exec_busy && !v2_exec_done &&
                    !fptan_trans_pending && !fptan_div_pending &&
                    !fptan_push_after_result && !read_resp_valid;
+// Direct memory commands remain ordered ahead of later bridge commands. Only
+// masked-exception mode permits capture while a predecessor is still active.
+assign direct_m32_ready = !direct_m32_pending && !cmd_valid && queue_safe;
+assign cmd_ready = !direct_m32_pending && core_cmd_ready;
 assign word_in_ready = (rx_kind != RX_NONE) && transfer_push_ready;
 assign read_req_ready = !read_resp_valid &&
                         (!read_req_data_port ||
@@ -597,25 +546,26 @@ wire [79:0] rx_payload_next = append_transfer_bytes(
 wire [2:0] tx_entry_bytes = transfer_byte_count(transfer_pop_data[35:32]);
 wire [2:0] tx_request_bytes = transfer_byte_count(read_req_be);
 wire tx_entry_consumed = tx_byte_offset + tx_request_bytes >= tx_entry_bytes;
+wire v2_exec_start = v2_exec_pending && !v2_exec_busy;
 assign busy_n = !(((v2_exec_owner == EXEC_MATH) &&
-                   (v2_exec_pending || v2_exec_start ||
-                    v2_exec_busy)) ||
+                   (v2_exec_pending || v2_exec_busy)) ||
                   (command_pending && command_is_arithmetic));
 // PEREQ releases the 80386 coprocessor-wait microcode as well as requesting
 // operand transfers. Keep it asserted throughout an accepted command because
 // a one-cycle completion pulse can precede the CPU's CORWAIT sample.
 assign pereq = (rx_kind != RX_NONE) ||
                ((tx_kind != TX_NONE) && transfer_pop_valid) ||
-               command_pending || stack_write_a || stack_write_b ||
+               direct_m32_pending || command_pending ||
+               stack_write_a || stack_write_b ||
                push_pending || memory_math_pending ||
                store_pending || pop_pending || result_write_pending ||
-               v2_exec_pending || v2_exec_start ||
-               v2_exec_busy || v2_exec_done ||
+               v2_exec_pending || v2_exec_busy || v2_exec_done ||
                fptan_trans_pending || fptan_div_pending ||
                fptan_push_after_result ||
                status_read_pending || command_complete_pulse ||
                (pereq_release_hold != 2'b00);
 assign error_n = !status_flags[7];
+assign queue_safe = &control_word[5:0] && error_n;
 
 // One physical three-word queue serves both protocol directions. A command
 // cannot change direction until the queue is empty.
@@ -624,7 +574,7 @@ always_comb begin
     tx_produce_data = 36'h0;
     case (tx_kind)
         TX_VALUE: begin
-            tx_produce_data[31:0] = tx_words[tx_index[1:0]];
+            tx_produce_data[31:0] = tx_state_shift[31:0];
             tx_produce_data[35:32] =
                 (tx_index + 5'd1 == {3'h0, tx_count}) ? tx_last_be : 4'hf;
         end
@@ -647,10 +597,15 @@ always_comb begin
         default: ;
     endcase
 
-    transfer_push_valid = (rx_kind != RX_NONE)
-                        ? word_in_valid : tx_produce_valid;
-    transfer_push_data = (rx_kind != RX_NONE)
-                       ? {word_in_be, word_in_data} : tx_produce_data;
+    if (core_cmd_direct && core_cmd_valid && core_cmd_ready) begin
+        transfer_push_valid = 1'b1;
+        transfer_push_data = {4'hf, direct_m32_data_r};
+    end else begin
+        transfer_push_valid = (rx_kind != RX_NONE)
+                            ? word_in_valid : tx_produce_valid;
+        transfer_push_data = (rx_kind != RX_NONE)
+                           ? {word_in_be, word_in_data} : tx_produce_data;
+    end
     transfer_pop_ready = (rx_kind != RX_NONE) ? 1'b1
                        : ((tx_kind != TX_NONE) && read_req_valid &&
                           read_req_ready && read_req_data_port &&
@@ -661,6 +616,15 @@ assign tx_produce_fire = (tx_kind != TX_NONE) &&
                          transfer_push_valid && transfer_push_ready;
 assign tx_consume_fire = (tx_kind != TX_NONE) &&
                          transfer_pop_valid && transfer_pop_ready;
+
+// Command decode and stack operands are synchronous and return together one
+// cycle after command acceptance. This keeps FOP classification out of the
+// command-dispatch datapath without adding a protocol cycle.
+x87_command_rom command_rom (
+    .clk(clk),
+    .address(core_cmd_fop),
+    .decode(command_decode)
+);
 
 x87_transfer_fifo transfer_fifo (
     .clk(clk),
@@ -680,11 +644,11 @@ x87_transfer_fifo transfer_fifo (
 always_comb begin
     stack_port_addr_a = stack_addr_a;
     stack_port_addr_b = stack_addr_b;
-    if (cmd_valid && cmd_ready) begin
+    if (core_cmd_valid && core_cmd_ready) begin
         stack_port_addr_a = top;
-        stack_port_addr_b = ((cmd_fop_key == 11'h530) ||
-                             (cmd_fop == 11'h1f3))
-                          ? top + 3'd1 : top + cmd_fop[2:0];
+        stack_port_addr_b = ((fop_decode_key(core_cmd_fop) == 11'h530) ||
+                             (core_cmd_fop == 11'h1f3))
+                          ? top + 3'd1 : top + core_cmd_fop[2:0];
     end
 end
 
@@ -731,7 +695,8 @@ x87_executor executor (
     .rounded_up(v2_exec_rounded_up),
     .compare_unordered(v2_compare_unordered),
     .compare_less(v2_compare_less),
-    .compare_equal(v2_compare_equal)
+    .compare_equal(v2_compare_equal),
+    .debug_uaddr(v2_exec_uaddr)
 );
 
 always_ff @(posedge clk) begin
@@ -742,6 +707,9 @@ always_ff @(posedge clk) begin
         last_fop <= 11'h000;
         command_pending <= 1'b0;
         command_fop <= 11'h000;
+        direct_m32_pending <= 1'b0;
+        direct_m32_fop_r <= 11'h000;
+        direct_m32_data_r <= 32'h0;
         stack_addr_a <= 3'd0;
         stack_addr_b <= 3'd1;
         stack_write_a <= 1'b0;
@@ -760,9 +728,6 @@ always_ff @(posedge clk) begin
         tx_generation_done <= 1'b0;
         tx_byte_offset <= 3'd0;
         tx_state_shift <= '0;
-        tx_words[0] <= 32'h0;
-        tx_words[1] <= 32'h0;
-        tx_words[2] <= 32'h0;
         status_read_pending <= 1'b0;
         command_complete_pulse <= 1'b0;
         pereq_release_hold <= 2'b00;
@@ -788,7 +753,6 @@ always_ff @(posedge clk) begin
         result_write_index <= 3'd0;
         result_write_raw <= 80'h0;
         v2_exec_pending <= 1'b0;
-        v2_exec_start <= 1'b0;
         v2_exec_op <= X87_CONVERT_FLD_M32;
         v2_exec_owner <= EXEC_NONE;
         v2_exec_size <= 2'd0;
@@ -814,8 +778,13 @@ always_ff @(posedge clk) begin
         command_complete_pulse <= 1'b0;
         stack_write_a <= 1'b0;
         stack_write_b <= 1'b0;
-        v2_exec_start <= 1'b0;
         pereq_release_hold <= {1'b0, pereq_release_hold[1]};
+
+        if (direct_m32_valid && direct_m32_ready) begin
+            direct_m32_pending <= 1'b1;
+            direct_m32_fop_r <= direct_m32_fop;
+            direct_m32_data_r <= direct_m32_data;
+        end
 
         // Transfer conversion and TOP-dependent stack selection are separate
         // cycles. PEREQ keeps the CPU stalled until this commit completes.
@@ -869,9 +838,7 @@ always_ff @(posedge clk) begin
             if (!store_integer && (store_width == 2'd2)) begin
                 logic [79:0] store_m80_value;
                 store_m80_value = store_source_raw;
-                tx_words[0] <= store_m80_value[31:0];
-                tx_words[1] <= store_m80_value[63:32];
-                tx_words[2] <= {16'h0, store_m80_value[79:64]};
+                tx_state_shift <= {80'h0, store_m80_value};
                 tx_count <= 2'd3;
                 tx_last_be <= 4'h3;
                 tx_index <= 5'd0;
@@ -893,8 +860,7 @@ always_ff @(posedge clk) begin
             store_pending <= 1'b0;
         end
 
-        if (v2_exec_pending && !v2_exec_busy) begin
-            v2_exec_start <= 1'b1;
+        if (v2_exec_start) begin
             v2_exec_pending <= 1'b0;
         end
 
@@ -908,8 +874,7 @@ always_ff @(posedge clk) begin
                         raise_invalid();
                 end
                 X87_COMMIT_TRANSFER: begin
-                    tx_words[0] <= v2_exec_transfer_out[31:0];
-                    tx_words[1] <= v2_exec_transfer_out[63:32];
+                    tx_state_shift <= {96'h0, v2_exec_transfer_out};
                     tx_count <= ((store_integer && (store_width == 2'd2)) ||
                                  (!store_integer && (store_width == 2'd1)))
                               ? 2'd2 : 2'd1;
@@ -1096,14 +1061,16 @@ always_ff @(posedge clk) begin
             end
         end
 
-        if (cmd_valid && cmd_ready) begin
-            last_fop <= cmd_fop;
-            command_fop <= cmd_fop;
+        if (core_cmd_valid && core_cmd_ready) begin
+            last_fop <= core_cmd_fop;
+            command_fop <= core_cmd_fop;
             command_pending <= 1'b1;
             stack_addr_a <= top;
-            stack_addr_b <= ((cmd_fop_key == 11'h530) ||
-                             (cmd_fop == 11'h1f3))
-                          ? top + 3'd1 : top + cmd_fop[2:0];
+            stack_addr_b <= ((fop_decode_key(core_cmd_fop) == 11'h530) ||
+                             (core_cmd_fop == 11'h1f3))
+                          ? top + 3'd1 : top + core_cmd_fop[2:0];
+            if (core_cmd_direct)
+                direct_m32_pending <= 1'b0;
         end
 
         if (word_in_valid && word_in_ready)
@@ -1117,8 +1084,7 @@ always_ff @(posedge clk) begin
         if (command_pending) begin
             command_pending <= 1'b0;
             command_complete_pulse <= 1'b1;
-            status_read_pending <= fop_reads_status(command_fop) ||
-                                   (command_fop_key == 11'h138);
+            status_read_pending <= command_decode.status_pending;
             rx_kind <= RX_NONE;
             rx_index <= 5'd0;
             rx_payload <= 80'h0;
@@ -1128,18 +1094,18 @@ always_ff @(posedge clk) begin
             tx_byte_offset <= 3'd0;
             tx_generation_done <= 1'b0;
 
-            case (command_fop_key)
-                11'h3e3: begin                         // FNINIT
+            case (command_decode.action)
+                X87_CMD_FNINIT: begin
                     control_word <= 16'h037f;
                     status_flags <= 16'h0000;
                     top <= 3'd0;
                     clear_stack();
                 end
-                11'h3e2: begin                        // FNCLEX
+                X87_CMD_FNCLEX: begin
                     status_flags[7:0] <= 8'h00;
                     status_flags[15] <= 1'b0;
                 end
-                11'h1e0: begin                        // FCHS
+                X87_CMD_FCHS: begin
                     if (stack_empty(st0_index)) begin
                         raise_stack_fault(1'b0);
                         if (control_word[0])
@@ -1157,7 +1123,7 @@ always_ff @(posedge clk) begin
                         command_complete_pulse <= 1'b0;
                     end
                 end
-                11'h1e1: begin                        // FABS
+                X87_CMD_FABS: begin
                     if (stack_empty(st0_index)) begin
                         raise_stack_fault(1'b0);
                         if (control_word[0])
@@ -1174,7 +1140,7 @@ always_ff @(posedge clk) begin
                         command_complete_pulse <= 1'b0;
                     end
                 end
-                11'h1e5: begin                        // FXAM
+                X87_CMD_FXAM: begin
                     status_flags[9] <= stack_empty(st0_index)
                                      ? 1'b0 : stack_read_data_a.sign;
                     case (stack_empty(st0_index)
@@ -1211,29 +1177,33 @@ always_ff @(posedge clk) begin
                         end
                     endcase
                 end
-                11'h1e8: schedule_push(x87_one());       // FLD1
-                11'h1e9: schedule_push_raw(              // FLDL2T
-                    control_word[11:10] == 2'b10
-                        ? 80'h4000_d49a784bcd1b8aff
-                        : 80'h4000_d49a784bcd1b8afe);
-                11'h1ea: schedule_push_raw(              // FLDL2E
-                    !control_word[10]
-                        ? 80'h3fff_b8aa3b295c17f0bc
-                        : 80'h3fff_b8aa3b295c17f0bb);
-                11'h1eb: schedule_push_raw(              // FLDPI
-                    !control_word[10]
-                        ? 80'h4000_c90fdaa22168c235
-                        : 80'h4000_c90fdaa22168c234);
-                11'h1ec: schedule_push_raw(              // FLDLG2
-                    !control_word[10]
-                        ? 80'h3ffd_9a209a84fbcff799
-                        : 80'h3ffd_9a209a84fbcff798);
-                11'h1ed: schedule_push_raw(              // FLDLN2
-                    !control_word[10]
-                        ? 80'h3ffe_b17217f7d1cf79ac
-                        : 80'h3ffe_b17217f7d1cf79ab);
-                11'h1ee: schedule_push(x87_zero(1'b0));  // FLDZ
-                11'h1fa: begin                           // FSQRT
+                X87_CMD_PUSH_CONST: begin
+                    case (command_decode.argument)
+                        4'd0: schedule_push(x87_one());       // FLD1
+                        4'd1: schedule_push_raw(              // FLDL2T
+                            control_word[11:10] == 2'b10
+                                ? 80'h4000_d49a784bcd1b8aff
+                                : 80'h4000_d49a784bcd1b8afe);
+                        4'd2: schedule_push_raw(              // FLDL2E
+                            !control_word[10]
+                                ? 80'h3fff_b8aa3b295c17f0bc
+                                : 80'h3fff_b8aa3b295c17f0bb);
+                        4'd3: schedule_push_raw(              // FLDPI
+                            !control_word[10]
+                                ? 80'h4000_c90fdaa22168c235
+                                : 80'h4000_c90fdaa22168c234);
+                        4'd4: schedule_push_raw(              // FLDLG2
+                            !control_word[10]
+                                ? 80'h3ffd_9a209a84fbcff799
+                                : 80'h3ffd_9a209a84fbcff798);
+                        4'd5: schedule_push_raw(              // FLDLN2
+                            !control_word[10]
+                                ? 80'h3ffe_b17217f7d1cf79ac
+                                : 80'h3ffe_b17217f7d1cf79ab);
+                        default: schedule_push(x87_zero(1'b0)); // FLDZ
+                    endcase
+                end
+                X87_CMD_FSQRT: begin
                     if (stack_empty(st0_index)) begin
                         raise_stack_fault(1'b0);
                         if (control_word[0]) begin
@@ -1257,7 +1227,7 @@ always_ff @(posedge clk) begin
                         v2_exec_pending <= 1'b1;
                     end
                 end
-                11'h1f2: begin                           // FPTAN
+                X87_CMD_FPTAN: begin
                     if (stack_empty(st0_index)) begin
                         raise_stack_fault(1'b0);
                         if (control_word[0]) begin
@@ -1300,7 +1270,7 @@ always_ff @(posedge clk) begin
                         fptan_trans_pending <= 1'b1;
                     end
                 end
-                11'h1f3: begin                           // FPATAN
+                X87_CMD_FPATAN: begin
                     if (stack_empty(st0_index) ||
                         stack_empty(top + 3'd1)) begin
                         raise_stack_fault(1'b0);
@@ -1330,7 +1300,7 @@ always_ff @(posedge clk) begin
                         v2_exec_pending <= 1'b1;
                     end
                 end
-                11'h1fe, 11'h1ff: begin                 // FSIN / FCOS
+                X87_CMD_TRIG: begin                    // FSIN / FCOS
                     if (stack_empty(st0_index)) begin
                         raise_stack_fault(1'b0);
                         if (control_word[0]) begin
@@ -1347,7 +1317,7 @@ always_ff @(posedge clk) begin
                         arith_dest_index <= st0_index;
                         arith_operand_a <= stack_read_data_a;
                         arith_operand_b <= x87_empty();
-                        trans_cosine <= command_fop[0];
+                        trans_cosine <= command_decode.argument[0];
                         trans_tangent_pair <= 1'b0;
                         trans_atan2 <= 1'b0;
                         v2_exec_op <= X87_ARITH_TRANS;
@@ -1357,7 +1327,7 @@ always_ff @(posedge clk) begin
                         v2_exec_pending <= 1'b1;
                     end
                 end
-                11'h1fc: begin                           // FRNDINT
+                X87_CMD_FRNDINT: begin
                     if (stack_empty(st0_index)) begin
                         raise_stack_fault(1'b0);
                         if (control_word[0]) begin
@@ -1380,223 +1350,149 @@ always_ff @(posedge clk) begin
                         v2_exec_pending <= 1'b1;
                     end
                 end
-                11'h1f6: top <= top - 3'd1;           // FDECSTP
-                11'h1f7: top <= top + 3'd1;           // FINCSTP
-                11'h130: begin                        // FNSTENV/FSTENV
+                X87_CMD_FDECSTP: top <= top - 3'd1;
+                X87_CMD_FINCSTP: top <= top + 3'd1;
+                X87_CMD_TX_ENV: begin                 // FNSTENV/FSTENV
                     tx_kind <= TX_ENV;
                     tx_generation_done <= 1'b0;
                     command_complete_pulse <= 1'b0;
                 end
-                11'h530: begin                        // FNSAVE/FSAVE
+                X87_CMD_TX_STATE: begin               // FNSAVE/FSAVE
                     tx_kind <= TX_STATE;
                     tx_generation_done <= 1'b0;
                     command_complete_pulse <= 1'b0;
                     tx_state_shift <= pack_state_pair(
                         stack_read_raw_a, stack_read_raw_b, top);
                 end
-                11'h120: rx_kind <= RX_ENV;            // FLDENV
-                11'h520: rx_kind <= RX_STATE;          // FRSTOR
-                default: begin
+                X87_CMD_RX_ENV: rx_kind <= RX_ENV;     // FLDENV
+                X87_CMD_RX_STATE: rx_kind <= RX_STATE; // FRSTOR
+                X87_CMD_ARITH: begin
                     // Register arithmetic and comparisons use the synchronous
                     // stack outputs captured with this command.
-                    if (fop_is_addsub(command_fop) ||
-                        fop_is_mul(command_fop) ||
-                        fop_is_div(command_fop) ||
-                        fop_is_compare(command_fop)) begin
-                        logic needs_sti;
-                        logic [1:0] requested_pop;
-
-                        needs_sti = command_fop != 11'h1e4; // FTST uses +0.
-                        requested_pop = 2'd0;
-                        if (((command_fop[10:8] == 3'd0) &&
-                             (command_fop[5:3] == 3'd3)) ||
-                            ((command_fop[10:8] == 3'd5) &&
-                             (command_fop[5:3] == 3'd5)) ||
-                            ((fop_is_addsub(command_fop) ||
-                              fop_is_mul(command_fop) ||
-                              fop_is_div(command_fop)) &&
-                             (command_fop[10:8] == 3'd6)))
-                            requested_pop = 2'd1;
-                        if (fop_is_compare_pop2(command_fop))
-                            requested_pop = 2'd2;
-
-                        if (stack_empty(st0_index) ||
-                            (needs_sti && stack_empty(cmd_st_index))) begin
-                            raise_stack_fault(1'b0);
-                            if (fop_is_compare(command_fop)) begin
-                                status_flags[14] <= 1'b1;
-                                status_flags[10] <= 1'b1;
-                                status_flags[8] <= 1'b1;
-                            end
-                            if (control_word[0]) begin
-                                if (fop_is_addsub(command_fop) ||
-                                    fop_is_mul(command_fop) ||
-                                    fop_is_div(command_fop))
-                                    write_stack(
-                                        (command_fop[10:8] == 3'd0)
-                                            ? st0_index : cmd_st_index,
-                                        x87_indefinite());
-                                if (requested_pop != 0) begin
-                                    tag_word[top*2 +: 2] <= 2'b11;
-                                    if (requested_pop == 2)
-                                        tag_word[(top + 3'd1)*2 +: 2] <= 2'b11;
-                                    top <= top + requested_pop;
-                                end
-                            end
-                        end else begin
-                            command_complete_pulse <= 1'b0;
-                            v2_exec_op <= fop_is_div(command_fop)
-                                ? X87_ARITH_DIV
-                                : fop_is_mul(command_fop)
-                                ? X87_ARITH_MUL
-                                : fop_is_compare(command_fop)
-                                ? X87_ARITH_COMPARE
-                                : ((command_fop[5:3] == 3'd4) ||
-                                   (command_fop[5:3] == 3'd5))
-                                ? X87_ARITH_SUB : X87_ARITH_ADD;
-                            v2_exec_owner <= EXEC_MATH;
-                            v2_exec_size <= 2'd0;
-                            v2_exec_transfer <= 64'h0;
-                            v2_exec_pending <= 1'b1;
-                            arith_compare <= fop_is_compare(command_fop);
-                            arith_quiet_compare <=
-                                command_fop[10:8] == 3'd5; // FUCOM[P]
-                            arith_write_result <= fop_is_addsub(command_fop) ||
-                                                  fop_is_mul(command_fop) ||
-                                                  fop_is_div(command_fop);
-                            arith_pop_count <= requested_pop;
-                            arith_dest_index <=
-                                (command_fop[10:8] == 3'd0)
-                                    ? st0_index : cmd_st_index;
-
-                            if (command_fop == 11'h1e4) begin
-                                arith_operand_a <= stack_read_data_a;
-                                arith_operand_b <= x87_zero(1'b0);
-                            end else if ((fop_is_addsub(command_fop) ||
-                                         fop_is_div(command_fop)) &&
-                                        ((command_fop[5:3] == 3'd5) ||
-                                         (command_fop[5:3] == 3'd7))) begin
-                                arith_operand_a <= stack_read_data_b;
-                                arith_operand_b <= stack_read_data_a;
-                            end else begin
-                                arith_operand_a <= stack_read_data_a;
-                                arith_operand_b <= stack_read_data_b;
+                    if (stack_empty(st0_index) ||
+                        (command_decode.needs_sti &&
+                         stack_empty(cmd_st_index))) begin
+                        raise_stack_fault(1'b0);
+                        if (command_decode.compare) begin
+                            status_flags[14] <= 1'b1;
+                            status_flags[10] <= 1'b1;
+                            status_flags[8] <= 1'b1;
+                        end
+                        if (control_word[0]) begin
+                            if (command_decode.write_result)
+                                write_stack(
+                                    command_decode.dest_sti
+                                        ? cmd_st_index : st0_index,
+                                    x87_indefinite());
+                            if (command_decode.pop_count != 0) begin
+                                tag_word[top*2 +: 2] <= 2'b11;
+                                if (command_decode.pop_count == 2)
+                                    tag_word[(top + 3'd1)*2 +: 2] <= 2'b11;
+                                top <= top + command_decode.pop_count;
                             end
                         end
-                    end
+                    end else begin
+                        command_complete_pulse <= 1'b0;
+                        v2_exec_op <= command_decode.exec_op;
+                        v2_exec_owner <= EXEC_MATH;
+                        v2_exec_size <= 2'd0;
+                        v2_exec_transfer <= 64'h0;
+                        v2_exec_pending <= 1'b1;
+                        arith_compare <= command_decode.compare;
+                        arith_quiet_compare <= command_decode.quiet_compare;
+                        arith_write_result <= command_decode.write_result;
+                        arith_pop_count <= command_decode.pop_count;
+                        arith_dest_index <= command_decode.dest_sti
+                                          ? cmd_st_index : st0_index;
 
-                    // Register stack operations.
-                    else if (fop_mask_match(command_fop, 11'h1c0, 11'h7f8)) begin
-                        if (stack_empty(cmd_st_index)) begin          // FLD ST(i)
-                            raise_stack_fault(1'b0);
-                            if (control_word[0])
-                                push_value(x87_indefinite());
+                        if (!command_decode.needs_sti) begin // FTST uses +0.
+                            arith_operand_a <= stack_read_data_a;
+                            arith_operand_b <= x87_zero(1'b0);
+                        end else if (command_decode.reverse_operands) begin
+                            arith_operand_a <= stack_read_data_b;
+                            arith_operand_b <= stack_read_data_a;
                         end else begin
-                            push_raw_tagged(
-                                stack_read_raw_b,
-                                tag_word[cmd_st_index*2 +: 2]);
+                            arith_operand_a <= stack_read_data_a;
+                            arith_operand_b <= stack_read_data_b;
                         end
                     end
-                    else if (fop_mask_match(command_fop, 11'h1c8, 11'h7f8)) begin
-                        if (stack_empty(st0_index) || stack_empty(cmd_st_index)) begin
-                            raise_stack_fault(1'b0);                  // FXCH ST(i)
-                            if (control_word[0]) begin
-                                stack_addr_a <= st0_index;
-                                stack_write_data_a <= x87_to_m80(x87_indefinite());
-                                stack_write_a <= 1'b1;
-                                if (cmd_st_index != st0_index) begin
-                                    stack_addr_b <= cmd_st_index;
-                                    stack_write_data_b <= x87_to_m80(x87_indefinite());
-                                    stack_write_b <= 1'b1;
-                                end
-                                tag_word[st0_index*2 +: 2] <= 2'b10;
-                                tag_word[cmd_st_index*2 +: 2] <= 2'b10;
-                            end
-                        end else begin
+                end
+
+                // Register stack operations.
+                X87_CMD_FLD_ST: begin
+                    if (stack_empty(cmd_st_index)) begin
+                        raise_stack_fault(1'b0);
+                        if (control_word[0])
+                            push_value(x87_indefinite());
+                    end else begin
+                        push_raw_tagged(
+                            stack_read_raw_b,
+                            tag_word[cmd_st_index*2 +: 2]);
+                    end
+                end
+                X87_CMD_FXCH: begin
+                    if (stack_empty(st0_index) || stack_empty(cmd_st_index)) begin
+                        raise_stack_fault(1'b0);
+                        if (control_word[0]) begin
                             stack_addr_a <= st0_index;
-                            stack_write_data_a <= stack_read_raw_b;
+                            stack_write_data_a <= x87_to_m80(x87_indefinite());
                             stack_write_a <= 1'b1;
                             if (cmd_st_index != st0_index) begin
                                 stack_addr_b <= cmd_st_index;
-                                stack_write_data_b <= stack_read_raw_a;
+                                stack_write_data_b <= x87_to_m80(x87_indefinite());
                                 stack_write_b <= 1'b1;
                             end
-                            tag_word[st0_index*2 +: 2] <=
-                                tag_word[cmd_st_index*2 +: 2];
-                            tag_word[cmd_st_index*2 +: 2] <=
-                                tag_word[st0_index*2 +: 2];
+                            tag_word[st0_index*2 +: 2] <= 2'b10;
+                            tag_word[cmd_st_index*2 +: 2] <= 2'b10;
                         end
-                    end else if (fop_mask_match(command_fop, 11'h5c0, 11'h7f8)) begin
-                        tag_word[cmd_st_index*2 +: 2] <= 2'b11;
+                    end else begin
+                        stack_addr_a <= st0_index;
+                        stack_write_data_a <= stack_read_raw_b;
+                        stack_write_a <= 1'b1;
+                        if (cmd_st_index != st0_index) begin
+                            stack_addr_b <= cmd_st_index;
+                            stack_write_data_b <= stack_read_raw_a;
+                            stack_write_b <= 1'b1;
+                        end
+                        tag_word[st0_index*2 +: 2] <=
+                            tag_word[cmd_st_index*2 +: 2];
+                        tag_word[cmd_st_index*2 +: 2] <=
+                            tag_word[st0_index*2 +: 2];
                     end
-                    else if (fop_mask_match(command_fop, 11'h5d8, 11'h7f8)) begin
-                        if (stack_empty(st0_index)) begin             // FSTP ST(i)
-                            raise_stack_fault(1'b0);
-                            if (control_word[0]) begin
-                                write_stack(cmd_st_index, x87_indefinite());
-                                pop_value();
-                            end
-                        end else begin
-                            write_stack_raw(cmd_st_index, stack_read_raw_a);
+                end
+                X87_CMD_FFREE:
+                    tag_word[cmd_st_index*2 +: 2] <= 2'b11;
+                X87_CMD_FSTP_ST: begin
+                    if (stack_empty(st0_index)) begin
+                        raise_stack_fault(1'b0);
+                        if (control_word[0]) begin
+                            write_stack(cmd_st_index, x87_indefinite());
                             pop_value();
                         end
+                    end else begin
+                        write_stack_raw(cmd_st_index, stack_read_raw_a);
+                        pop_value();
                     end
-
-                    // Memory loads. ModR/M r/m bits do not affect the sidecar.
-                    else if (fop_is_memory_math(command_fop)) begin
-                        memory_math_pending <= 1'b1;
-                        memory_math_mul <= command_fop[5:3] == 3'd1;
-                        memory_math_div <= (command_fop[5:3] == 3'd6) ||
-                                           (command_fop[5:3] == 3'd7);
-                        memory_math_compare <= (command_fop[5:3] == 3'd2) ||
-                                               (command_fop[5:3] == 3'd3);
-                        memory_math_subtract <= (command_fop[5:3] == 3'd4) ||
-                                                (command_fop[5:3] == 3'd5);
-                        memory_math_reverse <= (command_fop[5:3] == 3'd5) ||
-                                               (command_fop[5:3] == 3'd7);
-                        memory_math_pop <= command_fop[5:3] == 3'd3;
-                        case (command_fop[10:8])
-                            3'd0: rx_kind <= RX_M32;
-                            3'd2: rx_kind <= RX_I32;
-                            3'd4: rx_kind <= RX_M64;
-                            default: rx_kind <= RX_I16;
-                        endcase
-                    end
-                    else if ((command_fop[10:8] == 3'd1) && (command_fop[5:3] == 3'd0))
-                        rx_kind <= RX_M32;                            // FLD m32real
-                    else if ((command_fop[10:8] == 3'd5) && (command_fop[5:3] == 3'd0))
-                        rx_kind <= RX_M64;                            // FLD m64real
-                    else if ((command_fop[10:8] == 3'd3) && (command_fop[5:3] == 3'd5))
-                        rx_kind <= RX_M80;                            // FLD m80real
-                    else if ((command_fop[10:8] == 3'd7) && (command_fop[5:3] == 3'd0))
-                        rx_kind <= RX_I16;                            // FILD m16int
-                    else if ((command_fop[10:8] == 3'd3) && (command_fop[5:3] == 3'd0))
-                        rx_kind <= RX_I32;                            // FILD m32int
-                    else if ((command_fop[10:8] == 3'd7) && (command_fop[5:3] == 3'd5))
-                        rx_kind <= RX_I64;                            // FILD m64int
-                    else if ((command_fop[10:8] == 3'd1) && (command_fop[5:3] == 3'd5))
-                        rx_kind <= RX_CONTROL;                        // FLDCW
-
-                    // Real stores.
-                    else if ((command_fop[10:8] == 3'd1) &&
-                             ((command_fop[5:3] == 3'd2) || (command_fop[5:3] == 3'd3)))
-                        start_store(1'b0, 2'd0, command_fop[3]);     // FST[P] m32
-                    else if ((command_fop[10:8] == 3'd5) &&
-                             ((command_fop[5:3] == 3'd2) || (command_fop[5:3] == 3'd3)))
-                        start_store(1'b0, 2'd1, command_fop[3]);     // FST[P] m64
-                    else if ((command_fop[10:8] == 3'd3) && (command_fop[5:3] == 3'd7))
-                        start_store(1'b0, 2'd2, 1'b1);               // FSTP m80
-
-                    // Integer stores.
-                    else if ((command_fop[10:8] == 3'd7) &&
-                             ((command_fop[5:3] == 3'd2) || (command_fop[5:3] == 3'd3)))
-                        start_store(1'b1, 2'd0, command_fop[3]);     // FIST[P] m16
-                    else if ((command_fop[10:8] == 3'd3) &&
-                             ((command_fop[5:3] == 3'd2) || (command_fop[5:3] == 3'd3)))
-                        start_store(1'b1, 2'd1, command_fop[3]);     // FIST[P] m32
-                    else if ((command_fop[10:8] == 3'd7) && (command_fop[5:3] == 3'd7))
-                        start_store(1'b1, 2'd2, 1'b1);               // FISTP m64
                 end
+
+                X87_CMD_MEMORY_MATH: begin
+                    memory_math_pending <= 1'b1;
+                    memory_math_mul <= command_decode.exec_op == X87_ARITH_MUL;
+                    memory_math_div <= command_decode.exec_op == X87_ARITH_DIV;
+                    memory_math_compare <= command_decode.compare;
+                    memory_math_subtract <= command_decode.exec_op == X87_ARITH_SUB;
+                    memory_math_reverse <= command_decode.reverse_operands;
+                    memory_math_pop <= command_decode.pop_count != 0;
+                    rx_kind <= rx_kind_t'(command_decode.argument);
+                end
+                X87_CMD_LOAD:
+                    rx_kind <= rx_kind_t'(command_decode.argument);
+                X87_CMD_STORE:
+                    start_store(
+                        command_decode.argument[0],
+                        command_decode.argument[2:1],
+                        command_decode.argument[3]);
+                default: ;
             endcase
         end
 
@@ -1612,11 +1508,19 @@ always_ff @(posedge clk) begin
                 end
                 RX_M32: begin
                     if (rx_byte_count_next >= 4'd4) begin
-                        v2_exec_op <= X87_CONVERT_FLD_M32;
-                        v2_exec_owner <= EXEC_LOAD;
-                        v2_exec_size <= 2'd0;
-                        v2_exec_transfer <= {32'h0, rx_payload_next[31:0]};
-                        v2_exec_pending <= 1'b1;
+                        if (m32_is_normal(rx_payload_next[31:0])) begin
+                            push_pending_raw <= normal_m32_to_m80(
+                                rx_payload_next[31:0]);
+                            push_pending_tag <= 2'b00;
+                            push_pending <= 1'b1;
+                        end else begin
+                            v2_exec_op <= X87_CONVERT_FLD_M32;
+                            v2_exec_owner <= EXEC_LOAD;
+                            v2_exec_size <= 2'd0;
+                            v2_exec_transfer <= {32'h0,
+                                                 rx_payload_next[31:0]};
+                            v2_exec_pending <= 1'b1;
+                        end
                         rx_kind <= RX_NONE;
                     end
                 end
@@ -1748,6 +1652,8 @@ always_ff @(posedge clk) begin
                         if (tx_index >= 5'd7)
                             tx_state_shift <= tx_state_shift >> 32;
                 endcase
+            end else if (tx_kind == TX_VALUE) begin
+                tx_state_shift <= tx_state_shift >> 32;
             end
 
             if (((tx_kind == TX_VALUE) &&

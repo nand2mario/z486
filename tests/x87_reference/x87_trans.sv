@@ -117,7 +117,7 @@ function automatic x87_reg_t quiet_nan(input x87_reg_t value);
     end
 endfunction
 
-x87_cordic_rom atan_rom (
+x87_cordic_rom_q80 atan_rom (
     .clk(clk),
     .address(atan_address),
     .value(atan_value)
@@ -529,5 +529,20 @@ always_ff @(posedge clk) begin
         endcase
     end
 end
+
+endmodule
+
+// Test-only Q80 table keeps the old engine independent from production ROM
+// width experiments, so differential tests detect numeric changes.
+module x87_cordic_rom_q80 (
+    input  logic               clk,
+    input  logic         [6:0] address,
+    output logic signed [82:0] value
+);
+
+`include "x87_cordic_atan_q80.svh"
+
+always_ff @(posedge clk)
+    value <= x87_cordic_atan_q80_constant(address);
 
 endmodule

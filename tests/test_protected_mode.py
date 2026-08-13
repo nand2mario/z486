@@ -456,6 +456,14 @@ Examples:
     # Determine tests to run
     tests_to_run = args.tests if args.tests else list(TESTS.keys())
     if os.environ.get("Z386_ENABLE_X87") != "1":
+        requested_x87 = [name for name in tests_to_run
+                         if TESTS[name].get("requires_x87", False)]
+        if args.tests and requested_x87:
+            print("Error: x87 test(s) require the x87-enabled testbench: "
+                  + ", ".join(requested_x87))
+            print("Run `make test-x87-integration` or set Z386_ENABLE_X87=1 "
+                  "and Z386_TESTBENCH to obj_dir_x87/Vtb_protected_mode.")
+            return 1
         tests_to_run = [name for name in tests_to_run
                         if not TESTS[name].get("requires_x87", False)]
 

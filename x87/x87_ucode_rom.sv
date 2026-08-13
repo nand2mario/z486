@@ -18,7 +18,9 @@ altsyncram #(
     .width_a(64),
     .widthad_a(8),
     .numwords_a(256),
-    .outdata_reg_a("CLOCK0"),
+    // M10K captures the address on clock0. Keep q unregistered so the ROM
+    // latency matches the one-cycle behavioral model and sequencer contract.
+    .outdata_reg_a("UNREGISTERED"),
     .address_aclr_a("NONE"),
     .outdata_aclr_a("NONE"),
     .init_file("x87_ucode.mif"),

@@ -109,6 +109,8 @@ logic [1:0] s1_arpl_rpl;        // Pipelined ARPL source RPL
 logic [1:0] s1_desc_rpl;        // Pipelined descriptor_hi[1:0] (dest RPL for ARPL)
 logic [1:0] s1_cpl;             // Pipelined CPL for CPL guards
 logic [1:0] s1_desc_dpl;        // Pipelined descriptor DPL for CPL guards
+logic       s1_desc_low16_nonzero;
+logic       s1_selector_oob;
 
 //==============================================================================
 // Stage 2 Pipeline Registers (PLA4 outputs)
@@ -254,6 +256,8 @@ always_ff @(posedge clk) begin
         s1_desc_rpl <= 2'b0;
         s1_cpl <= 2'b0;
         s1_desc_dpl <= 2'b0;
+        s1_desc_low16_nonzero <= 1'b0;
+        s1_selector_oob <= 1'b0;
         p1 <= 1'b0;
         p2 <= 1'b0;
         b13 <= 1'b0;
@@ -272,6 +276,8 @@ always_ff @(posedge clk) begin
         s1_desc_rpl <= descriptor_rpl;
         s1_cpl <= cpl;
         s1_desc_dpl <= desc_dpl;
+        s1_desc_low16_nonzero <= descriptor_low16_nonzero;
+        s1_selector_oob <= selector_oob;
         p1 <= p1_comb;
         p2 <= p2_comb;
         b13 <= b13_comb;
@@ -363,7 +369,7 @@ always_comb begin
         //----------------------------------------------------------------------
         TST_PORTIO_BIT: begin
             // this is a hack
-            pla_test_addr = descriptor_low16_nonzero ? 12'h85B : 12'h000;
+            pla_test_addr = s1_desc_low16_nonzero ? 12'h85B : 12'h000;
             // // Term 136: !p2 → 0x85B if (!p2) pla_test_addr = pla_test_addr | 12'h85B; // Term 137: !p → 0x85B if (!p) pla_test_addr =...
             // Details: doc/z386x/implementation_notes.md#src-24-z386x-protection-sv-408
         end
@@ -406,11 +412,11 @@ always_comb begin
         // TST_SEL_LLVV (0x08) - Test LAR/LSL (Load Access Rights/Segment Limit)
         //----------------------------------------------------------------------
         TST_SEL_LLVV: begin
-            if (p || selector_oob) begin
+            if (p || s1_selector_oob) begin
                 // p (null selector) or out-of-bounds → clear ZF, end instruction
                 pla_test_addr = 12'h86E;  // LAR_LSL_VERRW_NULL_SELECTOR (CLZF RNI)
             end
-            if (!p && !selector_oob)
+            if (!p && !s1_selector_oob)
                 pla_test_flags = 4'b0100;
             // else: 0x000 (pass)
         end

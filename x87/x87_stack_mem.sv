@@ -17,11 +17,13 @@ module x87_stack_mem (
 `ifdef ALTERA_RESERVED_QIS
 
 altsyncram #(
+    .address_reg_a("CLOCK0"),
     .address_reg_b("CLOCK0"),
     .clock_enable_input_a("BYPASS"),
     .clock_enable_input_b("BYPASS"),
     .clock_enable_output_a("BYPASS"),
     .clock_enable_output_b("BYPASS"),
+    .indata_reg_a("CLOCK0"),
     .indata_reg_b("CLOCK0"),
     .intended_device_family("Cyclone V"),
     .lpm_type("altsyncram"),
@@ -36,13 +38,14 @@ altsyncram #(
     .ram_block_type("M10K"),
     .read_during_write_mode_port_a("NEW_DATA_NO_NBE_READ"),
     .read_during_write_mode_port_b("NEW_DATA_NO_NBE_READ"),
-    .read_during_write_mode_mixed_ports("DONT_CARE"),
+    .read_during_write_mode_mixed_ports("OLD_DATA"),
     .width_a(80),
     .width_b(80),
     .widthad_a(3),
     .widthad_b(3),
     .width_byteena_a(1),
     .width_byteena_b(1),
+    .wrcontrol_wraddress_reg_a("CLOCK0"),
     .wrcontrol_wraddress_reg_b("CLOCK0")
 ) ram (
     .clock0(clk),

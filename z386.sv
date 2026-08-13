@@ -60,6 +60,7 @@ module z386
     output     [31:0]  dbg_CS_base,
     output             dbg_pe,
     output             dbg_vm,
+    output     [31:0]  dbg_x87_state,
 
     // A fault while delivering #DF shuts down the 386 and requests reset.
     output reg          triple_fault_reset
@@ -205,6 +206,7 @@ wire        mem_write_wait;         // unposted demand write still fault-capable
 wire        mem_opt_wait;           // optimistic read missed: stall all uops until fill done
 wire        mem_accepted;           // memory request accepted (ready pulse)
 wire        mem_complete_now;       // combinational, request completing THIS cycle
+wire        mem_read_complete;      // paging-owned demand read data is valid
 
 // Prefetch ↔ paging unit toggle signals
 wire        pf_req_toggle;
@@ -247,8 +249,11 @@ wire       d2_fire;                 // D2 -> EX transfer; instruction state latc
 reg        d2_valid_r;
 reg        d2_waited_r;             // D2 held after predecessor delay slot
 reg        d2_stale_slot_r;         // D2 also waited during predecessor delay slot
+reg        throttle_parked_r;       // predecessor retired; successor D2 waits for rate debt
 reg        d2_rom_mem_r;            // D2 entry tag aligned with ROM q_mem
 reg        d2_rom_q_r;              // D2 entry tag aligned with execution q
+reg [11:0] d2_entry_r;              // Effective entry resident in D2
+reg        d2_x87_m32_load_r;       // Resident D2 uses direct fault-checked m32 transfer
 reg        d2_launch_id_r;          // toggles for every macro entry launch
 reg        d2_id_r;                 // generation owned by resident D2
 reg        d2_rom_mem_id_r;
@@ -307,37 +312,62 @@ wire       interrupt_at_boundary = i_rni_delay && interrupt_deliverable && !sing
 localparam [6:0] THROTTLE_CLOCK_MHZ = CLOCK_RATE_MHZ;
 reg  [15:0] throttle_debt;
 reg   [1:0] throttle_speed_r;
-wire  [6:0] throttle_target_mhz = cpu_speed_sel == 2'd1 ? 7'd15 :
-                                       cpu_speed_sel == 2'd2 ? 7'd30 : 7'd56;
+reg         throttle_hold_r;
+reg         throttle_release_r;
+wire  [6:0] throttle_target_mhz = throttle_speed_r == 2'd1 ? 7'd15 :
+                                       throttle_speed_r == 2'd2 ? 7'd30 : 7'd56;
 wire [15:0] throttle_target = {9'd0, throttle_target_mhz};
-wire        throttle_full = cpu_speed_sel == 2'd0 ||
+wire        throttle_full = throttle_speed_r == 2'd0 ||
                             throttle_target_mhz >= THROTTLE_CLOCK_MHZ;
 wire  [6:0] throttle_charge = THROTTLE_CLOCK_MHZ - throttle_target_mhz;
-wire        throttle_hold = !throttle_full &&
-                            throttle_debt >= throttle_target;
+wire        throttle_hold = throttle_hold_r;
+wire [16:0] throttle_target_twice = {throttle_target, 1'b0};
+// A chained FAST load/POP commits OPR_R in the successor cycle. Do not split
+// that pair; carry the debt forward and park at the next legal boundary.
+wire        throttle_mem_chain = fast_i_r && uc_active && i_rni &&
+                                 (fast_commit_sel_r == FAST_COMMIT_MEM);
+// D2 launch is normally hidden under the predecessor's last cycle. When the
+// predecessor has already retired, overlap it with the final repayment cycle.
+wire        throttle_release_cycle = throttle_parked_r && throttle_release_r;
 wire        throttle_active_cycle;
 wire [16:0] throttle_debt_sum = {1'b0, throttle_debt} +
                                 {10'd0, throttle_charge};
-
+wire [15:0] throttle_debt_repaid = throttle_debt - throttle_target;
 always_ff @(posedge clk) begin
     if (!reset_n) begin
         throttle_debt <= 16'd0;
         throttle_speed_r <= 2'd0;
+        throttle_hold_r <= 1'b0;
+        throttle_release_r <= 1'b0;
     end else if (cpu_speed_sel != throttle_speed_r) begin
         throttle_debt <= 16'd0;
         throttle_speed_r <= cpu_speed_sel;
+        throttle_hold_r <= 1'b0;
+        throttle_release_r <= 1'b0;
     end else if (throttle_full) begin
         throttle_debt <= 16'd0;
+        throttle_hold_r <= 1'b0;
+        throttle_release_r <= 1'b0;
     end else if (throttle_active_cycle) begin
         throttle_debt <= throttle_debt_sum[16] ? 16'hffff :
                                                      throttle_debt_sum[15:0];
-    end else if (throttle_hold) begin
-        throttle_debt <= throttle_debt - throttle_target;
+        throttle_hold_r <= throttle_debt_sum >= {1'b0, throttle_target};
+        throttle_release_r <=
+            throttle_debt_sum >= {1'b0, throttle_target} &&
+            throttle_debt_sum < throttle_target_twice;
+    end else if (throttle_hold_r) begin
+        throttle_debt <= throttle_debt_repaid;
+        throttle_hold_r <= throttle_debt_repaid >= throttle_target;
+        throttle_release_r <=
+            throttle_debt_repaid >= throttle_target &&
+            {1'b0, throttle_debt_repaid} < throttle_target_twice;
     end
 end
 
 assign     d2_valid = d2_valid_r;
-assign     d2_ready = d2_push && !stall && !throttle_hold && !any_fault_pop &&
+assign     d2_ready = d2_push && !stall &&
+                      (!throttle_hold || throttle_mem_chain ||
+                       throttle_release_cycle) && !any_fault_pop &&
                       !(i_rni && tf_trap_pending && !single_step) &&
                       !interrupt_at_boundary && !q_flush;
 assign     d2_fire  = d2_valid && d2_ready;
@@ -351,14 +381,15 @@ wire       mem_block_busy = (uc_bus_or_dly && !dly_grace_now && !posted_write_re
 wire       mem_block_idle = (uc_busreq && !mem_accepted);  // uop wants the bus, paging not ready
 wire       stall_mem = mem_servicing ? mem_block_busy : (mem_req_current && !mem_accepted);
 wire       stall_wio = (uc_is_wio && !interrupt_pending && !single_step);
+wire       x87_direct_m32_release = x87_direct_m32_valid &&
+                                      x87_direct_m32_ready;
+wire       stall_x87_direct = x87_direct_m32_active_r &&
+                              !x87_direct_m32_release;
 // An entry may reach the ROM before its D2 literals arrive. Let the ending
 // instruction execute its architectural RNI delay slot, then hold the ROM word
 // until D2 can transfer it to EX.
 wire       stall_d2 = d2_valid && !d2_push && !i_rni_delay;
-// Repay execution-rate debt at the existing RNI boundary. Holding the delay
-// slot keeps uc_active and ROM ownership coherent until the successor fires.
-wire       stall_throttle = throttle_hold && d2_valid && i_rni_delay;
-wire       stall = stall_mem || stall_wio || stall_d2 || stall_throttle;
+wire       stall = stall_mem || stall_wio || stall_d2 || stall_x87_direct;
 
 // Repeat
 wire       prot_result_now = prot_result_valid && prot_test_inflight;
@@ -367,11 +398,12 @@ wire       repeat_active = uc_is_rpt && (COUNTR[4:0] != 0 || prot_test_inflight)
 
 // uc_exec: master enable for microcode execution
 wire       d2_release_hold = d2_valid && (d2_waited_r || d2_stale_slot_r);
-assign     throttle_active_cycle = d2_fire ||
-                                   (uc_active && !stall && !d2_release_hold);
+assign     throttle_active_cycle = (d2_fire && !throttle_parked_r) ||
+                                   (uc_active && !stall && !d2_release_hold &&
+                                    !throttle_parked_r);
 wire       uc_exec = core_live && !(mem_servicing ? mem_block_busy : mem_block_idle) &&
-                     !stall_wio && !stall_d2 && !stall_throttle &&
-                     !d2_release_hold && !fast_dead_slot;
+                     !stall_wio && !stall_d2 && !stall_x87_direct &&
+                     !d2_release_hold && !throttle_parked_r && !fast_dead_slot;
 wire       uc_exec_writeback = uc_exec;  // local copies for reducing fanout
 wire       uc_exec_mul_start = uc_exec;
 wire       uc_exec_result = uc_exec;
@@ -510,9 +542,26 @@ wire       fast_issue     = (fast_issue1 || fast_issueN || fast_issueJ) &&
 // A normal boundary uses i_entry. FAST chaining launches the successor on the
 // predecessor's transfer/execute edge and may overlap d2_fire.
 assign d2_start = i_entry || fast_issue;
-assign d2_start_entry = fast_issue
+wire [11:0] d2_start_entry_arch = fast_issue
                       ? (fast_issue1 ? i_bus2.entry_point : i_bus.entry_point)
                       : (decq_empty ? d1_issue_entry_point : i_bus.entry_point);
+dec_entry_t d2_start_instr;
+always_comb begin
+    if (fast_issue)
+        d2_start_instr = fast_issue1 ? i_bus2 : i_bus;
+    else
+        d2_start_instr = decq_empty ? d1_issue_entry : i_bus;
+end
+wire d2_start_x87_m32_load = ENABLE_X87 &&
+                             (d2_start_entry_arch == 12'h4D7) &&
+                             ((d2_start_instr.opcode == 8'hD8) ||
+                              ((d2_start_instr.opcode == 8'hD9) &&
+                               (d2_start_instr.modrm[5:3] == 3'd0))) &&
+                             !CR0[3] && !CR0[2] && x87_queue_safe;
+// 20E is a pure DLY followed by RNI. The direct path holds it while paging
+// fetches the operand, then retires without the external x87 port transfer.
+assign d2_start_entry = d2_start_x87_m32_load ? 12'h20E :
+                                                    d2_start_entry_arch;
 
 // The physical microcode ROM contains 37-bit native words plus the v52
 // three-bit early kind.  The execution bus remains native ucode + 14-bit
@@ -538,14 +587,16 @@ wire        microcode_rom_ce = microcode_rom_base_ce && !d2_rom_hold &&
 // architectural delay slot. Keep the physical ROM address independent; the
 // normal uaddr update below still advances loads and other multi-word entries.
 wire [11:0] microcode_rom_addr = d2_delay_preload
-                                ? (i_bus.entry_point + 12'd1)
+                                ? (d2_entry_r + 12'd1)
                                : uaddr_now;
 wire [50:0] uc_rom_q;
 wire [50:0] uc_rom_early;
 wire [2:0]  uc_kind_early;
 (* noprune *) reg [2:0] early_kind_probe_r;
 wire [5:0]  uc_source_shift;
+wire [3:0]  uc_shift_source_class;
 wire [1:0]  uc_shift2_source;
+wire        uc_is_shift2;
 wire [5:0]  uc_alu_src_shift;
 wire [6:0]  uc_aluop_shift;
 wire [2:0]  uc_dly_source;
@@ -563,7 +614,9 @@ ucode_rom microcode_rom (
     .q(uc_rom_q),
     .q_kind_early(uc_kind_early),
     .q_shift_source(uc_source_shift),
+    .q_shift_source_class(uc_shift_source_class),
     .q_shift2_source(uc_shift2_source),
+    .q_is_shift2(uc_is_shift2),
     .q_shift_alu_src(uc_alu_src_shift),
     .q_shift_aluop(uc_aluop_shift),
     .q_dly_source(uc_dly_source),
@@ -576,6 +629,8 @@ always_ff @(posedge clk) begin
     if (!reset_n || q_flush) begin
         d2_rom_mem_r <= 1'b0;
         d2_rom_q_r <= 1'b0;
+        d2_entry_r <= 12'h000;
+        d2_x87_m32_load_r <= 1'b0;
         d2_launch_id_r <= 1'b0;
         d2_id_r <= 1'b0;
         d2_rom_mem_id_r <= 1'b0;
@@ -586,6 +641,7 @@ always_ff @(posedge clk) begin
         if (microcode_rom_addr_ce) begin
             d2_rom_mem_r <= d2_start;
             if (d2_start) begin
+                d2_entry_r <= d2_start_entry;
                 d2_launch_id_r <= !d2_launch_id_r;
                 d2_id_r <= !d2_launch_id_r;
                 d2_rom_mem_id_r <= !d2_launch_id_r;
@@ -597,6 +653,7 @@ always_ff @(posedge clk) begin
             d2_rom_q_kind_r <= uc_kind_early;
         end
         if (d2_start) begin
+            d2_x87_m32_load_r <= d2_start_x87_m32_load;
             d2_slot_prefetched_r <= 1'b0;
         end else if (d2_delay_preload && microcode_rom_addr_ce) begin
             d2_slot_prefetched_r <= 1'b1;
@@ -652,14 +709,13 @@ wire [3:0]  dcache_req_be;
 wire [31:0] dcache_req_wdata;
 wire        dcache_req_is_io;
 wire        dcache_req_is_inta;
+wire        dcache_req_is_x87;
 wire        dcache_req_is_vga_mem;
 wire        dcache_req_accepted;
 wire        dcache_req_complete;
 wire        dcache_read_complete;
 wire [31:0] dcache_rdata;
-wire        x87_req_selected = ENABLE_X87 && dcache_req_valid && dcache_req_is_io &&
-                               ((dcache_req_phys_addr_raw == 32'h8000_00f8) ||
-                                (dcache_req_phys_addr_raw == 32'h8000_00fc));
+wire        x87_req_selected = ENABLE_X87 && dcache_req_valid && dcache_req_is_x87;
 wire        x87_req_accepted;
 wire        x87_req_complete;
 wire        x87_read_complete;
@@ -667,6 +723,16 @@ wire [31:0] x87_rdata;
 wire        x87_busy_n;
 wire        x87_pereq;
 wire        x87_error_n;
+wire        x87_queue_safe;
+wire        x87_direct_m32_ready;
+reg         x87_direct_m32_active_r;
+reg         x87_direct_m32_issued_r;
+reg         x87_direct_m32_crossing_r;
+reg         x87_direct_m32_data_valid_r;
+reg  [10:0] x87_direct_m32_fop_r;
+reg  [31:0] x87_direct_m32_data_r;
+wire        x87_direct_m32_valid = x87_direct_m32_active_r &&
+                                    x87_direct_m32_data_valid_r;
 wire        icache_req_valid;
 wire [31:0] icache_req_phys_addr_raw;
 wire        icache_req_accepted;
@@ -753,11 +819,6 @@ reg        icache_write_snoop_pending;
 reg [31:0] icache_write_snoop_addr_r;
 reg [31:0] icache_write_snoop_data_r;
 reg  [3:0] icache_write_snoop_be_r;
-wire [31:0] icache_snoop_addr = snoop_valid ? snoop_addr : icache_write_snoop_addr_r;
-wire icache_snoop_valid = snoop_valid || icache_write_snoop_pending;
-wire [31:0] icache_snoop_data = snoop_valid ? 32'h0 : icache_write_snoop_data_r;
-wire  [3:0] icache_snoop_be = snoop_valid ? 4'h0 : icache_write_snoop_be_r;
-wire        icache_snoop_patch = !snoop_valid && icache_write_snoop_pending;
 
 wire normal_req_accepted = dcache_cpu_req ? dcache_cpu_ready : ext_direct_accept;
 wire normal_req_complete = dcache_cpu_resp_valid ||
@@ -790,11 +851,12 @@ if (ENABLE_X87) begin : gen_x87
     wire        read_req_ready;
     wire        read_resp_valid;
     wire [31:0] read_resp_data;
+    wire [31:0] debug_state;
 
     x87_bridge bridge (
         .clk(clk), .reset(!reset_n),
         .req_valid(x87_req_selected),
-        .req_addr(dcache_req_phys_addr_raw),
+        .req_data_port(dcache_req_phys_addr_raw[2]),
         .req_write(dcache_req_write),
         .req_be(dcache_req_be),
         .req_wdata(dcache_req_wdata),
@@ -811,17 +873,24 @@ if (ENABLE_X87) begin : gen_x87
         .read_resp_data(read_resp_data)
     );
 
-    x87_core core (
+    x87_control control (
         .clk(clk), .reset(!reset_n),
         .cmd_valid(cmd_valid), .cmd_fop(cmd_fop), .cmd_ready(cmd_ready),
+        .direct_m32_valid(x87_direct_m32_valid),
+        .direct_m32_fop(x87_direct_m32_fop_r),
+        .direct_m32_data(x87_direct_m32_data_r),
+        .direct_m32_ready(x87_direct_m32_ready),
         .word_in_valid(word_in_valid), .word_in_be(word_in_be),
         .word_in_data(word_in_data), .word_in_ready(word_in_ready),
         .read_req_valid(read_req_valid),
         .read_req_data_port(read_req_data_port), .read_req_be(read_req_be),
         .read_req_ready(read_req_ready), .read_resp_valid(read_resp_valid),
         .read_resp_data(read_resp_data),
-        .busy_n(x87_busy_n), .pereq(x87_pereq), .error_n(x87_error_n)
+        .busy_n(x87_busy_n), .pereq(x87_pereq), .error_n(x87_error_n),
+        .queue_safe(x87_queue_safe),
+        .debug_state(debug_state)
     );
+    assign dbg_x87_state = debug_state;
 end else begin : gen_no_x87
     assign x87_req_accepted = 1'b0;
     assign x87_req_complete = 1'b0;
@@ -830,8 +899,60 @@ end else begin : gen_no_x87
     assign x87_busy_n = 1'b1;
     assign x87_pereq = 1'b0;
     assign x87_error_n = 1'b1;
+    assign x87_queue_safe = 1'b0;
+    assign x87_direct_m32_ready = 1'b0;
+    assign dbg_x87_state = 32'h8000_0000;
 end
 endgenerate
+
+// The CPU demand path performs segmentation, translation, permission checks,
+// and the cache read. Only its completed m32 operand bypasses the external
+// 386-to-387 command/data-port transfer sequence.
+always_ff @(posedge clk) begin
+    if (!reset_n) begin
+        x87_direct_m32_active_r <= 1'b0;
+        x87_direct_m32_issued_r <= 1'b0;
+        x87_direct_m32_crossing_r <= 1'b0;
+        x87_direct_m32_data_valid_r <= 1'b0;
+        x87_direct_m32_fop_r <= 11'h000;
+        x87_direct_m32_data_r <= 32'h0;
+    end else begin
+        if (i_pop) begin
+            x87_direct_m32_active_r <= d2_x87_m32_load_r;
+            x87_direct_m32_issued_r <= 1'b0;
+            x87_direct_m32_crossing_r <= 1'b0;
+            x87_direct_m32_data_valid_r <= 1'b0;
+            x87_direct_m32_fop_r <= {i_bus.opcode[2:0], i_bus.modrm};
+        end
+
+        if (x87_direct_m32_mem_req && mem_accepted) begin
+            x87_direct_m32_issued_r <= 1'b1;
+            x87_direct_m32_crossing_r <= ind_linear[1:0] != 2'b00;
+        end
+
+        if (x87_direct_m32_issued_r && !x87_direct_m32_crossing_r &&
+            mem_read_complete) begin
+            x87_direct_m32_data_r <= dcache_rdata;
+            x87_direct_m32_data_valid_r <= 1'b1;
+        end else if (x87_direct_m32_issued_r && x87_direct_m32_crossing_r &&
+                     !mem_servicing) begin
+            x87_direct_m32_data_r <= OPR_R;
+            x87_direct_m32_data_valid_r <= 1'b1;
+        end
+
+        if (x87_direct_m32_release) begin
+            x87_direct_m32_active_r <= 1'b0;
+            x87_direct_m32_issued_r <= 1'b0;
+            x87_direct_m32_data_valid_r <= 1'b0;
+        end
+
+        if (gp_fault_trigger || page_fault || interrupt_entry || q_flush) begin
+            x87_direct_m32_active_r <= 1'b0;
+            x87_direct_m32_issued_r <= 1'b0;
+            x87_direct_m32_data_valid_r <= 1'b0;
+        end
+    end
+end
 
 assign addr       = ext_addr_r;
 assign be         = ext_be_r;
@@ -966,7 +1087,9 @@ l1_cache #(
     .mem_dout(din),
     .mem_be(dcache_mem_be),
     .mem_burstcount(dcache_mem_burstcount),
-    .mem_busy(ext_valid_r || ext_direct_req || direct_rd_pending || icache_read_pending),
+    // ext_direct_req is captured by the registered arbiter. It need not feed
+    // back combinationally into a cache launch occurring on the same edge.
+    .mem_busy(ext_valid_r || direct_rd_pending || icache_read_pending),
     .mem_valid(dcache_mem_valid),
     .mem_write(dcache_mem_write),
     .mem_ready(dcache_mem_ready),
@@ -993,16 +1116,17 @@ l1_icache #(
     .mem_dout(din),
     .mem_be(icache_mem_be),
     .mem_burstcount(icache_mem_burstcount),
-    .mem_busy(ext_valid_r || ext_direct_req || direct_rd_pending || dcache_read_pending || dcache_mem_valid),
+    .mem_busy(ext_valid_r || direct_rd_pending || dcache_read_pending || dcache_mem_valid),
     .mem_valid(icache_mem_valid),
     .mem_ready(icache_mem_ready),
     .mem_resp_valid(icache_mem_resp_valid),
 
-    .snoop_addr(icache_snoop_addr),
-    .snoop_data(icache_snoop_data),
-    .snoop_be(icache_snoop_be),
-    .snoop_patch(icache_snoop_patch),
-    .snoop_valid(icache_snoop_valid),
+    .patch_addr(icache_write_snoop_addr_r),
+    .patch_data(icache_write_snoop_data_r),
+    .patch_be(icache_write_snoop_be_r),
+    .patch_valid(icache_write_snoop_pending),
+    .invalidate_addr(snoop_addr),
+    .invalidate_valid(snoop_valid),
     .cache_enable(1'b1)
 );
 
@@ -1083,7 +1207,14 @@ end
 // an address-space change invalidates the speculative line conservatively.
 wire        pf_spec_store;
 wire [31:0] pf_spec_store_linear;
-wire        pf_spec_global_kill = snoop_valid || cr3_write ||
+reg         pf_snoop_kill_r;
+always_ff @(posedge clk) begin
+    if (!reset_n)
+        pf_snoop_kill_r <= 1'b0;
+    else
+        pf_snoop_kill_r <= snoop_valid;
+end
+wire        pf_spec_global_kill = pf_snoop_kill_r || cr3_write ||
                                   (uc_exec && (uc_dest == DEST_CR0));
 
 //=============================================================================
@@ -1204,7 +1335,10 @@ wire [2:0]  fast_pred2_widx = (fast_commit_sel_r == FAST_COMMIT_SIGSRC)
 wire        fast_ea2_conflict = fast_ea_conflict(
                 fast_pred2_we, fast_pred2_widx, ea_dec_cur, i_bus, 1'b0);
 // In-flight deferred MEM (load/POP) commit gate -- doc/z386x/core_notes_v51.md #15
-wire        fast_memc_set  = fast_last && uc_exec && i_pop && !any_fault_pop &&
+// Hazard prediction is conservative whenever this FAST last step executes.
+// The result matters only to a simultaneous successor-chain decision, so it
+// does not need the fault-gated i_pop pulse in the D2/ROM-address cone.
+wire        fast_memc_set  = fast_last && uc_exec &&
                              (fast_commit_sel_r == FAST_COMMIT_MEM);
 wire        fast_memc_haz  = fast_memc_set || fast_memc_pending;
 wire [2:0]  fast_memc_hreg = fast_memc_set ? i.dst_reg_sel : fast_memc_dst;
@@ -1232,7 +1366,7 @@ wire        fast_memc_confN = fast_hazard_uses(
                 fast_memc_hreg, fast_memc_hsz);  // chainN successor
 
 // z386x deferred SHIFT commit (same pattern; see fast_memc abo -- doc/z386x/core_notes_v51.md #16
-wire        fast_shc_set  = fast_last && uc_exec && i_pop && !any_fault_pop &&
+wire        fast_shc_set  = fast_last && uc_exec &&
                             (fast_commit_sel_r == FAST_COMMIT_SHIFT);
 wire        fast_shc_haz  = fast_shc_set || fast_shc_pending;
 wire [2:0]  fast_shc_hreg = fast_shc_set ? i.dst_reg_sel : fast_shc_dst;
@@ -1750,7 +1884,7 @@ always_comb begin
     seg_cmd_target = SEG_NONE;
     seg_cmd_data = dest_value;
 
-    if (d2_valid) begin
+    if (i_pop) begin
         seg_cmd_target = init_final_seg;
     end else if ((uc_buscode == BUSOP_IND_PLUS_ALU || uc_buscode == BUSOP_IND_ALU2 ||
                   uc_buscode == BUSOP_IND_SRC)
@@ -1760,7 +1894,7 @@ always_comb begin
         seg_cmd_target = resolve_seg_target(uc_dest, seg_reg_sel, COUNTR[5:0]);
     end
 
-    if (d2_valid) begin
+    if (i_pop) begin
         seg_cmd = SEG_CMD_INIT_SEG;
     end else if (uc_dest == DEST_DESCSW) begin
         seg_cmd = SEG_CMD_DESCSW;
@@ -1882,7 +2016,8 @@ endfunction
 // A delayed D2 entry may already occupy the shared ROM q while it is still
 // waiting for literals. It is not an EX uop yet and must not issue its bus op.
 assign mem_op_eligible = core_live && !mem_servicing &&
-                         !stall_d2 && !d2_release_hold;
+                         !stall_d2 && !d2_release_hold &&
+                         !throttle_parked_r;
 // A failed protection test redirects after its third architectural delay uop.
 // That uop may finish internal setup, but its protected bus operation must not
 // escape before the fault handler takes control (notably denied VM86 I/O).
@@ -1891,6 +2026,9 @@ wire uc_data_busreq = !prot_redirect_prev &&
                        io_busop_rd || io_busop_wr);
 wire uc_busreq = uc_data_busreq || iack_busop;
 wire mem_req_current = mem_op_eligible && uc_busreq;    // drives paging unit
+wire x87_direct_m32_mem_req = x87_direct_m32_active_r &&
+                               !x87_direct_m32_issued_r &&
+                               !x87_direct_m32_data_valid_r;
 
 // Delay prefetch on upcoming demand memory
 wire mem_req_upcoming = uc_next[39] && !halted && (uc_active || d2_valid);
@@ -1905,18 +2043,26 @@ wire [1:0] pg_cpl = implicit_supervisor ? 2'b00 : cpl;
 reg         gp_fault_r;
 reg         ss_fault_r;
 
-wire        mem_req_to_paging = mem_op_eligible && uc_data_busreq && !gp_fault_trigger;
+wire        mem_req_to_paging = mem_op_eligible &&
+                                (uc_data_busreq || x87_direct_m32_mem_req) &&
+                                !gp_fault_trigger;
 wire        iack_req_to_paging = mem_op_eligible && iack_busop && !gp_fault_trigger;
-wire        mem_write_now = uc_is_write || (io_busop_wr && mem_is_io);
+wire        mem_write_now = x87_direct_m32_mem_req ? 1'b0 :
+                            (uc_is_write || (io_busop_wr && mem_is_io));
+wire [1:0]  paging_mem_eff_size = x87_direct_m32_mem_req ? 2'd2 :
+                                                               mem_eff_size;
 wire [3:0]  mem_be_now = iack_busop ? 4'b1111 :
-                          calc_be(mem_eff_size, ind_linear[1:0]);
+                          calc_be(paging_mem_eff_size, ind_linear[1:0]);
 wire [31:0] paging_linear_addr = ind_linear;
 assign pf_spec_store = mem_req_to_paging && mem_write_now && mem_accepted;
 assign pf_spec_store_linear = paging_linear_addr;
 wire        paging_live_valid  = ind_linear_valid;
-wire        paging_mem_rd_ind = (uc_buscode == BUSOP_RD_IND);
-wire        paging_is_write_access = uc_is_write || uc_is_check_write;
-wire        mem_ea_read = i_first && instr_ind_is_ea;
+wire        paging_mem_rd_ind = !x87_direct_m32_mem_req &&
+                                (uc_buscode == BUSOP_RD_IND);
+wire        paging_is_write_access = !x87_direct_m32_mem_req &&
+                                      (uc_is_write || uc_is_check_write);
+wire        mem_ea_read = x87_direct_m32_mem_req ||
+                          (i_first && instr_ind_is_ea);
 
 // Paging unit instantiation
 paging_unit paging_inst (
@@ -1931,18 +2077,20 @@ paging_unit paging_inst (
     .mem_inta_req       (iack_req_to_paging),
     .mem_inta_addr      (IND),
     .mem_ea_read        (mem_ea_read),      // modrm/stack/moffs reads SET-read (linear relocated at i_pop); microcode IND reads excluded
-    .mem_req_precheck   (mem_op_eligible && uc_data_busreq),
+    .mem_req_precheck   (mem_op_eligible &&
+                         (uc_data_busreq || x87_direct_m32_mem_req)),
     .mem_req_upcoming   (mem_req_upcoming), // suppresses prefetch start to minimize contention
     .mem_accepted       (mem_accepted),     // ready: request accepted this cycle
     .mem_servicing      (mem_servicing),
     .mem_complete_now   (mem_complete_now), // combinational: bus op completing this cycle
+    .mem_read_complete  (mem_read_complete),
     .mem_dly_grace      (mem_dly_grace),
     .mem_write_dly_grace(mem_write_dly_grace),
     .mem_opt_wait       (mem_opt_wait),
     .mem_write_wait     (mem_write_wait),
     .linear_addr        (paging_linear_addr),
     .live_valid         (paging_live_valid),
-    .mem_op_size        (mem_eff_size),
+    .mem_op_size        (paging_mem_eff_size),
     .mem_write          (mem_write_now),
     .mem_wdata          (mem_wdata),
     .mem_rd_ind         (paging_mem_rd_ind),
@@ -1970,6 +2118,7 @@ paging_unit paging_inst (
     .dcache_req_wdata   (dcache_req_wdata),
     .dcache_req_is_io   (dcache_req_is_io),
     .dcache_req_is_inta (dcache_req_is_inta),
+    .dcache_req_is_x87  (dcache_req_is_x87),
     .dcache_req_is_vga_mem(dcache_req_is_vga_mem),
     .dcache_req_accepted(dcache_req_accepted),
     .dcache_req_complete(dcache_req_complete),
@@ -2303,7 +2452,8 @@ wire loopne_condition = instr_is_loop ? (countr_will_be_nonzero && zf_check)
                                       : (!countr_will_be_nonzero || zf_check);
 
 // GP Fault Detection — handled by segmentation_unit
-assign gp_fault_mem_op = uc_is_mem_busop && (uc_buscode != BUSOP_RD_D);
+assign gp_fault_mem_op = x87_direct_m32_mem_req ||
+                         (uc_is_mem_busop && (uc_buscode != BUSOP_RD_D));
 assign gp_fault_wr_op = uc_is_write || uc_is_check_write;
 
 // DIV/IDIV Overflow Detection
@@ -2521,12 +2671,10 @@ always_comb begin
     // delay-slot word. Branching entries override only sequencer state; the
     // Jcc ROM-address exception above still reads the slot.
     if (d2_delay_preload)
-        uaddr_now = i_bus.entry_point + 12'd1;
+        uaddr_now = d2_entry_r + 12'd1;
 
     if (i_entry_raw)
-        // Empty pipe uses the live D1 PLA result. A resident D2 instruction
-        // supplies a registered entry address.
-        uaddr_now = decq_empty ? d1_issue_entry_point : i_bus.entry_point;
+        uaddr_now = d2_start_entry;
 
     if (uc_exec) begin
         if (uc_reljump_taken)
@@ -2578,7 +2726,7 @@ always_comb begin
 
     // z386x chained entry: load the next instruction's address one
     if (fast_issue)
-        uaddr_now = fast_issue1 ? i_bus2.entry_point : i_bus.entry_point;
+        uaddr_now = d2_start_entry;
     if (gp_fault_r)
         uaddr_now = gp_fault_double_r ? UADDR_DOUBLE_FAULT :
                     (ss_fault_r ? UADDR_STACK_FAULT : UADDR_GENERAL_FAULT1);
@@ -2675,6 +2823,7 @@ always_ff @(posedge clk) begin
         d2_valid_r <= 1'b0;
         d2_waited_r <= 1'b0;
         d2_stale_slot_r <= 1'b0;
+        throttle_parked_r <= 1'b0;
         microcode_sp <= 2'h0;
         i_rni_delay <= 1'b0;
         instr_eip_written <= 1'b0;
@@ -2699,6 +2848,15 @@ always_ff @(posedge clk) begin
             // that stale word when D2 becomes ready on the following cycle.
             d2_stale_slot_r <= 1'b1;
         end
+
+        if (!d2_valid || d2_fire || q_flush || any_fault ||
+            interrupt_at_boundary || throttle_full)
+            throttle_parked_r <= 1'b0;
+        else if (d2_valid && i_rni_delay && throttle_hold &&
+                 (uc_exec || fast_dead_slot))
+            // Retire the predecessor's architectural delay slot on this edge,
+            // then keep the prefetched successor out of EX until release.
+            throttle_parked_r <= 1'b1;
 
         // Commit the same next address that is launched to the ROM.
         uaddr <= uaddr_now;
@@ -2852,6 +3010,12 @@ always_ff @(posedge clk) begin
         end
     end
 end
+
+// synthesis translate_off
+always @(posedge clk)
+    if (reset_n && throttle_parked_r && !d2_valid)
+        $fatal(1, "throttle parked without a resident D2 successor");
+// synthesis translate_on
 
 // Microcode ROM address tracking. uc comes directly from the ROM output.
 always_ff @(posedge clk) begin
@@ -3045,6 +3209,7 @@ always_ff @(posedge clk) begin
         branch_ustep_jcc_r <= 1'b0;
     end else if (i_pop) begin
         i <= i_bus;
+        i.entry_point <= d2_entry_r;
         fast_i_r <= fast_pop_fast;
         fast_multi_r <= fast_pop_fast && fast_pop_fc.multi_word;
         fast_jcc_r <= fast_pop_fast && fast_pop_fc.jcc;
@@ -4557,31 +4722,30 @@ logic        shift_eq_cf;    // saved CF for count==width case
 logic [31:0] shift_src_value;
 logic [31:0] shift_alu_value;
 always_comb begin
-    if (uc_aluop_shift == ALUJMP_SHIFT2) begin
+    if (uc_is_shift2) begin
         // The immutable ROM uses only these four sources for SHIFT2. Keeping
         // this timing-critical path separate avoids the general shift mux.
         case (uc_shift2_source)
             2'd0:    shift_src_value = TMPC;
             2'd1:    shift_src_value = TMPE;
             2'd2:    shift_src_value = SIGMA;
-            2'd3:    shift_src_value = read_gpr(i_reg_src_reg_sel, op_size);
+            2'd3:    shift_src_value = read_gpr(i_reg_src_reg_sel, sh1_size_r);
             default: shift_src_value = 32'd0;
         endcase
     end else begin
-        case (uc_source_shift)
-            SRC_SIGMA:   shift_src_value = SIGMA;
-            SRC_DSTREG:  shift_src_value = read_gpr(i_reg_dst_reg_sel, srcreg_size);
-            SRC_SRCREG:  shift_src_value = read_gpr(i_reg_src_reg_sel, op_size);
-            SRC_IMM:     shift_src_value = i_reg_immediate;
-            SRC_TMPB:    shift_src_value = TMPB;
-            SRC_TMPC:    shift_src_value = TMPC;
-            SRC_TMPD:    shift_src_value = TMPD;
-            SRC_TMPE:    shift_src_value = TMPE;
-            SRC_OPR_R:   shift_src_value = OPR_R;
-            SRC_COUNTR:  shift_src_value = COUNTR;
-            SRC_ZERO:    shift_src_value = 32'd0;
-            SRC_NEG1:    shift_src_value = 32'hFFFF_FFFF;
-            default:     shift_src_value = 32'd0;
+        case (uc_shift_source_class)
+            4'd1:    shift_src_value = SIGMA;
+            4'd2:    shift_src_value = read_gpr(i_reg_dst_reg_sel, srcreg_size);
+            4'd3:    shift_src_value = read_gpr(i_reg_src_reg_sel, op_size);
+            4'd4:    shift_src_value = i_reg_immediate;
+            4'd5:    shift_src_value = TMPB;
+            4'd6:    shift_src_value = TMPC;
+            4'd7:    shift_src_value = TMPD;
+            4'd8:    shift_src_value = TMPE;
+            4'd9:    shift_src_value = OPR_R;
+            4'd10:   shift_src_value = COUNTR;
+            4'd11:   shift_src_value = 32'hFFFF_FFFF;
+            default: shift_src_value = 32'd0;
         endcase
     end
 end
@@ -4600,11 +4764,12 @@ always_comb begin
         ALUSRC_TMPC:    shift_alu_value = TMPC;
         ALUSRC_TMPD:    shift_alu_value = TMPD;
         ALUSRC_TMPB:    shift_alu_value = TMPB;
-        ALUSRC_DSTREG:  shift_alu_value = read_gpr(i_reg_dst_reg_sel, op_size);
-        ALUSRC_SRCREG:  shift_alu_value = read_gpr(i_reg_src_reg_sel, op_size);
+        ALUSRC_DSTREG:  shift_alu_value = read_gpr(i_reg_dst_reg_sel, shift_data_size);
+        ALUSRC_SRCREG:  shift_alu_value = read_gpr(i_reg_src_reg_sel, shift_data_size);
         ALUSRC_ECX:     shift_alu_value = ECX;
         ALUSRC_IMM:     shift_alu_value = i_reg_immediate;
-        ALUSRC_BITS_V:  shift_alu_value = (op_size == 2'd0) ? 32'd7 : (op_size == 2'd2) ? 32'd31 : 32'd15;
+        ALUSRC_BITS_V:  shift_alu_value = (shift_data_size == 2'd0) ? 32'd7 :
+                                            (shift_data_size == 2'd2) ? 32'd31 : 32'd15;
         ALUSRC_CONST_1: shift_alu_value = 32'd1;
         ALUSRC_CONST_3: shift_alu_value = 32'd3;
         ALUSRC_CONST_7: shift_alu_value = 32'd7;
@@ -4621,41 +4786,44 @@ end
 wire [31:0]  shift_hi = shift_swap ? shift_alu_value : shift_src_value;
 wire [31:0]  shift_lo = shift_swap ? shift_src_value : shift_alu_value;
 wire         is_sar = (i.modrm[5:3] == SAR) && !instr_is_shxd;
-wire [63:0]  shift_in = op_size == 2'b00 ? {shift_hi, shift_lo[7:0]} :
-                        op_size == 2'b01 ? {shift_hi, shift_lo[15:0]} :
-                                           {shift_hi, shift_lo};
+wire [63:0]  shift_in = shift_data_size == 2'b00 ? {shift_hi, shift_lo[7:0]} :
+                        shift_data_size == 2'b01 ? {shift_hi, shift_lo[15:0]} :
+                                                    {shift_hi, shift_lo};
 wire  [63:0] shifted = shift_in >> shift_count;
 
 // For SHL/SHR with overflow (count >= width), result is 0
 // For SAR with overflow, result is sign-extended (all 1s if negative, all 0s if positive)
-wire [31:0]  sar_overflow_result = shift_lo[width-1] ? 32'hFFFFFFFF : 32'h0;
+wire [31:0]  sar_overflow_result = shift_lo[shift_data_width-1] ? 32'hFFFFFFFF : 32'h0;
 assign       shift_result = shift_overflow ? (is_sar ? sar_overflow_result : 32'h0) : shifted[31:0];
 wire         shift_pf = ~^shift_result[7:0];
 
 // ZF/SF taken from the raw barrel output (shifted), with the overflow special
 // cases resolved separately
-wire         shift_lo_sign = (op_size == 2'd0) ? shift_lo[7] :
-                             (op_size == 2'd1) ? shift_lo[15] : shift_lo[31];
+wire         shift_lo_sign = (shift_data_size == 2'd0) ? shift_lo[7] :
+                             (shift_data_size == 2'd1) ? shift_lo[15] : shift_lo[31];
 wire         shift_zf = shift_overflow ? (is_sar ? ~shift_lo_sign : 1'b1) :
-                        (op_size == 2'd0) ? (shifted[7:0] == 8'h0) :
-                        (op_size == 2'd1) ? (shifted[15:0] == 16'h0) :
-                                            (shifted[31:0] == 32'h0);
+                        (shift_data_size == 2'd0) ? (shifted[7:0] == 8'h0) :
+                        (shift_data_size == 2'd1) ? (shifted[15:0] == 16'h0) :
+                                                   (shifted[31:0] == 32'h0);
 wire         shift_sf = shift_overflow ? (is_sar ? shift_lo_sign : 1'b0) :
-                        (op_size == 2'd0) ? shifted[7] :
-                        (op_size == 2'd1) ? shifted[15] :
-                                            shifted[31];
+                        (shift_data_size == 2'd0) ? shifted[7] :
+                        (shift_data_size == 2'd1) ? shifted[15] :
+                                                   shifted[31];
 
 // flags related
 reg          shift_SET_Nzs;
 reg   [5:0]  sh1_width_r;  // Registered SHIFT1 width keeps op_size out of SHIFT2 flag selects.
+reg   [1:0]  sh1_size_r;   // Registered operand size keeps op_size out of SHIFT2 data selection.
 reg   [2:0]  shift_op;     // ROL/ROR/RCL/RCR/SHL/SHR/SAR, for flag update
 wire         shift_last_out_lsb = shift_in[shift_count-1];
 // BSR can consume this on cycles where sh1_width_r is stale by one cycle.
-wire         shift_last_out_msb = shifted[width];
+wire         shift_last_out_msb = shifted[shift_data_width];
 // Simplified shift CF for uc_flags: left shift uses MSB, right shift uses LSB
 wire         shift_cf = shift_swap ? shift_last_out_msb : shift_last_out_lsb;
 
 wire  [5:0]  width = (op_size == 2'd0) ? 6'd8 : (op_size == 2'd1) ? 6'd16 : 6'd32;
+wire  [1:0]  shift_data_size = uc_is_shift2 ? sh1_size_r : op_size;
+wire  [5:0]  shift_data_width = uc_is_shift2 ? sh1_width_r : width;
 wire  [31:0] shift_width_mask = (op_size == 2'd0) ? 32'h0000_00FF :
                                 (op_size == 2'd1) ? 32'h0000_FFFF :
                                                     32'hFFFF_FFFF;
@@ -4674,6 +4842,7 @@ always_ff @(posedge clk) begin
         endcase
         shift_size = count_raw;  // Store original count for OF check (count==1)
         sh1_width_r <= width;
+        sh1_size_r <= op_size;
 
         if (instr_is_shxd) begin   // i.opcode[3], 1: SHRD, 0: SHLD
             shift_swap <= ~i.opcode[3];
@@ -4729,6 +4898,10 @@ always_ff @(posedge clk) begin
     ALUJMP_LDBSLU: begin   // set up left shift for BSR (shift left)
         shift_swap <= 1;
         shift_count <= width - alu_src[4:0];
+        // BSR enters the shared SHIFT2 datapath through LDBSLU rather than
+        // SHIFT1, so capture the same registered width contract here.
+        sh1_width_r <= width;
+        sh1_size_r <= op_size;
         shift_size <= alu_src[4:0];  // Must be non-zero for SHIFT2 to update CF
         shift_SET_Nzs <= 0;   // BSR doesn't update SF/ZF/PF on each iteration
         shift_op <= SHL;

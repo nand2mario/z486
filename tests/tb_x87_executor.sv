@@ -37,11 +37,62 @@ logic v2_compare_unordered;
 logic v2_compare_less;
 logic v2_compare_equal;
 logic [2:0] expected_v2_commit;
+longint unsigned cycle_count;
+longint unsigned operation_start_cycle;
+longint unsigned latency_total [0:13];
+integer latency_count [0:13];
+integer latency_min [0:13];
+integer latency_max [0:13];
+x87_exec_op_t active_operation;
+
+function automatic string operation_name(input x87_exec_op_t operation);
+    case (operation)
+        X87_CONVERT_FRNDINT: operation_name = "FRNDINT";
+        X87_CONVERT_FLD_M32: operation_name = "FLD_M32";
+        X87_CONVERT_FLD_M64: operation_name = "FLD_M64";
+        X87_CONVERT_FILD: operation_name = "FILD";
+        X87_CONVERT_FST_M32: operation_name = "FST_M32";
+        X87_CONVERT_FST_M64: operation_name = "FST_M64";
+        X87_CONVERT_FIST: operation_name = "FIST";
+        X87_ARITH_ADD: operation_name = "ADD";
+        X87_ARITH_SUB: operation_name = "SUB";
+        X87_ARITH_COMPARE: operation_name = "COMPARE";
+        X87_ARITH_MUL: operation_name = "MUL";
+        X87_ARITH_DIV: operation_name = "DIV";
+        X87_ARITH_SQRT: operation_name = "SQRT";
+        X87_ARITH_TRANS: operation_name = "TRANS";
+        default: operation_name = "UNKNOWN";
+    endcase
+endfunction
+
+task automatic display_latency_summary;
+    integer operation;
+    begin
+        $display("x87 executor latency (start-to-done cycles)");
+        $display("operation count min average max");
+        for (operation = 0; operation < 14; operation = operation + 1) begin
+            if (latency_count[operation] != 0)
+                $display("%-9s %5d %3d %7.2f %3d",
+                         operation_name(x87_exec_op_t'(operation)),
+                         latency_count[operation],
+                         latency_min[operation],
+                         $itor(latency_total[operation]) /
+                             $itor(latency_count[operation]),
+                         latency_max[operation]);
+        end
+    end
+endtask
 
 always_ff @(posedge clk) begin
     if (reset) begin
         expected_v2_commit <= X87_COMMIT_NONE;
+        cycle_count <= 0;
+        operation_start_cycle <= 0;
+        active_operation <= X87_CONVERT_FRNDINT;
     end else if (start) begin
+        cycle_count <= cycle_count + 1;
+        operation_start_cycle <= cycle_count;
+        active_operation <= exec_op;
         case (exec_op)
             X87_CONVERT_FLD_M32,
             X87_CONVERT_FLD_M64,
@@ -56,11 +107,22 @@ always_ff @(posedge clk) begin
             default:
                 expected_v2_commit <= X87_COMMIT_REPLACE_ST0;
         endcase
+    end else begin
+        cycle_count <= cycle_count + 1;
     end
-    if (v2_done)
+    if (v2_done) begin
+        integer latency;
+        latency = cycle_count - operation_start_cycle;
+        latency_count[active_operation] <= latency_count[active_operation] + 1;
+        latency_total[active_operation] <= latency_total[active_operation] + latency;
+        if (latency < latency_min[active_operation])
+            latency_min[active_operation] <= latency;
+        if (latency > latency_max[active_operation])
+            latency_max[active_operation] <= latency;
         assert (v2_commit == expected_v2_commit)
             else $fatal(1, "commit action mismatch: got %0d expected %0d",
                         v2_commit, expected_v2_commit);
+    end
 end
 
 logic v1_start;
@@ -597,6 +659,7 @@ initial begin
     logic [63:0] arith_b [0:9];
     integer case_index;
     integer mode;
+    integer operation;
     logic signed [63:0] expected_integer;
     x87_reg_t value;
 
@@ -617,6 +680,15 @@ initial begin
     operand = x87_empty();
     operand_b = x87_empty();
     transfer_in = 64'h0;
+    cycle_count = 0;
+    operation_start_cycle = 0;
+    active_operation = X87_CONVERT_FRNDINT;
+    for (operation = 0; operation < 14; operation = operation + 1) begin
+        latency_total[operation] = 0;
+        latency_count[operation] = 0;
+        latency_min[operation] = 32'h7fff_ffff;
+        latency_max[operation] = 0;
+    end
 
     round_cases[0] = 64'h0000_0000_0000_0000; // +0
     round_cases[1] = 64'h8000_0000_0000_0000; // -0
@@ -718,6 +790,14 @@ initial begin
               x87_from_i64(-64'sd128));
     test_load(X87_CONVERT_FILD, 64'hffff_ffff_ffff_ff80, 2'd2,
               x87_from_i64(-64'sd128));
+    test_load(X87_CONVERT_FILD, 64'h0000_0000_0000_7fff, 2'd0,
+              x87_from_i64(64'sd32767));
+    test_load(X87_CONVERT_FILD, 64'h0000_0000_0000_8000, 2'd0,
+              x87_from_i64(-64'sd32768));
+    test_load(X87_CONVERT_FILD, 64'h0000_0000_7abc_def1, 2'd1,
+              x87_from_i64(64'sh7abc_def1));
+    test_load(X87_CONVERT_FILD, 64'h0000_0000_8000_0000, 2'd1,
+              x87_from_i64(-64'sd2147483648));
 
     rounding_mode = 2'd0;
     value = x87_from_m64(64'h4009_21fb_5444_2d18);
@@ -831,6 +911,8 @@ initial begin
                         X87_ARITH_COMPARE, 2'd2, 2'd0, 1'b1);
     end
 
+    @(negedge clk);
+    display_latency_summary();
     $display("x87 datapath PASS: conversion and arithmetic differential");
     $finish;
 end

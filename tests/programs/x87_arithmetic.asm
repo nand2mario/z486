@@ -48,6 +48,17 @@ start:
     cmp dword [result32], 0xbf800000       ; -1.0
     jne fail
 
+    ; Direct m32 input must preserve paging's crossing-DWORD assembly.
+    fld dword [unaligned_real_2_5]
+    fadd dword [real_1_5]
+    fstp dword [unaligned_result32]
+    cmp dword [unaligned_result32], 0x40800000
+    jne fail
+    cmp byte [unaligned_result32 - 1], 0xa5
+    jne fail
+    cmp byte [unaligned_result32 + 4], 0x5a
+    jne fail
+
     fld qword [real64_1_25]
     fadd qword [real64_2_5]
     fstp qword [result64]
@@ -248,3 +259,11 @@ round_nearest: dw 0x037f
 round_down:    dw 0x077f
 unmask_divide_by_zero: dw 0x037b
 fault_seen:    db 0
+
+align 4
+                   db 0, 0, 0
+unaligned_real_2_5: dd 0x40200000
+align 4
+                   db 0xa5, 0xa5, 0xa5
+unaligned_result32: dd 0
+                   db 0x5a

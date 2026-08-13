@@ -51,7 +51,8 @@ X87_RTL = [
     "x87_executor.sv",
     "x87_transfer_fifo.sv",
     "x87_stack_mem.sv",
-    "x87_core.sv",
+    "x87_command_rom.sv",
+    "x87_control.sv",
 ]
 
 LEGACY_X87_RTL = [
@@ -63,7 +64,7 @@ LEGACY_X87_RTL = [
     "x87_roundint.sv",
     "x87_cordic_rom.sv",
     "x87_trans.sv",
-    "x87_core.sv",
+    "x87_control.sv",
 ]
 
 
@@ -177,7 +178,7 @@ def rtl_sources(core: str, core_dir: Path) -> list[Path]:
     elif (core_dir / "x87_pkg.sv").exists():
         # Retain support for snapshots made before the versioned source split.
         sources.insert(1, core_dir / "x87_pkg.sv")
-        for optional_name in ("x87_bridge.sv", "x87_core.sv"):
+        for optional_name in ("x87_bridge.sv", "x87_control.sv"):
             optional_src = core_dir / optional_name
             if optional_src.exists():
                 sources.append(optional_src)
@@ -275,11 +276,13 @@ def run_core(
     trace: bool = False,
     trace_io: bool = False,
     progress: bool = False,
+    cpu_speed: int = 0,
 ) -> RunResult:
     cmd = [
         str(exe),
         f"+mem={HEX_FILE}",
         f"+cycles={cycles}",
+        f"+cpu_speed={cpu_speed}",
     ]
     if mem_model == "simple":
         cmd.append("+simple_mem")
@@ -389,6 +392,14 @@ def main() -> int:
     parser.add_argument("--trace", action="store_true", help="generate FST trace")
     parser.add_argument("--trace-io", action="store_true", help="print benchmark I/O markers")
     parser.add_argument("--progress", action="store_true", help="print simulation progress")
+    parser.add_argument(
+        "--cpu-speed",
+        type=int,
+        choices=range(4),
+        default=0,
+        metavar="SEL",
+        help="CPU speed selector: 0=full, 1=15 MHz, 2=30 MHz, 3=56 MHz",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="show build commands/output")
     args = parser.parse_args()
 
@@ -426,6 +437,7 @@ def main() -> int:
             trace=args.trace,
             trace_io=args.trace_io,
             progress=args.progress,
+            cpu_speed=args.cpu_speed,
         )
         for core in cores
     ]

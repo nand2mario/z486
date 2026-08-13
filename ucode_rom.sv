@@ -13,7 +13,9 @@ module ucode_rom
     output      [50:0] q,
     output      [2:0]  q_kind_early,
     output      [5:0]  q_shift_source,
+    output      [3:0]  q_shift_source_class,
     output      [1:0]  q_shift2_source,
+    output             q_is_shift2,
     output      [5:0]  q_shift_alu_src,
     output      [6:0]  q_shift_aluop,
     output      [2:0]  q_dly_source,
@@ -22,7 +24,9 @@ module ucode_rom
 );
 
 (* preserve *) reg [5:0] q_shift_source_r;
+(* preserve *) reg [3:0] q_shift_source_class_r;
 (* preserve *) reg [1:0] q_shift2_source_r;
+(* preserve *) reg q_is_shift2_r;
 (* preserve *) reg [5:0] q_shift_alu_src_r;
 (* preserve *) reg [6:0] q_shift_aluop_r;
 reg [2:0] q_dly_source_r;
@@ -73,6 +77,26 @@ function automatic [1:0] shift2_source_predecode(input [5:0] s);
         SRC_SIGMA:  shift2_source_predecode = 2'd2;
         SRC_SRCREG: shift2_source_predecode = 2'd3;
         default:    shift2_source_predecode = 2'd0;
+    endcase
+endfunction
+
+// Compact source class for the barrel path. The immutable ROM uses only this
+// subset for SHIFT/SHIFT2 words; encoding it beside q avoids decoding the
+// sparse six-bit architectural source field during execution.
+function automatic [3:0] shift_source_predecode(input [5:0] s);
+    case (s)
+        SRC_SIGMA:  shift_source_predecode = 4'd1;
+        SRC_DSTREG: shift_source_predecode = 4'd2;
+        SRC_SRCREG: shift_source_predecode = 4'd3;
+        SRC_IMM:    shift_source_predecode = 4'd4;
+        SRC_TMPB:   shift_source_predecode = 4'd5;
+        SRC_TMPC:   shift_source_predecode = 4'd6;
+        SRC_TMPD:   shift_source_predecode = 4'd7;
+        SRC_TMPE:   shift_source_predecode = 4'd8;
+        SRC_OPR_R:  shift_source_predecode = 4'd9;
+        SRC_COUNTR: shift_source_predecode = 4'd10;
+        SRC_NEG1:   shift_source_predecode = 4'd11;
+        default:    shift_source_predecode = 4'd0;
     endcase
 endfunction
 
@@ -190,7 +214,9 @@ always_ff @(posedge clk) begin
     if (q_ce) begin
         q_r <= {ucode_predecode(q_mem[36:0]), q_mem[36:0]};
         q_shift_source_r <= q_mem[23:18];
+        q_shift_source_class_r <= shift_source_predecode(q_mem[23:18]);
         q_shift2_source_r <= shift2_source_predecode(q_mem[23:18]);
+        q_is_shift2_r <= (q_mem[17:11] == ALUJMP_SHIFT2);
         q_shift_alu_src_r <= q_mem[36:31];
         q_shift_aluop_r <= q_mem[17:11];
         q_dly_source_r <= dly_source_predecode(q_mem[23:18]);
@@ -221,7 +247,9 @@ end
 	    if (q_ce) begin
 	        q_r <= {ucode_predecode(q_mem[36:0]), q_mem[36:0]};
 	        q_shift_source_r <= q_mem[23:18];
+	        q_shift_source_class_r <= shift_source_predecode(q_mem[23:18]);
 	        q_shift2_source_r <= shift2_source_predecode(q_mem[23:18]);
+	        q_is_shift2_r <= (q_mem[17:11] == ALUJMP_SHIFT2);
 	        q_shift_alu_src_r <= q_mem[36:31];
 	        q_shift_aluop_r <= q_mem[17:11];
 	        q_dly_source_r <= dly_source_predecode(q_mem[23:18]);
@@ -236,7 +264,9 @@ assign q_kind_early = q_mem[39:37];
 `endif
 
 assign q_shift_source = q_shift_source_r;
+assign q_shift_source_class = q_shift_source_class_r;
 assign q_shift2_source = q_shift2_source_r;
+assign q_is_shift2 = q_is_shift2_r;
 assign q_shift_alu_src = q_shift_alu_src_r;
 assign q_shift_aluop = q_shift_aluop_r;
 assign q_dly_source = q_dly_source_r;

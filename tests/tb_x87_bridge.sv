@@ -7,6 +7,7 @@ module tb_x87_bridge;
     logic reset = 1'b1;
     logic req_valid = 1'b0;
     logic [31:0] req_addr = 32'h0;
+    wire req_data_port = req_addr[2];
     logic req_write = 1'b0;
     logic [3:0] req_be = 4'h0;
     logic [31:0] req_wdata = 32'h0;

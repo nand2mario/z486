@@ -1,39 +1,42 @@
-// Microsequenced conversion and arithmetic datapath. The v1 numeric type is
-// kept at this migration boundary so both implementations compare exactly.
+// Arithmetic FPU behind x87_control's command, stack, and transfer unit.
+// Horizontal micro-ops steer shared formatting/rounding resources and the
+// independently owned add, multiply, divide/square-root, and transcendental
+// datapaths below.
 module x87_executor
     import x87_pkg::*, x87_ucode_pkg::*;
 (
-    input  logic                 clk,
-    input  logic                 reset,
-    input  logic                 start,
-    input  x87_exec_op_t      exec_op,
-    input  logic           [1:0] integer_size,
-    input  logic           [1:0] precision_control,
-    input  logic           [1:0] rounding_mode,
-    input  logic                 quiet_compare,
-    input  logic                 trans_cosine,
-    input  logic                 trans_tangent_pair,
-    input  logic                 trans_atan2,
-    input  x87_reg_t             operand,
-    input  x87_reg_t             operand_b,
-    input  logic          [63:0] transfer_in,
-    output logic                 busy,
-    output logic                 done,
-    output logic           [2:0] commit_action,
-    output x87_reg_t             result,
-    output x87_reg_t             auxiliary_result,
-    output logic          [63:0] transfer_out,
-    output logic                 invalid,
-    output logic                 inexact,
-    output logic                 divide_by_zero,
-    output logic                 overflow,
-    output logic                 underflow,
-    output logic                 denormal_operand,
-    output logic                 range_incomplete,
-    output logic                 rounded_up,
-    output logic                 compare_unordered,
-    output logic                 compare_less,
-    output logic                 compare_equal
+    input  logic                 clk,                // Core/system clock.
+    input  logic                 reset,              // Synchronous active-high reset.
+    input  logic                 start,              // Launch the selected operation.
+    input  x87_exec_op_t         exec_op,            // Conversion/arithmetic operation.
+    input  logic           [1:0] integer_size,       // Integer transfer width selector.
+    input  logic           [1:0] precision_control,  // x87 PC rounding precision.
+    input  logic           [1:0] rounding_mode,      // x87 RC rounding direction.
+    input  logic                 quiet_compare,      // Suppress QNaN invalid exception.
+    input  logic                 trans_cosine,       // Select cosine instead of sine.
+    input  logic                 trans_tangent_pair, // Produce tangent and pushed 1.0.
+    input  logic                 trans_atan2,        // Select two-operand arctangent.
+    input  x87_reg_t             operand,            // Primary numeric operand.
+    input  x87_reg_t             operand_b,          // Secondary numeric operand.
+    input  logic          [63:0] transfer_in,        // Raw load/conversion input bits.
+    output logic                 busy,               // Microsequence is active.
+    output logic                 done,               // Operation completed this cycle.
+    output logic           [2:0] commit_action,      // Stack/transfer retirement action.
+    output x87_reg_t             result,             // Primary numeric result.
+    output x87_reg_t             auxiliary_result,   // Secondary transcendental result.
+    output logic          [63:0] transfer_out,       // Raw store/conversion output bits.
+    output logic                 invalid,            // Invalid-operation exception result.
+    output logic                 inexact,            // Precision exception result.
+    output logic                 divide_by_zero,     // Divide-by-zero exception result.
+    output logic                 overflow,           // Overflow exception result.
+    output logic                 underflow,          // Underflow exception result.
+    output logic                 denormal_operand,   // Denormal-operand exception result.
+    output logic                 range_incomplete,   // Transcendental range reduction failed.
+    output logic                 rounded_up,         // C1-style rounding-direction result.
+    output logic                 compare_unordered,  // Compare result is unordered.
+    output logic                 compare_less,       // Primary operand is less.
+    output logic                 compare_equal,      // Operands compare equal.
+    output logic           [7:0] debug_uaddr         // Current x87 microcode address.
 );
 
 logic [7:0] entry;
@@ -80,19 +83,24 @@ logic [67:0] arithmetic_rhs;
 logic arithmetic_subtract;
 logic [67:0] arithmetic_result;
 logic [1:0] operand_magnitude;
-logic [105:0] mul_accum_r;
-logic [105:0] mul_addend;
-logic [105:0] mul_accum_next;
-logic [53:0] mul_product_r;
-logic [26:0] mul_a_r;
-logic [26:0] mul_b_r;
+logic fild_shift_four;
+logic fist_shift_four;
+logic work_shift_four;
+logic [105:0] mul_product;
+logic [53:0] mul_p00;
+logic [53:0] mul_p01;
+logic [53:0] mul_p10;
+logic [53:0] mul_p11;
+logic [28:0] mul_limb1_r;
+logic [28:0] mul_limb2_r;
+logic [26:0] mul_top_sum;
 logic [1:0] mul_partial_r;
 logic [14:0] mul_exp_r;
 logic mul_result_sign_r;
 logic [52:0] divsqrt_divisor_r;
 logic [57:0] divsqrt_remainder_r;
 logic [55:0] divsqrt_result_bits_r;
-logic [111:0] divsqrt_radicand_r;
+logic [53:0] sqrt_source_r;
 logic signed [16:0] divsqrt_exp_r;
 logic divsqrt_result_sign_r;
 logic [57:0] divsqrt_shifted;
@@ -105,19 +113,10 @@ logic [52:0] trans_range_sig_r;
 logic [7:0] trans_count_r;
 logic [120:0] trans_range_remainder_r;
 logic [1:0] trans_quadrant_r;
-logic signed [82:0] trans_x_r;
-logic signed [82:0] trans_y_r;
-logic signed [82:0] trans_z_r;
-logic signed [82:0] trans_x_step_r;
-logic signed [82:0] trans_y_step_r;
-logic signed [82:0] trans_angle_step_r;
 logic trans_cordic_sub_r;
-logic [6:0] trans_shift_count_r;
 logic [6:0] trans_atan_address_r;
 logic signed [82:0] trans_atan_value;
 logic trans_shift_x_r;
-logic trans_x_sign_r;
-logic trans_y_sign_r;
 logic trans_result_sign_r;
 logic [82:0] trans_magnitude_r;
 logic signed [16:0] trans_exp_r;
@@ -133,11 +132,32 @@ logic [120:0] trans_range_next;
 logic [1:0] trans_quadrant_next;
 logic signed [121:0] trans_reduced_q120;
 logic signed [82:0] trans_reduced_q80;
-logic trans_cordic_sub;
-logic signed [82:0] cordic_lhs;
-logic signed [82:0] cordic_rhs;
-logic cordic_subtract;
-logic signed [82:0] cordic_result;
+logic [3:0] cordic_read_addr_a;
+logic [3:0] cordic_read_addr_b;
+logic [27:0] cordic_read_data_a;
+logic [27:0] cordic_read_data_b;
+logic cordic_write_enable;
+logic [3:0] cordic_write_addr;
+logic [27:0] cordic_write_data;
+logic [3:0] cordic_load_index_r;
+logic [1:0] cordic_limb_r;
+logic [6:0] cordic_iteration_r;
+logic [1:0] cordic_shift_word_r;
+logic [4:0] cordic_shift_bits_r;
+logic cordic_bank_r;
+logic cordic_carry_r;
+logic [27:0] cordic_lhs_r;
+logic [27:0] cordic_rhs_low_r;
+logic cordic_rhs_low_fill_r;
+logic cordic_rhs_high_fill_r;
+logic cordic_x_sign_r [0:1];
+logic cordic_y_sign_r [0:1];
+logic cordic_z_sign_r;
+logic [3:0] cordic_output_base_r;
+logic [1:0] cordic_output_mode_r;
+logic [28:0] cordic_add_result;
+logic signed [82:0] cordic_primary_r;
+logic signed [82:0] cordic_auxiliary_r;
 logic trans_operation;
 logic trans_normalize_more;
 logic trans_needs_aux;
@@ -154,6 +174,15 @@ localparam logic signed [82:0] TRANS_PIO2_Q80 =
     83'sh01921fb54442d18469898d;
 localparam logic signed [82:0] TRANS_PIO4_Q80 =
     83'sh00c90fdaa22168c234c4c6;
+localparam logic [3:0] CORDIC_X0_BASE = 4'd0;
+localparam logic [3:0] CORDIC_Y0_BASE = 4'd3;
+localparam logic [3:0] CORDIC_Z_BASE  = 4'd6;
+localparam logic [3:0] CORDIC_X1_BASE = 4'd9;
+localparam logic [3:0] CORDIC_Y1_BASE = 4'd12;
+localparam logic [1:0] CORDIC_OUT_COPY = 2'd0;
+localparam logic [1:0] CORDIC_OUT_NEGATE = 2'd1;
+localparam logic [1:0] CORDIC_OUT_PI_MINUS = 2'd2;
+localparam logic [1:0] CORDIC_OUT_MINUS_PI = 2'd3;
 
 assign busy = seq_active;
 assign done = seq_done;
@@ -173,6 +202,12 @@ assign round_sign = trans_operation ? trans_result_sign_r
                   : arithmetic_op ? add_result_sign_r : operand.sign;
 assign addsub_normalize_more = (work_r[56:0] != 57'h0) &&
                                (work_r[56] || !work_r[55]);
+assign fild_shift_four = (exec_op == X87_CONVERT_FILD) &&
+                         (uop.shift_route == X87_SHIFT_LEFT) &&
+                         (work_r[51:48] == 4'b0000);
+assign fist_shift_four = (exec_op == X87_CONVERT_FIST) &&
+                         (count_r >= 6'd4);
+assign work_shift_four = fild_shift_four || fist_shift_four;
 assign format_m32 = (exec_op == X87_CONVERT_FLD_M32) ||
                     (exec_op == X87_CONVERT_FST_M32);
 
@@ -200,15 +235,16 @@ assign arithmetic_result = arithmetic_subtract
                          : arithmetic_lhs + arithmetic_rhs;
 assign rounded_work = arithmetic_result;
 
-always_comb begin
-    case (mul_partial_r)
-        2'd0: mul_addend = {{52{1'b0}}, mul_product_r};
-        2'd1,
-        2'd2: mul_addend = {{25{1'b0}}, mul_product_r, {27{1'b0}}};
-        default: mul_addend = {mul_product_r[51:0], {54{1'b0}}};
-    endcase
-end
-assign mul_accum_next = mul_accum_r + mul_addend;
+assign mul_p00 = operand.sig[26:0] * operand_b.sig[26:0];
+assign mul_p01 = operand.sig[26:0] * operand_b.sig[52:27];
+assign mul_p10 = operand.sig[52:27] * operand_b.sig[26:0];
+assign mul_p11 = operand.sig[52:27] * operand_b.sig[52:27];
+assign mul_top_sum = mul_p11[53:27] +
+                     {{25{1'b0}}, mul_limb2_r[28:27]};
+assign mul_product = {mul_top_sum[24:0],
+                      mul_limb2_r[26:0],
+                      mul_limb1_r[26:0],
+                      mul_p00[26:0]};
 
 always_comb begin
     if (uop.engine == X87_ENGINE_DIV_ITERATE) begin
@@ -216,7 +252,7 @@ always_comb begin
         divsqrt_trial = {4'h0, 1'b0, divsqrt_divisor_r};
     end else begin
         divsqrt_shifted = (divsqrt_remainder_r << 2) |
-                          {{56{1'b0}}, divsqrt_radicand_r[111:110]};
+                          {{56{1'b0}}, sqrt_source_r[53:52]};
         divsqrt_trial = ({2'b0, divsqrt_result_bits_r} << 2) | 58'd1;
     end
 end
@@ -248,33 +284,215 @@ always_comb begin
 end
 assign trans_reduced_q80 =
     {trans_reduced_q120[121], trans_reduced_q120[121:40]};
-assign trans_cordic_sub = trans_atan2 ? trans_y_r[82] : !trans_z_r[82];
+
+function automatic logic [27:0] cordic_vector_limb(
+    input logic signed [82:0] value,
+    input logic [1:0] index
+);
+    case (index)
+        2'd0: return value[27:0];
+        2'd1: return value[55:28];
+        default: return {value[82], value[82:56]};
+    endcase
+endfunction
+
+function automatic logic [3:0] cordic_x_base(input logic bank);
+    return bank ? CORDIC_X1_BASE : CORDIC_X0_BASE;
+endfunction
+
+function automatic logic [3:0] cordic_y_base(input logic bank);
+    return bank ? CORDIC_Y1_BASE : CORDIC_Y0_BASE;
+endfunction
+
+function automatic logic [27:0] cordic_normalize_top(
+    input logic [27:0] value,
+    input logic [1:0] limb
+);
+    return (limb == 2'd2) ? {value[26], value[26:0]} : value;
+endfunction
+
 always_comb begin
-    cordic_lhs = 83'sh0;
-    cordic_rhs = 83'sh0;
-    cordic_subtract = 1'b0;
-    case (uop.alu_route)
-        X87_ALU_CORDIC_X: begin
-            cordic_lhs = trans_x_r;
-            cordic_rhs = trans_y_step_r;
-            cordic_subtract = trans_cordic_sub_r;
+    logic signed [82:0] initial_x;
+    logic signed [82:0] initial_y;
+    logic signed [82:0] initial_z;
+    logic [3:0] current_x_base;
+    logic [3:0] current_y_base;
+    logic [3:0] next_x_base;
+    logic [3:0] next_y_base;
+    logic [3:0] shifted_index;
+    logic [3:0] shifted_high_index;
+    logic shifted_sign;
+    logic [27:0] shifted_low;
+    logic [27:0] shifted_high;
+    logic [27:0] shifted_limb;
+    logic [27:0] atan_limb;
+
+    initial_x = trans_atan2
+              ? $signed({2'b00, operand_b.sig, 28'h0})
+              : TRANS_CORDIC_K_Q80;
+    initial_y = trans_atan2
+              ? $signed({2'b00, operand.sig, 28'h0})
+              : 83'sh0;
+    initial_z = trans_atan2 ? 83'sh0 : trans_reduced_q80;
+    current_x_base = cordic_x_base(cordic_bank_r);
+    current_y_base = cordic_y_base(cordic_bank_r);
+    next_x_base = cordic_x_base(!cordic_bank_r);
+    next_y_base = cordic_y_base(!cordic_bank_r);
+    shifted_index = {2'b00, cordic_limb_r} +
+                    {2'b00, cordic_shift_word_r};
+    shifted_high_index = shifted_index + 4'd1;
+    shifted_sign = (uop.scratch_write == X87_SCRATCH_WRITE_X)
+                 ? cordic_y_sign_r[cordic_bank_r]
+                 : cordic_x_sign_r[cordic_bank_r];
+    shifted_low = cordic_rhs_low_fill_r
+                ? {28{shifted_sign}} : cordic_rhs_low_r;
+    shifted_high = cordic_rhs_high_fill_r
+                 ? {28{shifted_sign}} : cordic_read_data_b;
+    if (cordic_shift_bits_r == 5'd0)
+        shifted_limb = shifted_low;
+    else
+        shifted_limb = (shifted_low >> cordic_shift_bits_r) |
+                       (shifted_high <<
+                        (6'd28 - cordic_shift_bits_r));
+    atan_limb = cordic_vector_limb(trans_atan_value, cordic_limb_r);
+
+    cordic_add_result = 29'h0;
+    case (uop.scratch_write)
+        X87_SCRATCH_WRITE_X:
+            cordic_add_result = {1'b0, cordic_lhs_r} +
+                                {1'b0, trans_cordic_sub_r
+                                       ? ~shifted_limb : shifted_limb} +
+                                cordic_carry_r;
+        X87_SCRATCH_WRITE_Y:
+            cordic_add_result = {1'b0, cordic_lhs_r} +
+                                {1'b0, trans_cordic_sub_r
+                                       ? shifted_limb : ~shifted_limb} +
+                                cordic_carry_r;
+        X87_SCRATCH_WRITE_Z:
+            cordic_add_result = {1'b0, cordic_read_data_a} +
+                                {1'b0, trans_cordic_sub_r
+                                       ? ~atan_limb : atan_limb} +
+                                cordic_carry_r;
+        X87_SCRATCH_WRITE_PRIMARY,
+        X87_SCRATCH_WRITE_AUX: begin
+            case (cordic_output_mode_r)
+                CORDIC_OUT_NEGATE:
+                    cordic_add_result = {1'b0, 28'h0} +
+                                        {1'b0, ~cordic_lhs_r} +
+                                        cordic_carry_r;
+                CORDIC_OUT_PI_MINUS:
+                    cordic_add_result = {1'b0, cordic_rhs_low_r} +
+                                        {1'b0, ~cordic_lhs_r} +
+                                        cordic_carry_r;
+                CORDIC_OUT_MINUS_PI:
+                    cordic_add_result = {1'b0, cordic_lhs_r} +
+                                        {1'b0, ~cordic_rhs_low_r} +
+                                        cordic_carry_r;
+                default:
+                    cordic_add_result = {1'b0, cordic_lhs_r};
+            endcase
         end
-        X87_ALU_CORDIC_Y: begin
-            cordic_lhs = trans_y_r;
-            cordic_rhs = trans_x_step_r;
-            cordic_subtract = !trans_cordic_sub_r;
+        default: ;
+    endcase
+
+    cordic_read_addr_a = 4'h0;
+    cordic_read_addr_b = 4'h0;
+    case (uop.scratch_read)
+        X87_SCRATCH_READ_ALIGN: begin
+            cordic_read_addr_a =
+                (trans_shift_x_r ? CORDIC_X0_BASE : CORDIC_Y0_BASE) +
+                cordic_limb_r;
+            cordic_read_addr_b = (cordic_limb_r == 2'd2)
+                ? 4'h0
+                : (trans_shift_x_r ? CORDIC_X0_BASE : CORDIC_Y0_BASE) +
+                  cordic_limb_r + 4'd1;
         end
-        X87_ALU_CORDIC_Z: begin
-            cordic_lhs = trans_z_r;
-            cordic_rhs = trans_angle_step_r;
-            cordic_subtract = trans_cordic_sub_r;
+        X87_SCRATCH_READ_X_LOW,
+        X87_SCRATCH_READ_X_HIGH: begin
+            cordic_read_addr_a = current_x_base + cordic_limb_r;
+            cordic_read_addr_b = current_y_base +
+                ((uop.scratch_read == X87_SCRATCH_READ_X_LOW)
+                    ? shifted_index : shifted_high_index);
+        end
+        X87_SCRATCH_READ_Y_LOW,
+        X87_SCRATCH_READ_Y_HIGH: begin
+            cordic_read_addr_a = current_y_base + cordic_limb_r;
+            cordic_read_addr_b = current_x_base +
+                ((uop.scratch_read == X87_SCRATCH_READ_Y_LOW)
+                    ? shifted_index : shifted_high_index);
+        end
+        X87_SCRATCH_READ_Z:
+            cordic_read_addr_a = CORDIC_Z_BASE + cordic_limb_r;
+        X87_SCRATCH_READ_OUTPUT:
+            cordic_read_addr_a = cordic_output_base_r + cordic_limb_r;
+        default: ;
+    endcase
+
+    cordic_write_enable = 1'b0;
+    cordic_write_addr = 4'h0;
+    cordic_write_data = 28'h0;
+    case (uop.scratch_write)
+        X87_SCRATCH_WRITE_LOAD: begin
+            cordic_write_enable = 1'b1;
+            if (cordic_load_index_r < 4'd3) begin
+                cordic_write_addr = CORDIC_X0_BASE + cordic_load_index_r;
+                cordic_write_data = cordic_vector_limb(
+                    initial_x, cordic_load_index_r[1:0]);
+            end else if (cordic_load_index_r < 4'd6) begin
+                cordic_write_addr = CORDIC_Y0_BASE +
+                                     cordic_load_index_r - 4'd3;
+                cordic_write_data = cordic_vector_limb(
+                    initial_y, cordic_load_index_r - 4'd3);
+            end else begin
+                cordic_write_addr = CORDIC_Z_BASE +
+                                     cordic_load_index_r - 4'd6;
+                cordic_write_data = cordic_vector_limb(
+                    initial_z, cordic_load_index_r - 4'd6);
+            end
+        end
+        X87_SCRATCH_WRITE_ALIGN: begin
+            cordic_write_enable = 1'b1;
+            cordic_write_addr =
+                (trans_shift_x_r ? CORDIC_X0_BASE : CORDIC_Y0_BASE) +
+                cordic_limb_r;
+            cordic_write_data = cordic_normalize_top(
+                (cordic_read_data_a >> 1) |
+                ((cordic_limb_r == 2'd2
+                    ? 1'b0 : cordic_read_data_b[0]) << 27),
+                cordic_limb_r);
+        end
+        X87_SCRATCH_WRITE_X: begin
+            cordic_write_enable = 1'b1;
+            cordic_write_addr = next_x_base + cordic_limb_r;
+            cordic_write_data = cordic_normalize_top(
+                cordic_add_result[27:0], cordic_limb_r);
+        end
+        X87_SCRATCH_WRITE_Y: begin
+            cordic_write_enable = 1'b1;
+            cordic_write_addr = next_y_base + cordic_limb_r;
+            cordic_write_data = cordic_normalize_top(
+                cordic_add_result[27:0], cordic_limb_r);
+        end
+        X87_SCRATCH_WRITE_Z: begin
+            cordic_write_enable = 1'b1;
+            cordic_write_addr = CORDIC_Z_BASE + cordic_limb_r;
+            cordic_write_data = cordic_normalize_top(
+                cordic_add_result[27:0], cordic_limb_r);
         end
         default: ;
     endcase
 end
-assign cordic_result = cordic_subtract
-                     ? cordic_lhs - cordic_rhs
-                     : cordic_lhs + cordic_rhs;
+
+x87_cordic_scratch cordic_scratch (
+    .clk(clk),
+    .read_addr_a(cordic_read_addr_a),
+    .read_data_a(cordic_read_data_a),
+    .read_addr_b(cordic_read_addr_b),
+    .read_data_b(cordic_read_data_b),
+    .write_enable(cordic_write_enable),
+    .write_addr(cordic_write_addr),
+    .write_data(cordic_write_data)
+);
 assign trans_normalize_more = (trans_magnitude_r != 83'h0) &&
                               ((trans_magnitude_r[82:81] != 2'b00) ||
                                !trans_magnitude_r[80]);
@@ -312,8 +530,9 @@ always_comb begin
                                       ? trans_needs_aux : integral_r;
     conditions[X87_COND_SUBUNIT] = subunit_r;
     conditions[X87_COND_COUNT_MORE] = trans_operation
-                                        ? (trans_count_r > 8'd1)
-                                        : (count_r > 6'd1);
+        ? (trans_count_r > 8'd1)
+        : ((exec_op == X87_CONVERT_FIST) && fist_shift_four)
+        ? (count_r > 6'd4) : (count_r > 6'd1);
     conditions[X87_COND_TRANSFER_READY] = 1'b1;
     conditions[X87_COND_ZERO] = trans_operation
                                   ? (trans_magnitude_r == 83'h0) : zero_r;
@@ -331,8 +550,12 @@ always_comb begin
     conditions[X87_COND_SHIFT_RIGHT_MORE] = |work_r[63:54];
     conditions[X87_COND_ADDSUB_NORMALIZE_MORE] =
         addsub_normalize_more;
-    conditions[X87_COND_CORDIC_SHIFT_MORE] =
-        trans_shift_count_r > 7'd4;
+    conditions[X87_COND_CORDIC_LIMB_MORE] =
+        cordic_limb_r != 2'd2;
+    conditions[X87_COND_CORDIC_LOAD_MORE] =
+        cordic_load_index_r != 4'd8;
+    conditions[X87_COND_CORDIC_ALIGN_MORE] =
+        cordic_limb_r != 2'd0;
 end
 
 x87_sequencer sequencer (
@@ -347,6 +570,8 @@ x87_sequencer sequencer (
     .uaddr(uaddr),
     .uop(uop)
 );
+
+assign debug_uaddr = uaddr;
 
 function automatic logic is_signaling_nan(input x87_reg_t value);
     return (value.class_id == X87_NAN) && !value.sig[51];
@@ -475,12 +700,14 @@ function automatic logic [63:0] integer_indefinite(input logic [1:0] size);
     endcase
 endfunction
 
+// Shared mantissa, format, and retirement bank. This owns the 68-bit work
+// register and GRS bits, conversion/normalization state, final result and
+// transfer registers, exception outputs, comparisons, and commit action.
 always_ff @(posedge clk) begin
     if (reset) begin
         result_r <= x87_empty();
         transfer_r <= 64'h0;
         work_r <= 68'h0;
-        add_small_r <= 56'h0;
         count_r <= 6'd0;
         restore_count_r <= 6'd0;
         guard_r <= 1'b0;
@@ -497,44 +724,6 @@ always_ff @(posedge clk) begin
         shift_right_r <= 1'b0;
         unbiased_r <= 17'sd0;
         format_exp_r <= 17'sd0;
-        add_exp_r <= 15'h0;
-        add_result_sign_r <= 1'b0;
-        add_small_sign_r <= 1'b0;
-        mul_accum_r <= 106'h0;
-        mul_product_r <= 54'h0;
-        mul_a_r <= 27'h0;
-        mul_b_r <= 27'h0;
-        mul_partial_r <= 2'd0;
-        mul_exp_r <= 15'h0;
-        mul_result_sign_r <= 1'b0;
-        divsqrt_divisor_r <= 53'h0;
-        divsqrt_remainder_r <= 58'h0;
-        divsqrt_result_bits_r <= 56'h0;
-        divsqrt_radicand_r <= 112'h0;
-        divsqrt_exp_r <= 17'sd0;
-        divsqrt_result_sign_r <= 1'b0;
-        trans_range_sig_r <= 53'h0;
-        trans_count_r <= 8'h0;
-        trans_range_remainder_r <= 121'h0;
-        trans_quadrant_r <= 2'b00;
-        trans_x_r <= 83'sh0;
-        trans_y_r <= 83'sh0;
-        trans_z_r <= 83'sh0;
-        trans_x_step_r <= 83'sh0;
-        trans_y_step_r <= 83'sh0;
-        trans_angle_step_r <= 83'sh0;
-        trans_cordic_sub_r <= 1'b0;
-        trans_shift_count_r <= 7'h0;
-        trans_atan_address_r <= 7'h0;
-        trans_shift_x_r <= 1'b0;
-        trans_x_sign_r <= 1'b0;
-        trans_y_sign_r <= 1'b0;
-        trans_result_sign_r <= 1'b0;
-        trans_magnitude_r <= 83'h0;
-        trans_exp_r <= 17'sd0;
-        trans_aux_sign_r <= 1'b0;
-        trans_aux_magnitude_r <= 83'h0;
-        trans_rounding_aux_r <= 1'b0;
         trans_auxiliary_result_r <= x87_empty();
         invalid <= 1'b0;
         inexact <= 1'b0;
@@ -577,7 +766,6 @@ always_ff @(posedge clk) begin
             compare_unordered <= 1'b0;
             compare_less <= 1'b0;
             compare_equal <= 1'b0;
-            trans_rounding_aux_r <= 1'b0;
             trans_auxiliary_result_r <= x87_empty();
             commit_action <= X87_COMMIT_NONE;
         end
@@ -590,54 +778,25 @@ always_ff @(posedge clk) begin
             // remaining legacy operation lane. The generator guarantees that
             // no operation selected in the same word also writes this state.
             case (uop.shift_route)
-                X87_SHIFT_LEFT:  work_r <= work_r << 1;
-                X87_SHIFT_RIGHT: work_r <= work_r >> 1;
-                X87_SHIFT_CORDIC_LOAD: begin
-                    trans_x_step_r <= trans_x_r;
-                    trans_y_step_r <= trans_y_r;
-                    trans_angle_step_r <= trans_atan_value;
-                    trans_cordic_sub_r <= trans_cordic_sub;
-                    trans_shift_count_r <=
-                        7'd80 - trans_count_r[6:0];
-                end
-                X87_SHIFT_CORDIC_STEP: begin
-                    if (trans_shift_count_r >= 7'd4) begin
-                        trans_x_step_r <= trans_x_step_r >>> 4;
-                        trans_y_step_r <= trans_y_step_r >>> 4;
-                        trans_shift_count_r <= trans_shift_count_r - 7'd4;
-                    end else begin
-                        case (trans_shift_count_r[1:0])
-                            2'd1: begin
-                                trans_x_step_r <= trans_x_step_r >>> 1;
-                                trans_y_step_r <= trans_y_step_r >>> 1;
-                            end
-                            2'd2: begin
-                                trans_x_step_r <= trans_x_step_r >>> 2;
-                                trans_y_step_r <= trans_y_step_r >>> 2;
-                            end
-                            2'd3: begin
-                                trans_x_step_r <= trans_x_step_r >>> 3;
-                                trans_y_step_r <= trans_y_step_r >>> 3;
-                            end
-                            default: ;
-                        endcase
-                        trans_shift_count_r <= 7'd0;
-                    end
-                end
+                X87_SHIFT_LEFT:
+                    work_r <= work_shift_four ? work_r << 4 : work_r << 1;
+                X87_SHIFT_RIGHT:
+                    work_r <= work_shift_four ? work_r >> 4 : work_r >> 1;
                 default: ;
             endcase
 
-            if (uop.count == X87_COUNT_DEC) begin
-                if (trans_operation)
-                    trans_count_r <= trans_count_r - 8'd1;
-                else
-                    count_r <= count_r - 6'd1;
-            end
+            if ((uop.count == X87_COUNT_DEC) && !trans_operation)
+                count_r <= count_r - (fist_shift_four ? 6'd4 : 6'd1);
 
             if ((uop.grs == X87_GRS_SHIFT) &&
                 (uop.shift_route == X87_SHIFT_RIGHT)) begin
                 if (uop.count == X87_COUNT_DEC) begin
-                    if (count_r == 6'd1)
+                    if (fist_shift_four && (count_r == 6'd4)) begin
+                        guard_r <= work_r[3];
+                        sticky_r <= sticky_r || |work_r[2:0];
+                    end else if (fist_shift_four) begin
+                        sticky_r <= sticky_r || |work_r[3:0];
+                    end else if (count_r == 6'd1)
                         guard_r <= work_r[0];
                     else
                         sticky_r <= sticky_r || work_r[0];
@@ -747,7 +906,6 @@ always_ff @(posedge clk) begin
                 end
 
                 X87_CLASSIFY_MUL: begin
-                    mul_result_sign_r <= operand.sign ^ operand_b.sign;
                     direct_ready_r <= 1'b1;
                     if (is_nan(operand) || is_nan(operand_b)) begin
                         result_r <= is_nan(operand) ? quiet_nan(operand)
@@ -776,9 +934,6 @@ always_ff @(posedge clk) begin
                     logic square_root;
 
                     square_root = exec_op == X87_ARITH_SQRT;
-                    divsqrt_result_sign_r <= square_root
-                                           ? operand.sign
-                                           : operand.sign ^ operand_b.sign;
                     direct_ready_r <= 1'b1;
                     if (is_nan(operand) ||
                         (!square_root && is_nan(operand_b))) begin
@@ -831,7 +986,6 @@ always_ff @(posedge clk) begin
                                    17'sd16383;
                     exponent_delta = 15'h0;
                     direct_ready_r <= 1'b1;
-                    trans_atan_address_r <= 7'd0;
 
                     if (trans_atan2 &&
                         (is_nan(operand) || is_nan(operand_b))) begin
@@ -846,9 +1000,6 @@ always_ff @(posedge clk) begin
                         invalid <= 1'b1;
                     end else if (trans_atan2 && is_zero(operand)) begin
                         if (operand_b.sign) begin
-                            trans_result_sign_r <= operand.sign;
-                            trans_magnitude_r <= TRANS_PI_Q80;
-                            trans_exp_r <= 17'sd16383;
                             inexact <= 1'b1;
                             special_r <= 1'b1;
                             direct_ready_r <= 1'b0;
@@ -856,34 +1007,20 @@ always_ff @(posedge clk) begin
                             result_r <= x87_zero(operand.sign);
                         end
                     end else if (trans_atan2 && is_zero(operand_b)) begin
-                        trans_result_sign_r <= operand.sign;
-                        trans_magnitude_r <= TRANS_PIO2_Q80;
-                        trans_exp_r <= 17'sd16383;
                         inexact <= 1'b1;
                         special_r <= 1'b1;
                         direct_ready_r <= 1'b0;
                     end else if (trans_atan2 && is_infinity(operand) &&
                                  is_infinity(operand_b)) begin
-                        trans_result_sign_r <= operand.sign;
-                        trans_magnitude_r <= operand_b.sign
-                            ? TRANS_PI_Q80 - TRANS_PIO4_Q80
-                            : TRANS_PIO4_Q80;
-                        trans_exp_r <= 17'sd16383;
                         inexact <= 1'b1;
                         special_r <= 1'b1;
                         direct_ready_r <= 1'b0;
                     end else if (trans_atan2 && is_infinity(operand)) begin
-                        trans_result_sign_r <= operand.sign;
-                        trans_magnitude_r <= TRANS_PIO2_Q80;
-                        trans_exp_r <= 17'sd16383;
                         inexact <= 1'b1;
                         special_r <= 1'b1;
                         direct_ready_r <= 1'b0;
                     end else if (trans_atan2 && is_infinity(operand_b)) begin
                         if (operand_b.sign) begin
-                            trans_result_sign_r <= operand.sign;
-                            trans_magnitude_r <= TRANS_PI_Q80;
-                            trans_exp_r <= 17'sd16383;
                             inexact <= 1'b1;
                             special_r <= 1'b1;
                             direct_ready_r <= 1'b0;
@@ -891,29 +1028,11 @@ always_ff @(posedge clk) begin
                             result_r <= x87_zero(operand.sign);
                         end
                     end else if (trans_atan2) begin
-                        trans_x_r <=
-                            $signed({2'b00, operand_b.sig, 28'h0});
-                        trans_y_r <=
-                            $signed({2'b00, operand.sig, 28'h0});
-                        trans_z_r <= 83'sh0;
-                        trans_x_sign_r <= operand_b.sign;
-                        trans_y_sign_r <= operand.sign;
                         direct_ready_r <= 1'b0;
                         if (operand_b.exp < operand.exp) begin
                             exponent_delta = operand.exp - operand_b.exp;
-                            trans_count_r <= exponent_delta > 15'd82
-                                           ? 8'd82
-                                           : {1'b0, exponent_delta[6:0]};
-                            trans_shift_x_r <= 1'b1;
                         end else if (operand.exp < operand_b.exp) begin
                             exponent_delta = operand_b.exp - operand.exp;
-                            trans_count_r <= exponent_delta > 15'd82
-                                           ? 8'd82
-                                           : {1'b0, exponent_delta[6:0]};
-                            trans_shift_x_r <= 1'b0;
-                        end else begin
-                            trans_count_r <= 8'd0;
-                            trans_shift_x_r <= 1'b0;
                         end
                     end else if (is_nan(operand)) begin
                         result_r <= quiet_nan(operand);
@@ -935,10 +1054,6 @@ always_ff @(posedge clk) begin
                             trans_auxiliary_result_r <= x87_one();
                         inexact <= 1'b1;
                     end else begin
-                        trans_range_sig_r <= operand.sig;
-                        trans_count_r <= unbiased_exp[7:0] + 8'd121;
-                        trans_range_remainder_r <= 121'h0;
-                        trans_quadrant_r <= 2'b00;
                         direct_ready_r <= 1'b0;
                     end
                 end
@@ -947,82 +1062,6 @@ always_ff @(posedge clk) begin
             endcase
 
             case (uop.engine)
-                X87_ENGINE_ADDSUB_ALIGN:
-                    add_small_r <= {1'b0, add_small_r[55:2],
-                                    add_small_r[1] | add_small_r[0]};
-
-                X87_ENGINE_MUL_ISSUE:
-                    mul_product_r <= mul_a_r * mul_b_r;
-
-                X87_ENGINE_MUL_ACCUMULATE: begin
-                    mul_accum_r <= mul_accum_next;
-                    if (mul_partial_r != 2'd3) begin
-                        mul_partial_r <= mul_partial_r + 2'd1;
-                        case (mul_partial_r)
-                            2'd0: begin
-                                mul_a_r <= {1'b0, operand.sig[52:27]};
-                                mul_b_r <= operand_b.sig[26:0];
-                            end
-                            2'd1: begin
-                                mul_a_r <= operand.sig[26:0];
-                                mul_b_r <= {1'b0, operand_b.sig[52:27]};
-                            end
-                            default: begin
-                                mul_a_r <= {1'b0, operand.sig[52:27]};
-                                mul_b_r <= {1'b0, operand_b.sig[52:27]};
-                            end
-                        endcase
-                    end
-                end
-
-                X87_ENGINE_DIV_ITERATE: begin
-                    divsqrt_result_bits_r <=
-                        {divsqrt_result_bits_r[54:0], divsqrt_next_bit};
-                    divsqrt_remainder_r <= divsqrt_next_bit
-                        ? divsqrt_after_subtract
-                        : divsqrt_shifted;
-                end
-
-                X87_ENGINE_SQRT_ITERATE: begin
-                    divsqrt_radicand_r <= divsqrt_radicand_r << 2;
-                    divsqrt_result_bits_r <=
-                        {divsqrt_result_bits_r[54:0], divsqrt_next_bit};
-                    divsqrt_remainder_r <= divsqrt_next_bit
-                        ? divsqrt_after_subtract
-                        : divsqrt_shifted;
-                end
-
-                X87_ENGINE_TRANS_RANGE_ITERATE: begin
-                    trans_range_sig_r <= trans_range_sig_r << 1;
-                    trans_range_remainder_r <= trans_range_next;
-                    trans_quadrant_r <= trans_quadrant_next;
-                end
-
-                X87_ENGINE_TRANS_RANGE_FINALIZE: begin
-                    trans_z_r <= trans_reduced_q80;
-                    trans_quadrant_r <=
-                        (trans_range_remainder_r > TRANS_PIO4_Q120)
-                            ? trans_quadrant_r + 2'd1
-                            : trans_quadrant_r;
-                    trans_atan_address_r <= 7'd0;
-                end
-
-                X87_ENGINE_TRANS_ALIGN: begin
-                    if (trans_shift_x_r)
-                        trans_x_r <= trans_x_r >>> 1;
-                    else
-                        trans_y_r <= trans_y_r >>> 1;
-                end
-
-                X87_ENGINE_TRANS_CORDIC_PREP: begin
-                    if (!trans_atan2) begin
-                        trans_x_r <= TRANS_CORDIC_K_Q80;
-                        trans_y_r <= 83'sh0;
-                    end
-                    trans_count_r <= 8'd80;
-                    trans_atan_address_r <= 7'd1;
-                end
-
                 default: ;
             endcase
 
@@ -1043,10 +1082,8 @@ always_ff @(posedge clk) begin
                     end else if (work_r[56]) begin
                         work_r <= {11'h0, 1'b0, work_r[56:2],
                                    work_r[1] | work_r[0]};
-                        add_exp_r <= add_exp_r + 15'd1;
                     end else if (!work_r[55]) begin
                         work_r <= work_r << 1;
-                        add_exp_r <= add_exp_r - 15'd1;
                     end
                 end
 
@@ -1068,17 +1105,16 @@ always_ff @(posedge clk) begin
                     logic normalized_round;
                     logic normalized_sticky;
 
-                    if (mul_accum_r[105]) begin
-                        normalized_sig = mul_accum_r[105:53];
-                        normalized_guard = mul_accum_r[52];
-                        normalized_round = mul_accum_r[51];
-                        normalized_sticky = |mul_accum_r[50:0];
-                        mul_exp_r <= mul_exp_r + 15'd1;
+                    if (mul_product[105]) begin
+                        normalized_sig = mul_product[105:53];
+                        normalized_guard = mul_product[52];
+                        normalized_round = mul_product[51];
+                        normalized_sticky = |mul_product[50:0];
                     end else begin
-                        normalized_sig = mul_accum_r[104:52];
-                        normalized_guard = mul_accum_r[51];
-                        normalized_round = mul_accum_r[50];
-                        normalized_sticky = |mul_accum_r[49:0];
+                        normalized_sig = mul_product[104:52];
+                        normalized_guard = mul_product[51];
+                        normalized_round = mul_product[50];
+                        normalized_sticky = |mul_product[49:0];
                     end
 
                     round_r <= 1'b0;
@@ -1121,21 +1157,6 @@ always_ff @(posedge clk) begin
                         guard_r <= trans_magnitude_r[27];
                         sticky_r <= |trans_magnitude_r[26:0];
                     end
-                end
-
-                X87_ALU_CORDIC_X: begin
-                    trans_x_r <= cordic_result;
-                end
-
-                X87_ALU_CORDIC_Y:
-                    trans_y_r <= cordic_result;
-
-                X87_ALU_CORDIC_Z: begin
-                    logic [6:0] iteration;
-
-                    iteration = 7'd80 - trans_count_r[6:0];
-                    trans_z_r <= cordic_result;
-                    trans_atan_address_r <= iteration + 7'd2;
                 end
 
                 default: ;
@@ -1585,7 +1606,8 @@ always_ff @(posedge clk) begin
                     count_r <= restore_count_r;
 
                 X87_STATE_FORMAT_EXP_DEC: begin
-                    format_exp_r <= format_exp_r - 17'sd1;
+                    format_exp_r <= format_exp_r -
+                                    (fild_shift_four ? 17'sd4 : 17'sd1);
                 end
 
                 X87_STATE_FORMAT_EXP_INC: begin
@@ -1597,31 +1619,20 @@ always_ff @(posedge clk) begin
 
             case (uop.prepare)
                 X87_PREPARE_ADDSUB: begin
-                    logic [55:0] a_extended;
-                    logic [55:0] b_extended;
                     logic [14:0] exponent_delta;
 
-                    a_extended = {operand.sig, operand.guard_bit,
-                                  operand.round_bit, operand.sticky_bit};
-                    b_extended = {operand_b.sig, operand_b.guard_bit,
-                                  operand_b.round_bit, operand_b.sticky_bit};
                     if (operand_magnitude != 2'd1) begin
-                        work_r <= {12'h0, a_extended};
-                        add_small_r <= b_extended;
-                        add_result_sign_r <= operand.sign;
-                        add_small_sign_r <= effective_b_sign;
-                        add_exp_r <= operand.exp;
+                        work_r <= {12'h0, operand.sig,
+                                   operand.guard_bit, operand.round_bit,
+                                   operand.sticky_bit};
                         exponent_delta = operand.exp - operand_b.exp;
                     end else begin
-                        work_r <= {12'h0, b_extended};
-                        add_small_r <= a_extended;
-                        add_result_sign_r <= effective_b_sign;
-                        add_small_sign_r <= operand.sign;
-                        add_exp_r <= operand_b.exp;
+                        work_r <= {12'h0, operand_b.sig,
+                                   operand_b.guard_bit, operand_b.round_bit,
+                                   operand_b.sticky_bit};
                         exponent_delta = operand_b.exp - operand.exp;
                     end
                     if (exponent_delta >= 15'd56) begin
-                        add_small_r <= 56'h1;
                         count_r <= 6'd0;
                     end else begin
                         count_r <= exponent_delta[5:0];
@@ -1629,113 +1640,397 @@ always_ff @(posedge clk) begin
                 end
 
                 X87_PREPARE_MUL: begin
-                    mul_exp_r <= operand.exp + operand_b.exp - 15'h3fff;
-                    mul_accum_r <= 106'h0;
-                    mul_partial_r <= 2'd0;
-                    count_r <= 6'd4;
-                    mul_a_r <= operand.sig[26:0];
-                    mul_b_r <= operand_b.sig[26:0];
+                    count_r <= 6'd2;
                 end
 
                 X87_PREPARE_DIV: begin
-                    divsqrt_divisor_r <= operand_b.sig;
-                    divsqrt_result_bits_r <= 56'h1;
                     count_r <= 6'd55;
-                    divsqrt_exp_r <=
-                        $signed({2'b00, operand.exp}) -
-                        $signed({2'b00, operand_b.exp}) + 17'sd16383;
-                    if (operand.sig >= operand_b.sig) begin
-                        divsqrt_remainder_r <=
-                            {4'h0, {1'b0, operand.sig} -
-                                   {1'b0, operand_b.sig}};
-                    end else begin
-                        divsqrt_remainder_r <=
-                            {4'h0, ({1'b0, operand.sig} << 1) -
-                                   {1'b0, operand_b.sig}};
-                        divsqrt_exp_r <=
-                            $signed({2'b00, operand.exp}) -
-                            $signed({2'b00, operand_b.exp}) + 17'sd16382;
-                    end
                 end
 
                 X87_PREPARE_SQRT: begin
-                    logic [14:0] exponent_distance;
-
-                    divsqrt_result_sign_r <= operand.sign;
-                    if (operand.exp >= 15'h3fff) begin
-                        exponent_distance = operand.exp - 15'h3fff;
-                        divsqrt_exp_r <= 17'sd16383 +
-                            $signed({2'b00, exponent_distance >> 1});
-                    end else begin
-                        exponent_distance = 15'h3fff - operand.exp;
-                        divsqrt_exp_r <= 17'sd16383 -
-                            $signed({2'b00,
-                                     (exponent_distance + 15'd1) >> 1});
-                    end
-                    divsqrt_radicand_r <= operand.exp[0]
-                        ? {1'b0, operand.sig, 58'h0}
-                        : {operand.sig, 59'h0};
-                    divsqrt_remainder_r <= 58'h0;
-                    divsqrt_result_bits_r <= 56'h0;
                     count_r <= 6'd56;
                 end
 
                 default: begin end
             endcase
 
+            if (uop.state == X87_STATE_TRANS_SELECT)
+                inexact <= 1'b1;
+        end
+    end
+end
+
+// Add/subtract alignment bank. It tracks the smaller significand and the
+// exponent/sign associated with the shared 68-bit mantissa work register.
+always_ff @(posedge clk) begin
+    if (reset) begin
+        add_small_r <= 56'h0;
+        add_exp_r <= 15'h0;
+        add_result_sign_r <= 1'b0;
+        add_small_sign_r <= 1'b0;
+    end else if (seq_exec_valid) begin
+        if (uop.engine == X87_ENGINE_ADDSUB_ALIGN)
+            add_small_r <= {1'b0, add_small_r[55:2],
+                            add_small_r[1] | add_small_r[0]};
+
+        if (uop.alu_route == X87_ALU_NORMALIZE_ADDSUB) begin
+            if ((work_r[56:0] != 57'h0) && work_r[56])
+                add_exp_r <= add_exp_r + 15'd1;
+            else if ((work_r[56:0] != 57'h0) && !work_r[55])
+                add_exp_r <= add_exp_r - 15'd1;
+        end
+
+        if (uop.prepare == X87_PREPARE_ADDSUB) begin
+            logic [55:0] a_extended;
+            logic [55:0] b_extended;
+            logic [14:0] exponent_delta;
+
+            a_extended = {operand.sig, operand.guard_bit,
+                          operand.round_bit, operand.sticky_bit};
+            b_extended = {operand_b.sig, operand_b.guard_bit,
+                          operand_b.round_bit, operand_b.sticky_bit};
+            if (operand_magnitude != 2'd1) begin
+                add_small_r <= b_extended;
+                add_result_sign_r <= operand.sign;
+                add_small_sign_r <= effective_b_sign;
+                add_exp_r <= operand.exp;
+                exponent_delta = operand.exp - operand_b.exp;
+            end else begin
+                add_small_r <= a_extended;
+                add_result_sign_r <= effective_b_sign;
+                add_small_sign_r <= operand.sign;
+                add_exp_r <= operand_b.exp;
+                exponent_delta = operand_b.exp - operand.exp;
+            end
+            if (exponent_delta >= 15'd56)
+                add_small_r <= 56'h1;
+        end
+    end
+end
+
+// Transcendental register bank. This owns range reduction, operand alignment,
+// CORDIC iteration, and primary/auxiliary result normalization state.
+always_ff @(posedge clk) begin
+    if (reset) begin
+        trans_range_sig_r <= 53'h0;
+        trans_count_r <= 8'h0;
+        trans_range_remainder_r <= 121'h0;
+        trans_quadrant_r <= 2'b00;
+        trans_cordic_sub_r <= 1'b0;
+        trans_atan_address_r <= 7'h0;
+        trans_shift_x_r <= 1'b0;
+        cordic_load_index_r <= 4'h0;
+        cordic_limb_r <= 2'h0;
+        cordic_iteration_r <= 7'h0;
+        cordic_shift_word_r <= 2'h0;
+        cordic_shift_bits_r <= 5'h0;
+        cordic_bank_r <= 1'b0;
+        cordic_carry_r <= 1'b0;
+        cordic_lhs_r <= 28'h0;
+        cordic_rhs_low_r <= 28'h0;
+        cordic_rhs_low_fill_r <= 1'b0;
+        cordic_rhs_high_fill_r <= 1'b0;
+        cordic_x_sign_r[0] <= 1'b0;
+        cordic_x_sign_r[1] <= 1'b0;
+        cordic_y_sign_r[0] <= 1'b0;
+        cordic_y_sign_r[1] <= 1'b0;
+        cordic_z_sign_r <= 1'b0;
+        cordic_output_base_r <= 4'h0;
+        cordic_output_mode_r <= CORDIC_OUT_COPY;
+        cordic_primary_r <= 83'sh0;
+        cordic_auxiliary_r <= 83'sh0;
+        trans_result_sign_r <= 1'b0;
+        trans_magnitude_r <= 83'h0;
+        trans_exp_r <= 17'sd0;
+        trans_aux_sign_r <= 1'b0;
+        trans_aux_magnitude_r <= 83'h0;
+        trans_rounding_aux_r <= 1'b0;
+    end else begin
+        if (start)
+            trans_rounding_aux_r <= 1'b0;
+
+        if (seq_exec_valid) begin
+            if ((uop.count == X87_COUNT_DEC) && trans_operation)
+                trans_count_r <= trans_count_r - 8'd1;
+
+            if (uop.classify == X87_CLASSIFY_TRANS) begin
+                logic signed [16:0] unbiased_exp;
+                logic [14:0] exponent_delta;
+
+                unbiased_exp = $signed({2'b00, operand.exp}) - 17'sd16383;
+                exponent_delta = 15'h0;
+                trans_atan_address_r <= 7'd0;
+
+                if (trans_atan2 &&
+                    (is_nan(operand) || is_nan(operand_b))) begin
+                end else if (trans_atan2 &&
+                             ((operand.class_id == X87_EMPTY) ||
+                              (operand_b.class_id == X87_EMPTY))) begin
+                end else if (trans_atan2 && is_zero(operand)) begin
+                    if (operand_b.sign) begin
+                        trans_result_sign_r <= operand.sign;
+                        trans_magnitude_r <= TRANS_PI_Q80;
+                        trans_exp_r <= 17'sd16383;
+                    end
+                end else if (trans_atan2 && is_zero(operand_b)) begin
+                    trans_result_sign_r <= operand.sign;
+                    trans_magnitude_r <= TRANS_PIO2_Q80;
+                    trans_exp_r <= 17'sd16383;
+                end else if (trans_atan2 && is_infinity(operand) &&
+                             is_infinity(operand_b)) begin
+                    trans_result_sign_r <= operand.sign;
+                    trans_magnitude_r <= operand_b.sign
+                        ? TRANS_PI_Q80 - TRANS_PIO4_Q80 : TRANS_PIO4_Q80;
+                    trans_exp_r <= 17'sd16383;
+                end else if (trans_atan2 && is_infinity(operand)) begin
+                    trans_result_sign_r <= operand.sign;
+                    trans_magnitude_r <= TRANS_PIO2_Q80;
+                    trans_exp_r <= 17'sd16383;
+                end else if (trans_atan2 && is_infinity(operand_b)) begin
+                    if (operand_b.sign) begin
+                        trans_result_sign_r <= operand.sign;
+                        trans_magnitude_r <= TRANS_PI_Q80;
+                        trans_exp_r <= 17'sd16383;
+                    end
+                end else if (trans_atan2) begin
+                    if (operand_b.exp < operand.exp) begin
+                        exponent_delta = operand.exp - operand_b.exp;
+                        trans_count_r <= exponent_delta > 15'd82
+                                       ? 8'd82
+                                       : {1'b0, exponent_delta[6:0]};
+                        trans_shift_x_r <= 1'b1;
+                    end else if (operand.exp < operand_b.exp) begin
+                        exponent_delta = operand_b.exp - operand.exp;
+                        trans_count_r <= exponent_delta > 15'd82
+                                       ? 8'd82
+                                       : {1'b0, exponent_delta[6:0]};
+                        trans_shift_x_r <= 1'b0;
+                    end else begin
+                        trans_count_r <= 8'd0;
+                        trans_shift_x_r <= 1'b0;
+                    end
+                end else if (!is_nan(operand) &&
+                             !is_infinity(operand) &&
+                             (operand.class_id != X87_EMPTY) &&
+                             !is_zero(operand) &&
+                             (unbiased_exp < 17'sd63) &&
+                             (unbiased_exp > -17'sd27)) begin
+                    trans_range_sig_r <= operand.sig;
+                    trans_count_r <= unbiased_exp[7:0] + 8'd121;
+                    trans_range_remainder_r <= 121'h0;
+                    trans_quadrant_r <= 2'b00;
+                end
+            end
+
+            case (uop.engine)
+                X87_ENGINE_TRANS_RANGE_ITERATE: begin
+                    trans_range_sig_r <= trans_range_sig_r << 1;
+                    trans_range_remainder_r <= trans_range_next;
+                    trans_quadrant_r <= trans_quadrant_next;
+                end
+                X87_ENGINE_TRANS_RANGE_FINALIZE: begin
+                    trans_quadrant_r <=
+                        (trans_range_remainder_r > TRANS_PIO4_Q120)
+                            ? trans_quadrant_r + 2'd1
+                            : trans_quadrant_r;
+                    trans_atan_address_r <= 7'd0;
+                end
+                X87_ENGINE_TRANS_CORDIC_PREP: begin
+                    cordic_load_index_r <= 4'd0;
+                    cordic_bank_r <= 1'b0;
+                    cordic_x_sign_r[0] <= 1'b0;
+                    cordic_y_sign_r[0] <= 1'b0;
+                    cordic_z_sign_r <= trans_atan2
+                                       ? 1'b0 : trans_reduced_q80[82];
+                    cordic_primary_r <= 83'sh0;
+                    cordic_auxiliary_r <= 83'sh0;
+                end
+                X87_ENGINE_CORDIC_ALIGN_PREP:
+                    cordic_limb_r <= 2'd2;
+                X87_ENGINE_CORDIC_BEGIN: begin
+                    trans_count_r <= 8'd80;
+                    cordic_iteration_r <= 7'd0;
+                    cordic_shift_word_r <= 2'd0;
+                    cordic_shift_bits_r <= 5'd0;
+                    trans_atan_address_r <= 7'd0;
+                end
+                X87_ENGINE_CORDIC_X_PREP: begin
+                    trans_cordic_sub_r <= trans_atan2
+                        ? cordic_y_sign_r[cordic_bank_r]
+                        : !cordic_z_sign_r;
+                    cordic_carry_r <= trans_atan2
+                        ? cordic_y_sign_r[cordic_bank_r]
+                        : !cordic_z_sign_r;
+                    cordic_limb_r <= 2'd0;
+                end
+                X87_ENGINE_CORDIC_Y_PREP: begin
+                    cordic_carry_r <= !trans_cordic_sub_r;
+                    cordic_limb_r <= 2'd0;
+                end
+                X87_ENGINE_CORDIC_Z_PREP: begin
+                    cordic_carry_r <= trans_cordic_sub_r;
+                    cordic_limb_r <= 2'd0;
+                end
+                X87_ENGINE_CORDIC_NEXT: begin
+                    cordic_bank_r <= !cordic_bank_r;
+                    cordic_iteration_r <= cordic_iteration_r + 7'd1;
+                    trans_atan_address_r <= cordic_iteration_r + 7'd1;
+                    if (cordic_shift_bits_r == 5'd27) begin
+                        cordic_shift_bits_r <= 5'd0;
+                        cordic_shift_word_r <= cordic_shift_word_r + 2'd1;
+                    end else begin
+                        cordic_shift_bits_r <= cordic_shift_bits_r + 5'd1;
+                    end
+                end
+                X87_ENGINE_CORDIC_OUTPUT_PREP: begin
+                    logic [3:0] sine_base;
+                    logic [3:0] cosine_base;
+                    logic sine_negate;
+                    logic cosine_negate;
+
+                    sine_base = cordic_y_base(cordic_bank_r);
+                    cosine_base = cordic_x_base(cordic_bank_r);
+                    sine_negate = 1'b0;
+                    cosine_negate = 1'b0;
+                    case (trans_quadrant_r)
+                        2'd1: begin
+                            sine_base = cordic_x_base(cordic_bank_r);
+                            cosine_base = cordic_y_base(cordic_bank_r);
+                            cosine_negate = 1'b1;
+                        end
+                        2'd2: begin
+                            sine_negate = 1'b1;
+                            cosine_negate = 1'b1;
+                        end
+                        2'd3: begin
+                            sine_base = cordic_x_base(cordic_bank_r);
+                            cosine_base = cordic_y_base(cordic_bank_r);
+                            sine_negate = 1'b1;
+                        end
+                        default: ;
+                    endcase
+                    sine_negate = sine_negate ^ operand.sign;
+                    if (trans_atan2) begin
+                        cordic_output_base_r <= CORDIC_Z_BASE;
+                        if (!operand_b.sign)
+                            cordic_output_mode_r <= operand.sign
+                                ? CORDIC_OUT_NEGATE : CORDIC_OUT_COPY;
+                        else
+                            cordic_output_mode_r <= operand.sign
+                                ? CORDIC_OUT_MINUS_PI
+                                : CORDIC_OUT_PI_MINUS;
+                        cordic_carry_r <= operand_b.sign || operand.sign;
+                    end else if (trans_cosine) begin
+                        cordic_output_base_r <= cosine_base;
+                        cordic_output_mode_r <= cosine_negate
+                            ? CORDIC_OUT_NEGATE : CORDIC_OUT_COPY;
+                        cordic_carry_r <= cosine_negate;
+                    end else begin
+                        cordic_output_base_r <= sine_base;
+                        cordic_output_mode_r <= sine_negate
+                            ? CORDIC_OUT_NEGATE : CORDIC_OUT_COPY;
+                        cordic_carry_r <= sine_negate;
+                    end
+                    cordic_limb_r <= 2'd0;
+                end
+                X87_ENGINE_CORDIC_AUX_PREP: begin
+                    logic cosine_negate;
+                    cosine_negate = (trans_quadrant_r == 2'd1) ||
+                                    (trans_quadrant_r == 2'd2);
+                    cordic_output_base_r <=
+                        ((trans_quadrant_r == 2'd1) ||
+                         (trans_quadrant_r == 2'd3))
+                        ? cordic_y_base(cordic_bank_r)
+                        : cordic_x_base(cordic_bank_r);
+                    cordic_output_mode_r <= cosine_negate
+                        ? CORDIC_OUT_NEGATE : CORDIC_OUT_COPY;
+                    cordic_carry_r <= cosine_negate;
+                    cordic_limb_r <= 2'd0;
+                end
+                X87_ENGINE_CORDIC_OUTPUT_CAPTURE: begin
+                    cordic_lhs_r <= cordic_read_data_a;
+                    cordic_rhs_low_r <= cordic_vector_limb(
+                        TRANS_PI_Q80, cordic_limb_r);
+                end
+                default: ;
+            endcase
+
+            case (uop.scratch_read)
+                X87_SCRATCH_READ_X_LOW,
+                X87_SCRATCH_READ_Y_LOW:
+                    cordic_rhs_low_fill_r <=
+                        ({2'b00, cordic_limb_r} +
+                         {2'b00, cordic_shift_word_r}) >= 4'd3;
+                X87_SCRATCH_READ_X_HIGH,
+                X87_SCRATCH_READ_Y_HIGH: begin
+                    cordic_lhs_r <= cordic_read_data_a;
+                    cordic_rhs_low_r <= cordic_read_data_b;
+                    cordic_rhs_high_fill_r <=
+                        ({2'b00, cordic_limb_r} +
+                         {2'b00, cordic_shift_word_r} + 4'd1) >= 4'd3;
+                end
+                default: ;
+            endcase
+
+            case (uop.scratch_write)
+                X87_SCRATCH_WRITE_LOAD:
+                    cordic_load_index_r <= cordic_load_index_r + 4'd1;
+                X87_SCRATCH_WRITE_ALIGN:
+                    cordic_limb_r <= cordic_limb_r - 2'd1;
+                X87_SCRATCH_WRITE_X: begin
+                    cordic_carry_r <= cordic_add_result[28];
+                    if (cordic_limb_r == 2'd2)
+                        cordic_x_sign_r[!cordic_bank_r] <=
+                            cordic_write_data[26];
+                    cordic_limb_r <= cordic_limb_r + 2'd1;
+                end
+                X87_SCRATCH_WRITE_Y: begin
+                    cordic_carry_r <= cordic_add_result[28];
+                    if (cordic_limb_r == 2'd2)
+                        cordic_y_sign_r[!cordic_bank_r] <=
+                            cordic_write_data[26];
+                    cordic_limb_r <= cordic_limb_r + 2'd1;
+                end
+                X87_SCRATCH_WRITE_Z: begin
+                    cordic_carry_r <= cordic_add_result[28];
+                    if (cordic_limb_r == 2'd2)
+                        cordic_z_sign_r <= cordic_write_data[26];
+                    cordic_limb_r <= cordic_limb_r + 2'd1;
+                end
+                X87_SCRATCH_WRITE_PRIMARY: begin
+                    if (cordic_limb_r == 2'd0)
+                        cordic_primary_r[27:0] <= cordic_add_result[27:0];
+                    else if (cordic_limb_r == 2'd1)
+                        cordic_primary_r[55:28] <= cordic_add_result[27:0];
+                    else
+                        cordic_primary_r[82:56] <= cordic_add_result[26:0];
+                    cordic_carry_r <= cordic_add_result[28];
+                    cordic_limb_r <= cordic_limb_r + 2'd1;
+                end
+                X87_SCRATCH_WRITE_AUX: begin
+                    if (cordic_limb_r == 2'd0)
+                        cordic_auxiliary_r[27:0] <= cordic_add_result[27:0];
+                    else if (cordic_limb_r == 2'd1)
+                        cordic_auxiliary_r[55:28] <= cordic_add_result[27:0];
+                    else
+                        cordic_auxiliary_r[82:56] <= cordic_add_result[26:0];
+                    cordic_carry_r <= cordic_add_result[28];
+                    cordic_limb_r <= cordic_limb_r + 2'd1;
+                end
+                default: ;
+            endcase
+
             case (uop.state)
                 X87_STATE_TRANS_SELECT: begin
-                    logic signed [82:0] sine_value;
-                    logic signed [82:0] cosine_value;
-                    logic signed [82:0] selected_value;
-
-                    sine_value = 83'sh0;
-                    cosine_value = 83'sh0;
-                    selected_value = 83'sh0;
-                    if (trans_atan2) begin
-                        if (trans_x_sign_r)
-                            selected_value = trans_y_sign_r
-                                ? trans_z_r - TRANS_PI_Q80
-                                : TRANS_PI_Q80 - trans_z_r;
-                        else
-                            selected_value = trans_y_sign_r
-                                ? -trans_z_r : trans_z_r;
-                    end else begin
-                        case (trans_quadrant_r)
-                            2'd0: begin
-                                sine_value = trans_y_r;
-                                cosine_value = trans_x_r;
-                            end
-                            2'd1: begin
-                                sine_value = trans_x_r;
-                                cosine_value = -trans_y_r;
-                            end
-                            2'd2: begin
-                                sine_value = -trans_y_r;
-                                cosine_value = -trans_x_r;
-                            end
-                            default: begin
-                                sine_value = -trans_x_r;
-                                cosine_value = trans_y_r;
-                            end
-                        endcase
-                        if (operand.sign)
-                            sine_value = -sine_value;
-                        selected_value = trans_cosine
-                                       ? cosine_value : sine_value;
-                        if (trans_tangent_pair) begin
-                            trans_aux_sign_r <= cosine_value[82];
-                            trans_aux_magnitude_r <= cosine_value[82]
-                                                  ? -cosine_value
-                                                  : cosine_value;
-                        end
+                    if (trans_tangent_pair) begin
+                        trans_aux_sign_r <= cordic_auxiliary_r[82];
+                        trans_aux_magnitude_r <= cordic_auxiliary_r[82]
+                            ? -cordic_auxiliary_r : cordic_auxiliary_r;
                     end
-                    trans_result_sign_r <= selected_value[82];
-                    trans_magnitude_r <= selected_value[82]
-                                           ? -selected_value
-                                           : selected_value;
+                    trans_result_sign_r <= cordic_primary_r[82];
+                    trans_magnitude_r <= cordic_primary_r[82]
+                        ? -cordic_primary_r : cordic_primary_r;
                     trans_exp_r <= 17'sd16383;
-                    inexact <= 1'b1;
                 end
 
                 X87_STATE_TRANS_NORMALIZE: begin
@@ -1754,8 +2049,135 @@ always_ff @(posedge clk) begin
                     trans_exp_r <= 17'sd16383;
                     trans_rounding_aux_r <= 1'b1;
                 end
-                default: begin end
+                default: ;
             endcase
+        end
+    end
+end
+
+// Divide/square-root register bank. Both operations reuse the restoring
+// remainder datapath; the microcode selects one result bit per iteration.
+always_ff @(posedge clk) begin
+    if (reset) begin
+        divsqrt_divisor_r <= 53'h0;
+        divsqrt_remainder_r <= 58'h0;
+        divsqrt_result_bits_r <= 56'h0;
+        sqrt_source_r <= 54'h0;
+        divsqrt_exp_r <= 17'sd0;
+        divsqrt_result_sign_r <= 1'b0;
+    end else if (seq_exec_valid) begin
+        if (uop.classify == X87_CLASSIFY_DIVSQRT)
+            divsqrt_result_sign_r <= (exec_op == X87_ARITH_SQRT)
+                                   ? operand.sign
+                                   : operand.sign ^ operand_b.sign;
+
+        case (uop.engine)
+            X87_ENGINE_DIV_ITERATE: begin
+                divsqrt_result_bits_r <=
+                    {divsqrt_result_bits_r[54:0], divsqrt_next_bit};
+                divsqrt_remainder_r <= divsqrt_next_bit
+                    ? divsqrt_after_subtract : divsqrt_shifted;
+            end
+            X87_ENGINE_SQRT_ITERATE: begin
+                sqrt_source_r <= sqrt_source_r << 2;
+                divsqrt_result_bits_r <=
+                    {divsqrt_result_bits_r[54:0], divsqrt_next_bit};
+                divsqrt_remainder_r <= divsqrt_next_bit
+                    ? divsqrt_after_subtract : divsqrt_shifted;
+            end
+            default: ;
+        endcase
+
+        case (uop.prepare)
+            X87_PREPARE_DIV: begin
+                divsqrt_divisor_r <= operand_b.sig;
+                divsqrt_result_bits_r <= 56'h1;
+                divsqrt_exp_r <=
+                    $signed({2'b00, operand.exp}) -
+                    $signed({2'b00, operand_b.exp}) + 17'sd16383;
+                if (operand.sig >= operand_b.sig) begin
+                    divsqrt_remainder_r <=
+                        {4'h0, {1'b0, operand.sig} -
+                               {1'b0, operand_b.sig}};
+                end else begin
+                    divsqrt_remainder_r <=
+                        {4'h0, ({1'b0, operand.sig} << 1) -
+                               {1'b0, operand_b.sig}};
+                    divsqrt_exp_r <=
+                        $signed({2'b00, operand.exp}) -
+                        $signed({2'b00, operand_b.exp}) + 17'sd16382;
+                end
+            end
+
+            X87_PREPARE_SQRT: begin
+                logic [14:0] exponent_distance;
+
+                divsqrt_result_sign_r <= operand.sign;
+                if (operand.exp >= 15'h3fff) begin
+                    exponent_distance = operand.exp - 15'h3fff;
+                    divsqrt_exp_r <= 17'sd16383 +
+                        $signed({2'b00, exponent_distance >> 1});
+                end else begin
+                    exponent_distance = 15'h3fff - operand.exp;
+                    divsqrt_exp_r <= 17'sd16383 -
+                        $signed({2'b00,
+                                 (exponent_distance + 15'd1) >> 1});
+                end
+                sqrt_source_r <= operand.exp[0]
+                    ? {1'b0, operand.sig}
+                    : {operand.sig, 1'b0};
+                divsqrt_remainder_r <= 58'h0;
+                divsqrt_result_bits_r <= 56'h0;
+            end
+            default: ;
+        endcase
+    end
+end
+
+// Four radix-2^27 partial products run in parallel in DSPs. Two accumulation
+// microsteps propagate the limb carry and assemble the 106-bit result.
+always_ff @(posedge clk) begin
+    if (reset) begin
+        mul_limb1_r <= 29'h0;
+        mul_limb2_r <= 29'h0;
+        mul_partial_r <= 2'd0;
+        mul_exp_r <= 15'h0;
+        mul_result_sign_r <= 1'b0;
+    end else if (seq_exec_valid) begin
+        if (uop.classify == X87_CLASSIFY_MUL)
+            mul_result_sign_r <= operand.sign ^ operand_b.sign;
+
+        case (uop.engine)
+            X87_ENGINE_MUL_ISSUE: ;
+
+            X87_ENGINE_MUL_ACCUMULATE: begin
+                case (mul_partial_r)
+                    2'd0:
+                        mul_limb1_r <= {2'b0, mul_p00[53:27]} +
+                                      {2'b0, mul_p01[26:0]} +
+                                      {2'b0, mul_p10[26:0]};
+                    2'd1:
+                        mul_limb2_r <= {2'b0, mul_p01[53:27]} +
+                                      {2'b0, mul_p10[53:27]} +
+                                      {2'b0, mul_p11[26:0]} +
+                                      {{27{1'b0}}, mul_limb1_r[28:27]};
+                    default: ;
+                endcase
+                if (mul_partial_r != 2'd3) begin
+                    mul_partial_r <= mul_partial_r + 2'd1;
+                end
+            end
+            default: ;
+        endcase
+
+        if ((uop.alu_route == X87_ALU_PREP_ROUND_MUL) && mul_product[105])
+            mul_exp_r <= mul_exp_r + 15'd1;
+
+        if (uop.prepare == X87_PREPARE_MUL) begin
+            mul_exp_r <= operand.exp + operand_b.exp - 15'h3fff;
+            mul_limb1_r <= 29'h0;
+            mul_limb2_r <= 29'h0;
+            mul_partial_r <= 2'd0;
         end
     end
 end

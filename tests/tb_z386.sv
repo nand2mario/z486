@@ -66,6 +66,7 @@ module tb_z386 #(
         .dbg_CS_base(),
         .dbg_pe(),
         .dbg_vm(),
+        .dbg_x87_state(),
         .triple_fault_reset()
     );
 
