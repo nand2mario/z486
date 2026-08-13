@@ -113,7 +113,7 @@ module tb_dhrystone;
 `ifdef Z386S_CORE
     wire instruction_retire = dut.wb_instr_boundary;
 `else
-    wire instruction_retire = dut.i_pop;
+    wire instruction_retire = dut.i_issue;
 `endif
     longint instruction_count = 0;
     reg [31:0] prev_trace_eip = 32'hFFFF_FFFF;

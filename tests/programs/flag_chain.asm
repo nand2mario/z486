@@ -1,9 +1,9 @@
-; flag_chain.asm - Cross-instruction flag-chain regression (FAST-chain hazards)
+; flag_chain.asm - Cross-instruction flag-chain regression (hardwired-chain hazards)
 ;
 ; The singlestep suites reset state per instruction, so they cannot catch
 ; flag hazards BETWEEN chained instructions (doc: two-cycle flag validation
-; gap).  This test exercises the patterns that broke in the field when FAST
-; chaining ran flag producer + CF-preserving consumer back-to-back (1/cycle):
+; gap).  This test exercises patterns that broke when hardwired chaining ran a
+; flag producer and CF-preserving consumer back-to-back (1/cycle):
 ;
 ;   1. adc/add -> dec -> jnc   (doomfps1 FPS bug: Watcom FP emulator
 ;      mantissa-normalize loop `add di,di; adc...; adc ax,ax; dec si; js; jnc`)
@@ -113,7 +113,7 @@ start:
     cmp si, 8            ; 0xA5C3 has 8 set bits
     jne fail
 
-;--- 6: SHLD/SHRD use the two-word FAST shift path.  Check its deferred
+;--- 6: SHLD/SHRD use the two-uStep hardwired shift path.  Check its deferred
 ;       destination and flags in the immediately following instruction.
     mov ax, 0x1234
     mov dx, 0xABCD

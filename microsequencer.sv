@@ -12,20 +12,19 @@ module microsequencer
     input  logic        d2_start,             // D2 presents a new entry point
     input  logic [11:0] d2_start_entry,       // PLA/recipe entry selected in D1/D2
     input  logic        d2_valid,
-    input  logic        d2_fire,
+    input  logic        i_issue,              // D2 transfers its instruction to EX
 
     input  logic        seq_advance,          // Advance sequencer and ROM pipeline
     input  logic        macro_entry_valid,    // Launch decoded macro instruction
-    input  logic        fast_entry_valid,     // Launch hardwired FAST recipe
+    input  logic        chain_entry_valid,     // Start a chained successor entry
     input  logic        uc_exec,              // Current micro-op may take effect
     input  logic        repeat_active,
     input  logic        prot_redirect_prev,   // Protection redirect delay-slot state
     input  logic        jcc_fold_active,      // Folded Jcc supplies synthetic RNI
-    input  logic        branch_ustep_exec,    // FAST branch supplies synthetic RNI
+    input  logic        branch_ustep_exec,    // Hardwired branch supplies synthetic RNI
     input  logic        macro_active,
     input  logic        instr_eip_written,
     input  logic        any_fault,
-    input  logic        i_pop,
     input  logic        stall,
     input  logic        page_fault,
     input  logic        pe,
@@ -112,8 +111,8 @@ assign i_rni = rni_base || jcc_fold_active || branch_ustep_exec;
 
 seq_redirect_t exec_redirect;
 
-wire d2_rom_hold = d2_valid && d2_rom_mem_resident && !d2_fire && !d2_cancel;
-wire d2_delay_preload = d2_valid && d2_rom_mem_resident && d2_fire &&
+wire d2_rom_hold = d2_valid && d2_rom_mem_resident && !i_issue && !d2_cancel;
+wire d2_delay_preload = d2_valid && d2_rom_mem_resident && i_issue &&
                         !d2_start && !d2_slot_prefetched_r;
 wire rom_addr_ce = rom_base_ce && !d2_rom_hold;
 assign rom_q_ce = rom_base_ce && !d2_rom_hold && !d2_cancel;
@@ -189,7 +188,7 @@ always_comb begin
         uaddr_next = d2_start_entry;
     if (exec_redirect.valid)
         uaddr_next = exec_redirect.target;
-    if (fast_entry_valid)
+    if (chain_entry_valid)
         uaddr_next = d2_start_entry;
     if (fault_redirect.valid)
         uaddr_next = fault_redirect.target;
@@ -260,7 +259,7 @@ always_ff @(posedge clk) begin
             d2_slot_prefetched_r <= 1'b0;
         else if (d2_delay_preload && rom_addr_ce)
             d2_slot_prefetched_r <= 1'b1;
-        else if (d2_fire)
+        else if (i_issue)
             d2_slot_prefetched_r <= 1'b0;
     end
 end
@@ -290,7 +289,7 @@ always_ff @(posedge clk) begin
         if (i_rni_delay && !stall && !page_fault)
             i_rni_delay <= 1'b0;
         if (uc_exec && i_rni && macro_active && !instr_eip_written &&
-            !any_fault && !i_pop)
+            !any_fault && !i_issue)
             i_rni_delay <= 1'b1;
         if (page_fault)
             i_rni_delay <= 1'b0;

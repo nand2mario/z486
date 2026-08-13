@@ -102,7 +102,7 @@ start:
     ; reaches fault_site.
 
 times 0x0ffe - ($ - $$) db 0x90
-    sti                       ; FLAGSB from i_pop is intentionally stale here
+    sti                       ; FLAGSB from i_issue is intentionally stale here
 fault_site:
     db 0xeb                    ; displacement byte lies in absent page
 absent_target:

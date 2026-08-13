@@ -4,10 +4,10 @@
 `ucode_base.hex` is the original 37-bit extracted microcode and is NEVER edited.
 This script applies the documented PATCHES below and writes the optimized
 40-bit `ucode.hex` (+ `ucode.mif`): the native word remains in bits 36:0 and
-the v52 D2 early kind occupies bits 39:37.  This script also owns the FAST
-recipe inventory and generates its SystemVerilog lookup and human-readable
-manifest, so microcode words and the recipes that consume them cannot silently
-drift apart.
+the D2 early kind occupies bits 39:37. This script also owns the hardwired
+common-instruction recipe inventory and
+generates its SystemVerilog lookup and human-readable manifest, so microcode
+words and the recipes that consume them cannot silently drift apart.
 
 37-bit word field layout (see doc/microcode/fields.txt):
     bus[5:0]  sub[7:6]  op[10:8]  aluop[17:11]  src[23:18]  dst[30:24]  alusrc[36:31]
@@ -52,7 +52,7 @@ class Patch:
 
 
 class EarlyKind(IntEnum):
-    """D2 early-start operation encoded by the future 3 ROM metadata bits."""
+    """D2 operation class encoded by the three ROM metadata bits."""
 
     SEQ = 0
     NONE = 1
@@ -121,9 +121,9 @@ PATCHES = [
           copy_from=0x20F),
 
     # ---- v52 direct ALU usteps -------------------------------------------
-    # Every FAST ALU retire word owns its architectural write through one
-    # destination encoding. This replaces the parallel FAST_COMMIT_ALU write
-    # site while leaving SEQ/fast_off to execute the original slot writeback.
+    # Every hardwired ALU retire word owns its architectural write through one
+    # destination encoding. This replaces the parallel RECIPE_COMMIT_ALU write
+    # site while leaving SEQ/hardwired_off to execute the original slot writeback.
     Patch(0x003, "MOV r,r ustep: commit entry ALU result to DSTREG",
           fields=dict(dst=DEST_USTEP_ALU)),
     Patch(0x005, "MOV r,imm ustep: commit entry ALU result to DSTREG",
@@ -137,7 +137,7 @@ PATCHES = [
 
     # ---- Load (MOV r,m) 4 -> 3 cycles --------------------------------------
     # The PIPT dcache returns the read data by 01A: with the modrm linear
-    # registered at i_pop, the 019 RD is issued/accepted at i_first and
+    # registered at i_issue, the 019 RD is issued/accepted at i_first and
     # resp_valid lands the next cycle (01A).  The original routine then spends
     # two more cycles -- 01B (bare RNI) and 01C (the result write).  Fold RNI
     # into the 01A DLY (exactly POP's 0A0 "RNI DLY") and move the result write
@@ -157,9 +157,9 @@ PATCHES = [
     # consumed ALU source) to complete the symmetry for r,m.
     #   patched:  027 RD / 028 DLY / 029 DSTREG(op)OPR_R +-&|^ RNI / 02A slot SIGMA->DSTREG
     #   was:      027 RD / 028 DLY / 029 OPR_R->TMPB / 02A DSTREG(op)TMPB RNI / 02B slot
-    # FAST shape is unchanged (multi_word, commit_sel=ALU): the RNI word moves
+    # hardwired shape is unchanged (multi_ustep, commit_sel=ALU): the RNI word moves
     # one earlier, chainN keys on uc_next content, the ALU-commit sideband
-    # keys on the RNI word's aluop.  SEQ/fast_off path speeds up identically.
+    # keys on the RNI word's aluop.  SEQ/hardwired_off path speeds up identically.
     Patch(0x029, "ALU r,m 4->3: 029 = ALU DSTREG,OPR_R +-&|^ RNI (was OPR_R->TMPB)",
           copy_from=0x02A, fields=dict(alusrc=0x0F, dst=DEST_USTEP_ALU)),
     Patch(0x02A, "ALU r,m 4->3: 02A = SIGMA->DSTREG (slot writeback; was the ALU word)",
@@ -183,7 +183,7 @@ PATCHES = [
     # directly via the source field (dst port = the memory operand, correct
     # m,r operand order).  The shared 046 SIGMA->OPR_W+WR+RNI / 047 DLY tail
     # and the 04A/039 FLGSBA restart backup are untouched, so write-fault
-    # restart semantics are identical.  Stays SEQ (not FAST-classified).
+    # restart semantics are identical.  Stays SEQ (not hardwired-classified).
     #   patched:  04A FLGSBA+RD / 04B DLY+JMP(046) / 04C OPR_R,SRCREG +-&|^ / 046 WR+RNI / 047
     #   was:      04A FLGSBA+RD / 04B DLY / 04C OPR_R->TMPB+JMP / 04D TMPB,SRCREG / 046 / 047
     # Jump offset: reljump target = uaddr + sext6(alusrc) with uaddr already
@@ -199,12 +199,12 @@ PATCHES = [
 ]
 
 
-# Current FAST routines and their bounded v52 target recipes.  `legacy` is
+# Current hardwired routines and their bounded target recipes. `legacy` is
 # descriptive: it records the current general-sequencer control paths.
-# `targets` are the future explicit recipes and must contain 1..3 logical
+# `targets` are explicit recipes and must contain 1..3 logical
 # usteps.  A memory ustep may hold for completion, absorbing legacy DLY/JMP
 # plumbing without increasing the target step count.
-FAST_RECIPES = [
+HARDWIRED_RECIPES = [
     Recipe("mov-r-r", 0x003, EarlyKind.NONE,
            ((0x003, 0x004),), ((0x003,),), "alu-dst", "reclaim", ("src",)),
     Recipe("mov-r-imm", 0x005, EarlyKind.NONE,
@@ -358,9 +358,9 @@ def apply_patches(base: list[int]) -> list[int]:
 
 
 def annotate_recipes(words: list[int]) -> list[int]:
-    """Attach the D2 early kind to each FAST entry word."""
+    """Attach the D2 early kind to each hardwired entry word."""
     annotated = words[:]
-    for recipe in FAST_RECIPES:
+    for recipe in HARDWIRED_RECIPES:
         annotated[recipe.entry] |= int(recipe.early) << UCODE_BITS
     for recipe in OVERLAY_RECIPES:
         annotated[recipe.entry] |= int(recipe.early) << UCODE_BITS
@@ -382,7 +382,7 @@ def validate_recipes(words: list[int]) -> None:
     default_word = (1 << UCODE_BITS) - 1
     entries: dict[int, str] = {}
 
-    for recipe in FAST_RECIPES:
+    for recipe in HARDWIRED_RECIPES:
         if recipe.entry in entries:
             raise ValueError(
                 f"recipe {recipe.name}: entry 0x{recipe.entry:03X} already used by "
@@ -391,7 +391,7 @@ def validate_recipes(words: list[int]) -> None:
         entries[recipe.entry] = recipe.name
 
         if recipe.early == EarlyKind.SEQ:
-            raise ValueError(f"recipe {recipe.name}: FAST recipe cannot use SEQ early kind")
+            raise ValueError(f"recipe {recipe.name}: hardwired recipe cannot use SEQ early kind")
         if not recipe.legacy or not recipe.targets:
             raise ValueError(f"recipe {recipe.name}: legacy and target paths are required")
 
@@ -446,16 +446,17 @@ def validate_recipes(words: list[int]) -> None:
 def render_recipe_manifest(words: list[int]) -> str:
     validate_recipes(words)
     lines = [
-        "# z486 FAST recipe manifest",
+        "# z486 hardwired-instruction recipe manifest",
         "",
         "Generated by `scripts/ucode_optimize.py`; do not edit manually.",
-        "Legacy paths describe the current sequencer. Target paths are the v52",
-        "bounded recipes; a memory ustep may hold while its request completes.",
+        "Legacy paths describe the general sequencer; target paths are bounded",
+        "hardwired recipes. A memory uStep may",
+        "hold while its request completes.",
         "",
         "| recipe | entry | early | target usteps | legacy paths | commit | slot | hazards |",
         "| --- | ---: | --- | --- | --- | --- | --- | --- |",
     ]
-    for recipe in FAST_RECIPES:
+    for recipe in HARDWIRED_RECIPES:
         targets = " / ".join(fmt_path(path) for path in recipe.targets)
         legacy = " / ".join(fmt_path(path) for path in recipe.legacy)
         hazards = ", ".join(recipe.hazards) if recipe.hazards else "-"
@@ -466,7 +467,7 @@ def render_recipe_manifest(words: list[int]) -> str:
         )
     lines += [
         "",
-        f"Recipes: {len(FAST_RECIPES)}. Native microcode remains {UCODE_BITS}-bit.",
+        f"Recipes: {len(HARDWIRED_RECIPES)}. Native microcode remains {UCODE_BITS}-bit.",
         "The generated 40-bit ROM image stores the D2 early kind in bits 39:37.",
         "",
         "## Qualified overlays",
@@ -487,7 +488,7 @@ def render_recipe_manifest(words: list[int]) -> str:
 
 def render_recipe_svh(words: list[int]) -> str:
     validate_recipes(words)
-    recipes = {recipe.name: recipe for recipe in FAST_RECIPES}
+    recipes = {recipe.name: recipe for recipe in HARDWIRED_RECIPES}
     emitted: set[str] = set()
 
     def recipe_entries(*names: str) -> str:
@@ -564,7 +565,7 @@ def render_recipe_svh(words: list[int]) -> str:
         "    unique case (entry)",
     ]
     by_kind: dict[EarlyKind, list[int]] = {}
-    for recipe in FAST_RECIPES:
+    for recipe in HARDWIRED_RECIPES:
         by_kind.setdefault(recipe.early, []).append(recipe.entry)
     for recipe in OVERLAY_RECIPES:
         by_kind.setdefault(recipe.early, []).append(recipe.entry)
@@ -578,10 +579,10 @@ def render_recipe_svh(words: list[int]) -> str:
         "    endcase",
         "endfunction",
         "",
-        "// Entry-point-derived FAST control for v52 A2. The legacy",
-        "// dec_fast_class() remains a simulation-only equivalence oracle.",
-        "function automatic fast_class_t recipe_fast_class(input dec_entry_t e);",
-        "    fast_class_t r;",
+        "// Entry-point-derived hardwired control. The legacy dec_recipe_metadata()",
+        "// remains a simulation-only equivalence oracle.",
+        "function automatic recipe_meta_t recipe_metadata(input dec_entry_t e);",
+        "    recipe_meta_t r;",
         "    logic [2:0] grp;",
         "    r = '0;",
         "    if (e.opcode[7:4] == 4'h4 || e.opcode[7:4] == 4'h5)",
@@ -595,28 +596,28 @@ def render_recipe_svh(words: list[int]) -> str:
         "    if (e.rep_lock == PREFIX_NOREPLOCK) begin",
         "        unique case (e.entry_point)",
         f"            {recipe_entries('mov-r-r')}: begin",
-        "                r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU;",
+        "                r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU;",
         "                r.reads_src = 1'b1;",
         "            end",
         f"            {recipe_entries('mov-r-imm')}: begin",
         "                if ((e.opcode[7:4] == 4'hB) ||",
         "                    ((e.opcode[7:1] == 7'b1100011) &&",
         "                     (e.modrm[7:6] == 2'b11) && (e.modrm[5:3] == 3'b000))) begin",
-        "                    r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU;",
+        "                    r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU;",
         "                end",
         "            end",
         f"            {recipe_entries('alu-r-r')}: begin",
-        "                r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU;",
+        "                r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU;",
         "                r.reads_flags = (grp == 3'b010) || (grp == 3'b011);",
         "                r.reads_dst = 1'b1; r.reads_src = 1'b1;",
         "                r.writes_flags = 1'b1;",
         "            end",
         f"            {recipe_entries('cmp-test-r-r')}: begin",
-        "                r.fast = 1'b1; r.reads_dst = 1'b1; r.reads_src = 1'b1;",
+        "                r.hardwired = 1'b1; r.reads_dst = 1'b1; r.reads_src = 1'b1;",
         "                r.writes_flags = 1'b1;",
         "            end",
         f"            {recipe_entries('inc-dec-not-neg-r')}: begin",
-        "                r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU;",
+        "                r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU;",
         "                r.reads_dst = 1'b1; r.writes_flags = 1'b1;",
         "            end",
         f"            {recipe_entries('alu-r-imm')}: begin",
@@ -625,7 +626,7 @@ def render_recipe_svh(words: list[int]) -> str:
         "                    (((e.opcode == 8'h80) || (e.opcode == 8'h81) ||",
         "                      (e.opcode == 8'h83)) && (e.modrm[7:6] == 2'b11) &&",
         "                     (grp != 3'b111)))) begin",
-        "                    r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU;",
+        "                    r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU;",
         "                    r.reads_flags = (grp == 3'b010) || (grp == 3'b011);",
         "                    r.reads_dst = 1'b1; r.writes_flags = 1'b1;",
         "                end",
@@ -638,13 +639,13 @@ def render_recipe_svh(words: list[int]) -> str:
         "                     (grp == 3'b111)) || (e.opcode[7:1] == 7'b1010100) ||",
         "                    ((e.opcode[7:1] == 7'b1111011) &&",
         "                     (e.modrm[7:6] == 2'b11) && (e.modrm[5:3] == 3'b000)))) begin",
-        "                    r.fast = 1'b1; r.reads_dst = 1'b1;",
+        "                    r.hardwired = 1'b1; r.reads_dst = 1'b1;",
         "                    r.writes_flags = 1'b1;",
         "                end",
         "            end",
         f"            {recipe_entries('lea')}: begin",
         "                if (e.has_modrm && (e.modrm[7:6] != 2'b11)) begin",
-        "                    r.fast = 1'b1; r.uses_ea = 1'b1;",
+        "                    r.hardwired = 1'b1; r.uses_ea = 1'b1;",
         "                    r.writes_srcreg = 1'b1;",
         "                end",
         "            end",
@@ -652,8 +653,8 @@ def render_recipe_svh(words: list[int]) -> str:
         "                if (!e.has_0f && (e.modrm[7:6] == 2'b11) &&",
         "                    (e.modrm[5:3] != 3'b010) && (e.modrm[5:3] != 3'b011) &&",
         "                    (e.modrm[5:3] != 3'b110)) begin",
-        "                    r.fast = 1'b1; r.multi_word = 1'b1;",
-        "                    r.commit_sel = FAST_COMMIT_SHIFT; r.reads_dst = 1'b1;",
+        "                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;",
+        "                    r.commit_sel = RECIPE_COMMIT_SHIFT; r.reads_dst = 1'b1;",
         "                    r.writes_flags = 1'b1;",
         "                end",
         "            end",
@@ -661,16 +662,16 @@ def render_recipe_svh(words: list[int]) -> str:
         "                if (!e.has_0f && (e.modrm[7:6] == 2'b11) &&",
         "                    (e.modrm[5:3] != 3'b010) && (e.modrm[5:3] != 3'b011) &&",
         "                    (e.modrm[5:3] != 3'b110)) begin",
-        "                    r.fast = 1'b1; r.multi_word = 1'b1;",
-        "                    r.commit_sel = FAST_COMMIT_SHIFT; r.reads_dst = 1'b1;",
+        "                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;",
+        "                    r.commit_sel = RECIPE_COMMIT_SHIFT; r.reads_dst = 1'b1;",
         "                    r.reads_ecx = 1'b1; r.writes_flags = 1'b1;",
         "                end",
         "            end",
         f"            {recipe_entries('shxd-r-imm')}: begin",
         "                if (e.has_0f && (e.modrm[7:6] == 2'b11) &&",
         "                    ((e.opcode == 8'hA4) || (e.opcode == 8'hAC))) begin",
-        "                    r.fast = 1'b1; r.multi_word = 1'b1;",
-        "                    r.commit_sel = FAST_COMMIT_SHIFT;",
+        "                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;",
+        "                    r.commit_sel = RECIPE_COMMIT_SHIFT;",
         "                    r.reads_dst = 1'b1; r.reads_src = 1'b1;",
         "                    r.writes_flags = 1'b1;",
         "                end",
@@ -678,33 +679,33 @@ def render_recipe_svh(words: list[int]) -> str:
         f"            {recipe_entries('shxd-r-cl')}: begin",
         "                if (e.has_0f && (e.modrm[7:6] == 2'b11) &&",
         "                    ((e.opcode == 8'hA5) || (e.opcode == 8'hAD))) begin",
-        "                    r.fast = 1'b1; r.multi_word = 1'b1;",
-        "                    r.commit_sel = FAST_COMMIT_SHIFT;",
+        "                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;",
+        "                    r.commit_sel = RECIPE_COMMIT_SHIFT;",
         "                    r.reads_dst = 1'b1; r.reads_src = 1'b1;",
         "                    r.reads_ecx = 1'b1; r.writes_flags = 1'b1;",
         "                end",
         "            end",
         f"            {recipe_entries('szext-r-16', 'szext-r-32')}: begin",
-        "                r.fast = 1'b1; r.multi_word = 1'b1;",
-        "                r.commit_sel = FAST_COMMIT_SIGSRC;",
+        "                r.hardwired = 1'b1; r.multi_ustep = 1'b1;",
+        "                r.commit_sel = RECIPE_COMMIT_SIGSRC;",
         "                r.writes_srcreg = 1'b1; r.reads_dst = 1'b1;",
         "            end",
         f"            {recipe_entries('store-r')}: begin",
-        "                r.fast = 1'b1; r.keep_slot = 1'b1; r.uses_ea = 1'b1;",
+        "                r.hardwired = 1'b1; r.slot_has_work = 1'b1; r.uses_ea = 1'b1;",
         "                r.reads_src = 1'b1;",
         "            end",
         f"            {recipe_entries('store-imm')}: begin",
         "                if ((e.opcode[7:1] == 7'b1100011) &&",
         "                    (e.modrm[7:6] != 2'b11) && (e.modrm[5:3] == 3'b000)) begin",
-        "                    r.fast = 1'b1; r.keep_slot = 1'b1; r.uses_ea = 1'b1;",
+        "                    r.hardwired = 1'b1; r.slot_has_work = 1'b1; r.uses_ea = 1'b1;",
         "                end",
         "            end",
         f"            {recipe_entries('load-r')}: begin",
         "                if (!e.has_0f && (((e.opcode[7:2] == 6'b100010) &&",
         "                    e.opcode[1] && (e.modrm[7:6] != 2'b11)) ||",
         "                    ((e.opcode[7:2] == 6'b101000) && !e.opcode[1]))) begin",
-        "                    r.fast = 1'b1; r.multi_word = 1'b1;",
-        "                    r.commit_sel = FAST_COMMIT_MEM; r.keep_slot = 1'b1;",
+        "                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;",
+        "                    r.commit_sel = RECIPE_COMMIT_MEM; r.slot_has_work = 1'b1;",
         "                    r.uses_ea = 1'b1;",
         "                end",
         "            end",
@@ -712,14 +713,14 @@ def render_recipe_svh(words: list[int]) -> str:
         "                if (!e.has_0f && (e.opcode[7:6] == 2'b00) &&",
         "                    !e.opcode[2] && e.opcode[1] && e.has_modrm &&",
         "                    (e.modrm[7:6] != 2'b11) && (grp != 3'b111)) begin",
-        "                    r.fast = 1'b1; r.multi_word = 1'b1;",
-        "                    r.commit_sel = FAST_COMMIT_ALU; r.uses_ea = 1'b1;",
+        "                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;",
+        "                    r.commit_sel = RECIPE_COMMIT_ALU; r.uses_ea = 1'b1;",
         "                    r.writes_flags = 1'b1;",
         "                end",
         "            end",
         f"            {recipe_entries('cmp-r-m', 'cmp-test-m-r')}: begin",
         "                if (!e.has_0f) begin",
-        "                    r.fast = 1'b1; r.multi_word = 1'b1;",
+        "                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;",
         "                    r.uses_ea = 1'b1; r.writes_flags = 1'b1;",
         "                end",
         "            end",
@@ -730,7 +731,7 @@ def render_recipe_svh(words: list[int]) -> str:
         "                    ((e.opcode[7:1] == 7'b1111011) &&",
         "                     (e.modrm[7:6] != 2'b11) &&",
         "                     (e.modrm[5:3] == 3'b000)))) begin",
-        "                    r.fast = 1'b1; r.multi_word = 1'b1;",
+        "                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;",
         "                    r.uses_ea = 1'b1; r.writes_flags = 1'b1;",
         "                end",
         "            end",
@@ -738,61 +739,61 @@ def render_recipe_svh(words: list[int]) -> str:
         "                if (!e.has_0f && ((e.opcode == 8'h80) ||",
         "                    (e.opcode == 8'h81) || (e.opcode == 8'h83)) &&",
         "                    (e.modrm[7:6] != 2'b11) && (grp != 3'b111)) begin",
-        "                    r.fast = 1'b1; r.multi_word = 1'b1;",
-        "                    r.keep_slot = 1'b1; r.uses_ea = 1'b1;",
+        "                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;",
+        "                    r.slot_has_work = 1'b1; r.uses_ea = 1'b1;",
         "                    r.writes_flags = 1'b1;",
         "                end",
         "            end",
         f"            {recipe_entries('rmw-m-r')}: begin",
         "                if (!e.has_0f) begin",
-        "                    r.fast = 1'b1; r.multi_word = 1'b1;",
-        "                    r.keep_slot = 1'b1; r.uses_ea = 1'b1;",
+        "                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;",
+        "                    r.slot_has_work = 1'b1; r.uses_ea = 1'b1;",
         "                    r.writes_flags = 1'b1;",
         "                end",
         "            end",
         f"            {recipe_entries('szext-m-16', 'szext-m-32')}: begin",
-        "                r.fast = 1'b1; r.multi_word = 1'b1;",
-        "                r.commit_sel = FAST_COMMIT_SIGSRC;",
+        "                r.hardwired = 1'b1; r.multi_ustep = 1'b1;",
+        "                r.commit_sel = RECIPE_COMMIT_SIGSRC;",
         "                r.uses_ea = 1'b1; r.writes_srcreg = 1'b1;",
         "            end",
         f"            {recipe_entries('jcc-rel')}: begin",
-        "                r.fast = 1'b1; r.multi_word = 1'b1; r.jcc = 1'b1;",
+        "                r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.jcc = 1'b1;",
         "                r.reads_flags = 1'b1; r.br_rel = 1'b1;",
         "            end",
         f"            {recipe_entries('jmp-rel')}: begin",
-        "                r.fast = 1'b1; r.multi_word = 1'b1; r.br_rel = 1'b1;",
+        "                r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.br_rel = 1'b1;",
         "            end",
         f"            {recipe_entries('call-rel')}: begin",
-        "                r.fast = 1'b1; r.multi_word = 1'b1;",
-        "                if (e.data32) r.commit_sel = FAST_COMMIT_ESP;",
+        "                r.hardwired = 1'b1; r.multi_ustep = 1'b1;",
+        "                if (e.data32) r.commit_sel = RECIPE_COMMIT_ESP;",
         "                r.uses_ea = 1'b1; r.br_rel = 1'b1;",
         "            end",
         f"            {recipe_entries('ret-near')}: begin",
-        "                r.fast = 1'b1; r.multi_word = 1'b1; r.uses_ea = 1'b1;",
+        "                r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.uses_ea = 1'b1;",
         "            end",
         f"            {recipe_entries('push-r')}: begin",
         "                if (e.opcode[7:3] == 5'b01010) begin",
-        "                    r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ESP;",
-        "                    r.keep_slot = 1'b1; r.uses_ea = 1'b1;",
+        "                    r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ESP;",
+        "                    r.slot_has_work = 1'b1; r.uses_ea = 1'b1;",
         "                    r.reads_dst = 1'b1;",
         "                end",
         "            end",
         f"            {recipe_entries('push-seg')}: begin",
         "                if ((e.opcode[7:6] == 2'b00) && (e.opcode[2:0] == 3'b110)) begin",
-        "                    r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ESP;",
-        "                    r.keep_slot = 1'b1; r.uses_ea = 1'b1;",
+        "                    r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ESP;",
+        "                    r.slot_has_work = 1'b1; r.uses_ea = 1'b1;",
         "                end",
         "            end",
         f"            {recipe_entries('push-imm')}: begin",
         "                if ((e.opcode == 8'h68) || (e.opcode == 8'h6A)) begin",
-        "                    r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ESP;",
-        "                    r.keep_slot = 1'b1; r.uses_ea = 1'b1;",
+        "                    r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ESP;",
+        "                    r.slot_has_work = 1'b1; r.uses_ea = 1'b1;",
         "                end",
         "            end",
         f"            {recipe_entries('pop-r')}: begin",
         "                if (e.opcode[7:3] == 5'b01011) begin",
-        "                    r.fast = 1'b1; r.multi_word = 1'b1;",
-        "                    r.commit_sel = FAST_COMMIT_MEM; r.keep_slot = 1'b1;",
+        "                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;",
+        "                    r.commit_sel = RECIPE_COMMIT_MEM; r.slot_has_work = 1'b1;",
         "                    r.uses_ea = 1'b1;",
         "                end",
         "            end",
@@ -801,25 +802,25 @@ def render_recipe_svh(words: list[int]) -> str:
         if recipe.action == RecipeAction.X87_M32_LOAD:
             lines += [
                 f"            12'h{recipe.entry:03X}: begin",
-                "                // Variable-latency FAST transport, normal sequencer retirement.",
-                "                r.commit_sel = FAST_COMMIT_X87; r.uses_ea = 1'b1;",
+                "                // Variable-latency direct transport; normal sequencer retirement.",
+                "                r.commit_sel = RECIPE_ACTION_X87_DIRECT; r.uses_ea = 1'b1;",
                 "            end",
             ]
         else:
             raise ValueError(
-                f"overlay {recipe.name}: no FAST class for action {recipe.action}"
+                f"overlay {recipe.name}: no hardwired class for action {recipe.action}"
             )
     lines += [
         "            default: ;",
         "        endcase",
         "    end",
-        "    recipe_fast_class = r;",
+        "    recipe_metadata = r;",
         "endfunction",
         "",
     ]
     missing = set(recipes) - emitted
     if missing:
-        raise ValueError(f"FAST recipes missing from recipe_fast_class: {sorted(missing)}")
+        raise ValueError(f"hardwired recipes missing from recipe_metadata: {sorted(missing)}")
     return "\n".join(lines)
 
 

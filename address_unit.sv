@@ -5,7 +5,7 @@ module address_unit
 (
     input  logic        clk,
     input  logic        reset_n,
-    input  logic        instr_pop,           // Latch the next architectural address
+    input  logic        instr_issue,           // Latch the next architectural address
     input  dec_entry_t  instr,
     input  logic        d2_start,            // Latch D2 base/index selection
     input  ea_dec_t     d2_ea,               // Predecoded D2 address recipe
@@ -51,8 +51,8 @@ module address_unit
     output logic [31:0] ind_linear,          // Registered relocated IND
     output logic        ind_linear_valid,    // Relocation matches current IND
     output logic [31:0] ea,
-    output logic [31:0] pop_ea,              // Combinational D2 effective address
-    output logic [31:0] pop_linear           // Combinational D2 relocated address
+    output logic [31:0] issue_ea,              // Combinational D2 effective address
+    output logic [31:0] issue_linear           // Combinational D2 relocated address
 );
 
 logic [1:0] ea_scale_r;
@@ -85,8 +85,8 @@ wire [31:0] linear32 = ea_csa_sum + ea_csa_carry + seg_base_pending;
 wire [31:0] linear16 = {16'd0, ea_offset_full[15:0]} + seg_base_pending;
 wire [31:0] effective_linear = (ea_is_16bit_r || !eff_mask_pending)
                              ? linear16 : linear32;
-assign pop_ea = effective_addr;
-assign pop_linear = effective_linear;
+assign issue_ea = effective_addr;
+assign issue_linear = effective_linear;
 
 always_ff @(posedge clk) begin
     if (d2_start) begin
@@ -103,7 +103,7 @@ end
 // synthesis translate_off
 // Prove the fused linear adder against the architectural relocate operation.
 always @(posedge clk)
-    if (reset_n && instr_pop && instr.has_modrm && !instr.stack_op &&
+    if (reset_n && instr_issue && instr.has_modrm && !instr.stack_op &&
         !instr.has_moffs &&
         (effective_linear !==
          ((eff_mask_pending ? effective_addr :
@@ -147,7 +147,7 @@ function automatic logic [31:0] relocate_add2(
 endfunction
 
 always_ff @(posedge clk) begin
-    if (instr_pop)
+    if (instr_issue)
         ea <= branch_relative ? branch_target_eip : effective_addr;
 end
 
@@ -157,7 +157,7 @@ always_ff @(posedge clk) begin
         ind_delta <= 32'd4;
         ind_linear <= 32'd0;
         ind_linear_valid <= 1'b0;
-    end else if (instr_pop) begin
+    end else if (instr_issue) begin
         ind_linear_valid <= 1'b0;
         ind_delta <= !instr.stack_op ? 32'd2 :
                      !instr.stack_dir ? (instr.data32 ? -32'd4 : -32'd2) :

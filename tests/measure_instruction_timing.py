@@ -99,7 +99,7 @@ BRANCH_PHASES = [
 
 
 # Best-case z386 0.4 baseline (= 21.z386 / 24.z486 M0), measured 20260705
-# (doc/z486/m0.md).  Constants so the script shows progress vs the pre-FAST
+# (doc/z486/old/m0.md). Constants show progress vs the pre-hardwired
 # starting point.
 Z386_04_MIN_CYCLES = {
     "load": 3.0,
@@ -134,7 +134,7 @@ Z386_04_MIN_CYCLES = {
     "call_taken": 7.0,
 }
 
-# 80486 targets: the 24.z486 design goals (doc/z486/ideas.md table) plus
+# 80486 targets: the original design goals (doc/z486/old/ideas.md) plus
 # published i486 cycle counts where the design table is silent.
 TARGET_486_CYCLES = {
     "load": 1.0,
@@ -233,9 +233,9 @@ def apply_changes(
     i_first_id = ids["i_first"]
     eip_value = parse_bit_value(state.get(eip_id, ""))
     # One event per instruction start. Normally that is an i_first rising
-    # edge, but z486 FAST->FAST chains keep i_first high across consecutive
+    # edge, but z486 hardwired-to-hardwired chains keep i_first high across consecutive
     # instructions — there, each instruction start shows as an EIP change
-    # while i_first stays 1 (EIP advances at every chained i_pop).
+    # while i_first stays 1 (EIP advances at every chained i_issue).
     i_first_rise = (
         i_first_id in changes
         and prev_values.get(i_first_id) == "0"

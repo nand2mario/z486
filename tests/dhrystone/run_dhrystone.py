@@ -165,7 +165,7 @@ def rtl_sources(core: str, core_dir: Path) -> list[Path]:
         "cpu_throttle.sv",
         "interrupt_controller.sv",
         "microsequencer.sv",
-        "fast_issue.sv",
+        "hardwired_control.sv",
         "data_unit.sv",
         "address_unit.sv",
         "shifter.sv",

@@ -24,7 +24,7 @@ module decoder
 
     // Control signals
     input               q_flush,        // Flush decoder on branch
-    input               i_pop,          // D2 fires into EX
+    input               i_issue,        // D2 transfers into EX
 
     // Decoded instruction output
     output dec_entry_t  i_bus,          // Decoded instruction
@@ -111,9 +111,9 @@ wire struct_bytes_ok = !d1_sib && (d1_avail >= {3'b000, struct_len});
 wire sib_bytes_ok    = d1_sib && (d1_avail >= 6'd3);   // opcode+modrm+sib in view
 
 // skel_free: d2_done's terms are lit_avail / out_full / phase - all
-// register-derived, never i_pop (L1) - so the same-edge free is legal.
+// register-derived, never i_issue (L1) - so the same-edge free is legal.
 wire d2_done;
-wire d1_slot_ready = !skid_v || i_pop;
+wire d1_slot_ready = !skid_v || i_issue;
 
 wire d1_to_sib  = !consume_prefix && !consume_0f &&
                   struct_bytes_ok && struct_work.need_sib;
@@ -203,9 +203,9 @@ wire           head_v = skel_v;  // temporary trace compatibility alias
 // D2. On replacement, the old pop cursor is still active, so add the retiring
 // instruction length to reach the successor. Literal interpretation remains a
 // D2 operation and therefore does not lengthen the D1 structural path.
-wire promote_skid_capture = i_pop && skid_v;
+wire promote_skid_capture = i_issue && skid_v;
 wire promote_handoff_capture = d1_handoff &&
-                                ((!skel_v && !i_pop) || (i_pop && !skid_v));
+                                ((!skel_v && !i_issue) || (i_issue && !skid_v));
 wire incoming_capture = promote_skid_capture || promote_handoff_capture;
 // Only skid promotion reads a successor through the pop-relative literal
 // port. A direct D1 handoff freezes its opcode-relative win_d1 bytes instead;
@@ -295,9 +295,9 @@ always_ff @(posedge clk or negedge reset_n) begin
         end
 
         // The skid holds one structurally decoded successor while D2 owns the
-        // current instruction. On d2_fire it promotes from registered state,
+        // current instruction. On issue it promotes from registered state,
         // keeping the full D1 decoder out of the ROM-address path.
-        if (i_pop) begin
+        if (i_issue) begin
             if (skid_v) begin
                 skel <= skid;
                 skel_v <= 1'b1;
@@ -390,7 +390,7 @@ wire [3:0] need_now  = d2_phaseB ? {1'b0, sizeB} :
 wire       bytes_ok  = (lit_avail >= {2'b00, need_now});
 wire       d2_can    = skel_v && d2_window_valid;
 wire       d2_complete = d2_can && finishing;
-assign     d2_done   = i_pop;
+assign     d2_done   = i_issue;
 // Field A may capture while the output side is full (no push happens here).
 wire       d2_stepA  = d2_can && !finishing;
 wire       d2_late_capture = skel_v && !d2_window_valid && bytes_ok;
@@ -435,7 +435,7 @@ always_ff @(posedge clk or negedge reset_n) begin
         skel_window_raw_r <= 1'b0;
     end else if (q_flush) begin
         skel_window_valid_r <= 1'b0;
-    end else if (i_pop && skid_v) begin
+    end else if (i_issue && skid_v) begin
         // A skid promotion has a full registered D2 cycle before use. Capture
         // its pop-relative literal view now instead of duplicating 64 raw bits
         // in the D1 skid entry.
@@ -477,46 +477,46 @@ assign pop_now = d2_done;
 assign pop_len = skel.entry.length;
 
 // synthesis translate_off
-// V52 A2 equivalence oracle. Recipe metadata and live FAST control come from
-// the optimized microcode inventory; the legacy opcode classifier remains in
+// Equivalence oracle. Recipe metadata and live hardwired control come from the
+// optimized microcode inventory; the legacy opcode classifier remains in
 // simulation to prove every decoded instruction produces identical control.
 wire [2:0] push_recipe_early = recipe_early_kind(push_entry.entry_point);
-fast_class_t push_legacy_fc, push_recipe_fc;
-assign push_legacy_fc = dec_fast_class(push_entry);
-assign push_recipe_fc = recipe_fast_class(push_entry);
+recipe_meta_t push_legacy_fc, push_recipe_fc;
+assign push_legacy_fc = dec_recipe_metadata(push_entry);
+assign push_recipe_fc = recipe_metadata(push_entry);
 reg recipe_cov_en = 1'b0;
 initial recipe_cov_en = $test$plusargs("recipe_cov");
 always @(posedge clk) begin
     if (reset_n && d2_done) begin
-        // Extension overlays add FAST classes that have no legacy opcode
+        // Extension overlays add recipes that have no legacy opcode
         // classifier counterpart; their generated recipe is authoritative.
         if ((recipe_action(push_entry.entry_point) == RECIPE_ACTION_NONE) &&
             (push_recipe_fc !== push_legacy_fc))
-            $fatal(1, "FAST recipe classifier mismatch: entry=%03x opcode=%02x modrm=%02x old=%04x new=%04x",
+            $fatal(1, "hardwired recipe classifier mismatch: entry=%03x opcode=%02x modrm=%02x old=%04x new=%04x",
                    push_entry.entry_point, push_entry.opcode, push_entry.modrm,
                    push_legacy_fc, push_recipe_fc);
     end
-    if (reset_n && d2_done && push_legacy_fc.fast) begin
+    if (reset_n && d2_done && push_legacy_fc.hardwired) begin
         if (push_recipe_early == RECIPE_EARLY_SEQ)
-            $fatal(1, "FAST recipe missing: entry=%03x opcode=%02x modrm=%02x 0f=%b",
+            $fatal(1, "hardwired recipe missing: entry=%03x opcode=%02x modrm=%02x 0f=%b",
                    push_entry.entry_point, push_entry.opcode, push_entry.modrm,
                    push_entry.has_0f);
         unique case (push_recipe_early)
             RECIPE_EARLY_NONE:
                 if (push_legacy_fc.uses_ea || push_legacy_fc.br_rel)
-                    $fatal(1, "FAST recipe NONE role mismatch: entry=%03x fc=%04x",
+                    $fatal(1, "hardwired recipe NONE role mismatch: entry=%03x fc=%04x",
                            push_entry.entry_point, push_legacy_fc);
             RECIPE_EARLY_EA, RECIPE_EARLY_LOAD, RECIPE_EARLY_STORE,
             RECIPE_EARLY_RMW, RECIPE_EARLY_STACK:
                 if (!push_legacy_fc.uses_ea)
-                    $fatal(1, "FAST recipe address role mismatch: entry=%03x kind=%0d fc=%04x",
+                    $fatal(1, "hardwired recipe address role mismatch: entry=%03x kind=%0d fc=%04x",
                            push_entry.entry_point, push_recipe_early, push_legacy_fc);
             RECIPE_EARLY_BRANCH:
                 if (!push_legacy_fc.br_rel)
-                    $fatal(1, "FAST recipe branch role mismatch: entry=%03x fc=%04x",
+                    $fatal(1, "hardwired recipe branch role mismatch: entry=%03x fc=%04x",
                            push_entry.entry_point, push_legacy_fc);
             default:
-                $fatal(1, "FAST recipe invalid early kind: entry=%03x kind=%0d",
+                $fatal(1, "hardwired recipe invalid early kind: entry=%03x kind=%0d",
                        push_entry.entry_point, push_recipe_early);
         endcase
         if (recipe_cov_en)

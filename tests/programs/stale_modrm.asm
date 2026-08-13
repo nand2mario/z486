@@ -7,7 +7,7 @@
 ; Root cause: The critical bytes "66 03 EA 31 C0" must cross a 4-byte prefetch
 ; boundary. When "66 03 EA" occupies the last 3 bytes of one fetch and "31 C0"
 ; is in the next fetch, the decoder hasn't decoded the XOR by the time the ADD
-; completes. The XOR's entry point loads but i_pop hasn't latched new modrm yet,
+; completes. The XOR's entry point loads but i_issue hasn't latched new modrm yet,
 ; so the microcode runs with stale modrm=0xEA from the ADD.
 ;
 ; Result protocol:

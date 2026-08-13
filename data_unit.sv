@@ -22,10 +22,10 @@ module data_unit
     input  logic        gate_detect,
     input  logic        any_fault,
     input  logic        uc_active,
-    input  logic        fast_last,               // Last uStep of a FAST instruction
-    input  fast_exec_state_t fast_state,         // Latched FAST execution recipe
-    input  logic        fast_off,
-    input  logic        fast_commit_cancel,      // Cancel deferred FAST writeback
+    input  logic        recipe_rni,               // Current recipe uStep contains RNI
+    input  recipe_state_t recipe_state,           // Latched hardwired recipe
+    input  logic        hardwired_off,
+    input  logic        recipe_commit_cancel,     // Cancel deferred recipe commit
 
     input  logic [6:0]  aluop,
     input  logic [4:0]  alu_operation,
@@ -106,9 +106,9 @@ module data_unit
     output logic [31:0] eflags_fwd,               // Current-cycle flag forwarding
     output logic [31:0] eflags_ahead,             // Next-cycle condition flags
 
-    output fast_pending_write_t fast_shift_write, // Deferred shift GPR commit
-    output logic [31:0] fast_shift_data,          // Deferred shift result
-    output fast_pending_write_t fast_memory_write, // Deferred load GPR commit
+    output recipe_pending_write_t recipe_shift_write, // Deferred shift GPR commit
+    output logic [31:0] recipe_shift_data,          // Deferred shift result
+    output recipe_pending_write_t recipe_memory_write, // Deferred load GPR commit
 
     output logic [31:0] muldiv_result,
     output logic        div_overflow,
@@ -222,16 +222,16 @@ function automatic logic [31:0] read_ea_gpr(
         current_value = valid ? read_gpr_value(idx, 2'd2) : 32'd0;
         dly_hit = dly_gpr_forward.valid && valid &&
                   (dly_gpr_forward.dst == idx);
-        shift_hit = fast_shift_write.valid && valid &&
-                    ((fast_shift_write.size != 2'd0 &&
-                      fast_shift_write.dst == idx) ||
-                     (fast_shift_write.size == 2'd0 &&
-                      {1'b0, fast_shift_write.dst[1:0]} == idx));
-        forward_value = dly_hit ? dly_gpr_forward.data : fast_shift_data;
+        shift_hit = recipe_shift_write.valid && valid &&
+                    ((recipe_shift_write.size != 2'd0 &&
+                      recipe_shift_write.dst == idx) ||
+                     (recipe_shift_write.size == 2'd0 &&
+                      {1'b0, recipe_shift_write.dst[1:0]} == idx));
+        forward_value = dly_hit ? dly_gpr_forward.data : recipe_shift_data;
         forward_mode = dly_hit ? dly_gpr_forward.mode :
-                       (fast_shift_write.size == 2'd0)
-                           ? (fast_shift_write.dst[2] ? EA_FWD_BHI : EA_FWD_BLO) :
-                       (fast_shift_write.size == 2'd1) ? EA_FWD_W : EA_FWD_D;
+                       (recipe_shift_write.size == 2'd0)
+                           ? (recipe_shift_write.dst[2] ? EA_FWD_BHI : EA_FWD_BLO) :
+                       (recipe_shift_write.size == 2'd1) ? EA_FWD_W : EA_FWD_D;
         if (dly_hit || shift_hit) begin
             case (forward_mode)
                 EA_FWD_BLO: read_ea_gpr =
@@ -536,29 +536,29 @@ task automatic write_gpr(
     endcase
 endtask
 
-// Deferred FAST commits are Data Unit writeback state. Issue control observes
+// Deferred recipe commits are Data Unit writeback state. Chain control observes
 // the compact pending descriptors for dependency checks and D2 forwarding.
 always_ff @(posedge clk) begin
     if (!reset_n) begin
-        fast_shift_write <= '0;
-        fast_memory_write <= '0;
+        recipe_shift_write <= '0;
+        recipe_memory_write <= '0;
     end else if (pipeline_advance) begin
-        fast_memory_write.valid <= fast_last && exec && instr_start &&
-                                   !fast_commit_cancel &&
-                                   (fast_state.commit_sel == FAST_COMMIT_MEM);
-        if (fast_last && exec && instr_start &&
-            (fast_state.commit_sel == FAST_COMMIT_MEM)) begin
-            fast_memory_write.dst <= instr.dst_reg_sel;
-            fast_memory_write.size <= op_size;
+        recipe_memory_write.valid <= recipe_rni && exec && instr_start &&
+                                   !recipe_commit_cancel &&
+                                   (recipe_state.commit_sel == RECIPE_COMMIT_MEM);
+        if (recipe_rni && exec && instr_start &&
+            (recipe_state.commit_sel == RECIPE_COMMIT_MEM)) begin
+            recipe_memory_write.dst <= instr.dst_reg_sel;
+            recipe_memory_write.size <= op_size;
         end
 
-        fast_shift_write.valid <= fast_last && exec && !fast_commit_cancel &&
-                                  (fast_state.commit_sel == FAST_COMMIT_SHIFT);
-        if (fast_last && exec &&
-            (fast_state.commit_sel == FAST_COMMIT_SHIFT)) begin
-            fast_shift_write.dst <= instr.dst_reg_sel;
-            fast_shift_write.size <= op_size;
-            fast_shift_data <= shift_result;
+        recipe_shift_write.valid <= recipe_rni && exec && !recipe_commit_cancel &&
+                                  (recipe_state.commit_sel == RECIPE_COMMIT_SHIFT);
+        if (recipe_rni && exec &&
+            (recipe_state.commit_sel == RECIPE_COMMIT_SHIFT)) begin
+            recipe_shift_write.dst <= instr.dst_reg_sel;
+            recipe_shift_write.size <= op_size;
+            recipe_shift_data <= shift_result;
         end
     end
 end
@@ -576,14 +576,14 @@ always_ff @(posedge clk) begin
         esi     <= 32'd0;
         edi     <= 32'd0;
     end else begin
-        if (fast_shift_write.valid)
-            write_gpr(fast_shift_write.dst, fast_shift_data,
-                      fast_shift_write.size);
+        if (recipe_shift_write.valid)
+            write_gpr(recipe_shift_write.dst, recipe_shift_data,
+                      recipe_shift_write.size);
 
         if (exec) begin
-            if (fast_memory_write.valid)
-                write_gpr(fast_memory_write.dst, opr_r,
-                          fast_memory_write.size);
+            if (recipe_memory_write.valid)
+                write_gpr(recipe_memory_write.dst, opr_r,
+                          recipe_memory_write.size);
 
             case (dest)
                 DEST_EAX: eax <= dest_value;
@@ -615,7 +615,7 @@ always_ff @(posedge clk) begin
                                dest_value[23:16], dest_value[31:24]}, 2'd2);
 
                 DEST_USTEP_ALU:
-                    if (fast_state.fast && !fast_off && !any_fault)
+                    if (recipe_state.hardwired && !hardwired_off && !any_fault)
                         write_gpr(instr.dst_reg_sel, alu_result, op_size);
 
                 DEST_IRF:
@@ -625,13 +625,13 @@ always_ff @(posedge clk) begin
                 default: ;
             endcase
 
-            if (fast_last && !any_fault &&
-                fast_state.commit_sel == FAST_COMMIT_SIGSRC)
+            if (recipe_rni && !any_fault &&
+                recipe_state.commit_sel == RECIPE_COMMIT_SIGSRC)
                 write_gpr(instr.src_reg_sel, sigma,
                           aluop == ALUJMP_BITS32 ? 2'd2 : 2'd1);
 
-            if (fast_last && !any_fault &&
-                fast_state.commit_sel == FAST_COMMIT_ESP)
+            if (recipe_rni && !any_fault &&
+                recipe_state.commit_sel == RECIPE_COMMIT_ESP)
                 esp <= sigma;
 
             if (aluop == ALUJMP_CLZF && instr.has_0f && instr.opcode == 8'hBD)

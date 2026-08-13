@@ -1,4 +1,4 @@
-// Prefetch Unit - 32-byte circular buffer, filled one 16-byte cache line at a time M2v2 two-cursor read protocol (doc/z486/m2v2.md): *...
+// Prefetch Unit - 32-byte circular buffer, filled one 16-byte cache line at a time M2v2 two-cursor read protocol (doc/z486/old/m2v2.md): *...
 // Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-1
 
 module prefetch
@@ -41,7 +41,7 @@ module prefetch
     input             pf_suspend,    // external suspend (e.g. page fault handler active)
     input             halt_speculative, // decode queue holds a taken JMP/CALL: stop fetching past it
 
-    // z486 speculative branch-target line (doc/z486/m4.md). spec_req at a relative branch's i_pop latches the target line address; the...
+    // z486 speculative branch-target line (doc/z486/old/m4.md). spec_req at a relative branch's i_issue latches the target line address; the...
     // Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-54
     input             spec_req,
     input      [31:0] spec_linear,

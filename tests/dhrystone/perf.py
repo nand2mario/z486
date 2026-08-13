@@ -190,7 +190,8 @@ def watched_signals(signals) -> tuple[dict[str, int], dict[str, str], set[str]]:
         "ibus_len": [".dut.i_bus.length", ".z386_cpu.i_bus.length", ".decoder_inst.i_bus.length"],
         "ibus_opcode": [".dut.i_bus.opcode", ".z386_cpu.i_bus.opcode", ".decoder_inst.i_bus.opcode"],
         "i_first": [".dut.i_first", ".z386_cpu.i_first"],
-        "i_pop": [".dut.i_pop", ".z386_cpu.i_pop"],
+        "i_issue": [".dut.i_issue", ".z386_cpu.i_issue",
+                    ".dut.i_pop", ".z386_cpu.i_pop"],
         "uc_addr": [".dut.uc_addr", ".z386_cpu.uc_addr"],
         "uc_is_dly": [".dut.uc_is_dly", ".z386_cpu.uc_is_dly"],
         "stall": [".dut.stall", ".z386_cpu.stall"],
@@ -278,7 +279,7 @@ def read_trace(
         return state.get(key) if key in handles else None
 
     if boundary not in handles:
-        if boundary == "i_pop" and "i_first" in handles:
+        if boundary == "i_issue" and "i_first" in handles:
             boundary = "i_first"
         else:
             raise SystemExit(f"boundary signal is unavailable: {boundary}")
@@ -328,7 +329,7 @@ def read_trace(
                 )
             )
             if val(boundary):
-                if boundary == "i_pop":
+                if boundary == "i_issue":
                     length = val("ibus_len") or val("ilen")
                     opcode = val("ibus_opcode") or val("opcode")
                     eip_next = (val("eip") + length) & 0xFFFF_FFFF if length else val("eip")
@@ -466,9 +467,12 @@ def main() -> int:
     parser.add_argument("--lst", type=Path, default=DEFAULT_LST, help="Dhrystone disassembly listing")
     parser.add_argument("--code-base", type=parse_int, default=DEFAULT_CODE_BASE, help="Runtime code base added to .lst offsets")
     parser.add_argument("--window", choices=("auto", "markers", "all"), default="auto", help="Measurement window")
-    parser.add_argument("--boundary", choices=("i_pop", "i_first"), default="i_pop", help="Clock-sampled instruction boundary")
+    parser.add_argument("--boundary", choices=("i_issue", "i_pop", "i_first"), default="i_issue", help="Clock-sampled instruction boundary (`i_pop` is a legacy alias)")
     parser.add_argument("--top", type=int, default=20, help="Rows in top-N reports")
     args = parser.parse_args()
+
+    if args.boundary == "i_pop":
+        args.boundary = "i_issue"
 
     instrs, funcs = load_listing(args.lst)
     if not instrs:

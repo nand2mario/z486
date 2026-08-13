@@ -50,10 +50,10 @@ function automatic logic [2:0] recipe_early_kind(input logic [11:0] entry);
     endcase
 endfunction
 
-// Entry-point-derived FAST control for v52 A2. The legacy
-// dec_fast_class() remains a simulation-only equivalence oracle.
-function automatic fast_class_t recipe_fast_class(input dec_entry_t e);
-    fast_class_t r;
+// Entry-point-derived hardwired control. The legacy dec_recipe_metadata()
+// remains a simulation-only equivalence oracle.
+function automatic recipe_meta_t recipe_metadata(input dec_entry_t e);
+    recipe_meta_t r;
     logic [2:0] grp;
     r = '0;
     if (e.opcode[7:4] == 4'h4 || e.opcode[7:4] == 4'h5)
@@ -67,28 +67,28 @@ function automatic fast_class_t recipe_fast_class(input dec_entry_t e);
     if (e.rep_lock == PREFIX_NOREPLOCK) begin
         unique case (e.entry_point)
             12'h003: begin
-                r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU;
+                r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU;
                 r.reads_src = 1'b1;
             end
             12'h005: begin
                 if ((e.opcode[7:4] == 4'hB) ||
                     ((e.opcode[7:1] == 7'b1100011) &&
                      (e.modrm[7:6] == 2'b11) && (e.modrm[5:3] == 3'b000))) begin
-                    r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU;
+                    r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU;
                 end
             end
             12'h01D: begin
-                r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU;
+                r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU;
                 r.reads_flags = (grp == 3'b010) || (grp == 3'b011);
                 r.reads_dst = 1'b1; r.reads_src = 1'b1;
                 r.writes_flags = 1'b1;
             end
             12'h01F: begin
-                r.fast = 1'b1; r.reads_dst = 1'b1; r.reads_src = 1'b1;
+                r.hardwired = 1'b1; r.reads_dst = 1'b1; r.reads_src = 1'b1;
                 r.writes_flags = 1'b1;
             end
             12'h021: begin
-                r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU;
+                r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU;
                 r.reads_dst = 1'b1; r.writes_flags = 1'b1;
             end
             12'h023: begin
@@ -97,7 +97,7 @@ function automatic fast_class_t recipe_fast_class(input dec_entry_t e);
                     (((e.opcode == 8'h80) || (e.opcode == 8'h81) ||
                       (e.opcode == 8'h83)) && (e.modrm[7:6] == 2'b11) &&
                      (grp != 3'b111)))) begin
-                    r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU;
+                    r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU;
                     r.reads_flags = (grp == 3'b010) || (grp == 3'b011);
                     r.reads_dst = 1'b1; r.writes_flags = 1'b1;
                 end
@@ -110,13 +110,13 @@ function automatic fast_class_t recipe_fast_class(input dec_entry_t e);
                      (grp == 3'b111)) || (e.opcode[7:1] == 7'b1010100) ||
                     ((e.opcode[7:1] == 7'b1111011) &&
                      (e.modrm[7:6] == 2'b11) && (e.modrm[5:3] == 3'b000)))) begin
-                    r.fast = 1'b1; r.reads_dst = 1'b1;
+                    r.hardwired = 1'b1; r.reads_dst = 1'b1;
                     r.writes_flags = 1'b1;
                 end
             end
             12'h0B9: begin
                 if (e.has_modrm && (e.modrm[7:6] != 2'b11)) begin
-                    r.fast = 1'b1; r.uses_ea = 1'b1;
+                    r.hardwired = 1'b1; r.uses_ea = 1'b1;
                     r.writes_srcreg = 1'b1;
                 end
             end
@@ -124,8 +124,8 @@ function automatic fast_class_t recipe_fast_class(input dec_entry_t e);
                 if (!e.has_0f && (e.modrm[7:6] == 2'b11) &&
                     (e.modrm[5:3] != 3'b010) && (e.modrm[5:3] != 3'b011) &&
                     (e.modrm[5:3] != 3'b110)) begin
-                    r.fast = 1'b1; r.multi_word = 1'b1;
-                    r.commit_sel = FAST_COMMIT_SHIFT; r.reads_dst = 1'b1;
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;
+                    r.commit_sel = RECIPE_COMMIT_SHIFT; r.reads_dst = 1'b1;
                     r.writes_flags = 1'b1;
                 end
             end
@@ -133,16 +133,16 @@ function automatic fast_class_t recipe_fast_class(input dec_entry_t e);
                 if (!e.has_0f && (e.modrm[7:6] == 2'b11) &&
                     (e.modrm[5:3] != 3'b010) && (e.modrm[5:3] != 3'b011) &&
                     (e.modrm[5:3] != 3'b110)) begin
-                    r.fast = 1'b1; r.multi_word = 1'b1;
-                    r.commit_sel = FAST_COMMIT_SHIFT; r.reads_dst = 1'b1;
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;
+                    r.commit_sel = RECIPE_COMMIT_SHIFT; r.reads_dst = 1'b1;
                     r.reads_ecx = 1'b1; r.writes_flags = 1'b1;
                 end
             end
             12'h0FC: begin
                 if (e.has_0f && (e.modrm[7:6] == 2'b11) &&
                     ((e.opcode == 8'hA4) || (e.opcode == 8'hAC))) begin
-                    r.fast = 1'b1; r.multi_word = 1'b1;
-                    r.commit_sel = FAST_COMMIT_SHIFT;
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;
+                    r.commit_sel = RECIPE_COMMIT_SHIFT;
                     r.reads_dst = 1'b1; r.reads_src = 1'b1;
                     r.writes_flags = 1'b1;
                 end
@@ -150,33 +150,33 @@ function automatic fast_class_t recipe_fast_class(input dec_entry_t e);
             12'h102: begin
                 if (e.has_0f && (e.modrm[7:6] == 2'b11) &&
                     ((e.opcode == 8'hA5) || (e.opcode == 8'hAD))) begin
-                    r.fast = 1'b1; r.multi_word = 1'b1;
-                    r.commit_sel = FAST_COMMIT_SHIFT;
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;
+                    r.commit_sel = RECIPE_COMMIT_SHIFT;
                     r.reads_dst = 1'b1; r.reads_src = 1'b1;
                     r.reads_ecx = 1'b1; r.writes_flags = 1'b1;
                 end
             end
             12'h1E8, 12'h1F0: begin
-                r.fast = 1'b1; r.multi_word = 1'b1;
-                r.commit_sel = FAST_COMMIT_SIGSRC;
+                r.hardwired = 1'b1; r.multi_ustep = 1'b1;
+                r.commit_sel = RECIPE_COMMIT_SIGSRC;
                 r.writes_srcreg = 1'b1; r.reads_dst = 1'b1;
             end
             12'h013: begin
-                r.fast = 1'b1; r.keep_slot = 1'b1; r.uses_ea = 1'b1;
+                r.hardwired = 1'b1; r.slot_has_work = 1'b1; r.uses_ea = 1'b1;
                 r.reads_src = 1'b1;
             end
             12'h015: begin
                 if ((e.opcode[7:1] == 7'b1100011) &&
                     (e.modrm[7:6] != 2'b11) && (e.modrm[5:3] == 3'b000)) begin
-                    r.fast = 1'b1; r.keep_slot = 1'b1; r.uses_ea = 1'b1;
+                    r.hardwired = 1'b1; r.slot_has_work = 1'b1; r.uses_ea = 1'b1;
                 end
             end
             12'h019: begin
                 if (!e.has_0f && (((e.opcode[7:2] == 6'b100010) &&
                     e.opcode[1] && (e.modrm[7:6] != 2'b11)) ||
                     ((e.opcode[7:2] == 6'b101000) && !e.opcode[1]))) begin
-                    r.fast = 1'b1; r.multi_word = 1'b1;
-                    r.commit_sel = FAST_COMMIT_MEM; r.keep_slot = 1'b1;
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;
+                    r.commit_sel = RECIPE_COMMIT_MEM; r.slot_has_work = 1'b1;
                     r.uses_ea = 1'b1;
                 end
             end
@@ -184,14 +184,14 @@ function automatic fast_class_t recipe_fast_class(input dec_entry_t e);
                 if (!e.has_0f && (e.opcode[7:6] == 2'b00) &&
                     !e.opcode[2] && e.opcode[1] && e.has_modrm &&
                     (e.modrm[7:6] != 2'b11) && (grp != 3'b111)) begin
-                    r.fast = 1'b1; r.multi_word = 1'b1;
-                    r.commit_sel = FAST_COMMIT_ALU; r.uses_ea = 1'b1;
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;
+                    r.commit_sel = RECIPE_COMMIT_ALU; r.uses_ea = 1'b1;
                     r.writes_flags = 1'b1;
                 end
             end
             12'h02C, 12'h035: begin
                 if (!e.has_0f) begin
-                    r.fast = 1'b1; r.multi_word = 1'b1;
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;
                     r.uses_ea = 1'b1; r.writes_flags = 1'b1;
                 end
             end
@@ -202,7 +202,7 @@ function automatic fast_class_t recipe_fast_class(input dec_entry_t e);
                     ((e.opcode[7:1] == 7'b1111011) &&
                      (e.modrm[7:6] != 2'b11) &&
                      (e.modrm[5:3] == 3'b000)))) begin
-                    r.fast = 1'b1; r.multi_word = 1'b1;
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;
                     r.uses_ea = 1'b1; r.writes_flags = 1'b1;
                 end
             end
@@ -210,70 +210,70 @@ function automatic fast_class_t recipe_fast_class(input dec_entry_t e);
                 if (!e.has_0f && ((e.opcode == 8'h80) ||
                     (e.opcode == 8'h81) || (e.opcode == 8'h83)) &&
                     (e.modrm[7:6] != 2'b11) && (grp != 3'b111)) begin
-                    r.fast = 1'b1; r.multi_word = 1'b1;
-                    r.keep_slot = 1'b1; r.uses_ea = 1'b1;
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;
+                    r.slot_has_work = 1'b1; r.uses_ea = 1'b1;
                     r.writes_flags = 1'b1;
                 end
             end
             12'h04A: begin
                 if (!e.has_0f) begin
-                    r.fast = 1'b1; r.multi_word = 1'b1;
-                    r.keep_slot = 1'b1; r.uses_ea = 1'b1;
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;
+                    r.slot_has_work = 1'b1; r.uses_ea = 1'b1;
                     r.writes_flags = 1'b1;
                 end
             end
             12'h1EB, 12'h1F3: begin
-                r.fast = 1'b1; r.multi_word = 1'b1;
-                r.commit_sel = FAST_COMMIT_SIGSRC;
+                r.hardwired = 1'b1; r.multi_ustep = 1'b1;
+                r.commit_sel = RECIPE_COMMIT_SIGSRC;
                 r.uses_ea = 1'b1; r.writes_srcreg = 1'b1;
             end
             12'h065: begin
-                r.fast = 1'b1; r.multi_word = 1'b1; r.jcc = 1'b1;
+                r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.jcc = 1'b1;
                 r.reads_flags = 1'b1; r.br_rel = 1'b1;
             end
             12'h06A: begin
-                r.fast = 1'b1; r.multi_word = 1'b1; r.br_rel = 1'b1;
+                r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.br_rel = 1'b1;
             end
             12'h075: begin
-                r.fast = 1'b1; r.multi_word = 1'b1;
-                if (e.data32) r.commit_sel = FAST_COMMIT_ESP;
+                r.hardwired = 1'b1; r.multi_ustep = 1'b1;
+                if (e.data32) r.commit_sel = RECIPE_COMMIT_ESP;
                 r.uses_ea = 1'b1; r.br_rel = 1'b1;
             end
             12'h072: begin
-                r.fast = 1'b1; r.multi_word = 1'b1; r.uses_ea = 1'b1;
+                r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.uses_ea = 1'b1;
             end
             12'h086: begin
                 if (e.opcode[7:3] == 5'b01010) begin
-                    r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ESP;
-                    r.keep_slot = 1'b1; r.uses_ea = 1'b1;
+                    r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ESP;
+                    r.slot_has_work = 1'b1; r.uses_ea = 1'b1;
                     r.reads_dst = 1'b1;
                 end
             end
             12'h09B: begin
                 if ((e.opcode[7:6] == 2'b00) && (e.opcode[2:0] == 3'b110)) begin
-                    r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ESP;
-                    r.keep_slot = 1'b1; r.uses_ea = 1'b1;
+                    r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ESP;
+                    r.slot_has_work = 1'b1; r.uses_ea = 1'b1;
                 end
             end
             12'h09D: begin
                 if ((e.opcode == 8'h68) || (e.opcode == 8'h6A)) begin
-                    r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ESP;
-                    r.keep_slot = 1'b1; r.uses_ea = 1'b1;
+                    r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ESP;
+                    r.slot_has_work = 1'b1; r.uses_ea = 1'b1;
                 end
             end
             12'h09F: begin
                 if (e.opcode[7:3] == 5'b01011) begin
-                    r.fast = 1'b1; r.multi_word = 1'b1;
-                    r.commit_sel = FAST_COMMIT_MEM; r.keep_slot = 1'b1;
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;
+                    r.commit_sel = RECIPE_COMMIT_MEM; r.slot_has_work = 1'b1;
                     r.uses_ea = 1'b1;
                 end
             end
             12'h9C5: begin
-                // Variable-latency FAST transport, normal sequencer retirement.
-                r.commit_sel = FAST_COMMIT_X87; r.uses_ea = 1'b1;
+                // Variable-latency direct transport; normal sequencer retirement.
+                r.commit_sel = RECIPE_ACTION_X87_DIRECT; r.uses_ea = 1'b1;
             end
             default: ;
         endcase
     end
-    recipe_fast_class = r;
+    recipe_metadata = r;
 endfunction

@@ -60,7 +60,8 @@ The harness instantiates the same external L1 cache for both cores, using
 hierarchy closer to an apples-to-apples comparison: both cores run the same
 binary with cached instruction and data accesses.
 
-Instruction count is measured at `dut.i_pop` for both cores.
+Instruction count is measured at `dut.i_issue`; the analyzer accepts legacy
+comparison traces that still expose the same event as `dut.i_pop`.
 
 The reported CPI is total testbench cycles divided by retired instructions.
 That includes startup and validation, but for moderate iteration counts the

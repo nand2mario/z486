@@ -35,7 +35,7 @@ X87_RTL := $(X87_DIR)/x87_pkg.sv \
 RTL_SRCS := $(Z486_DIR)/z486_pkg.sv $(X87_DIR)/x87_pkg.sv \
 			$(X87_DIR)/x87_ucode_pkg.sv $(Z486_DIR)/z486.sv \
 			$(Z486_DIR)/cpu_throttle.sv $(Z486_DIR)/interrupt_controller.sv \
-			$(Z486_DIR)/ucode_rom.sv $(Z486_DIR)/microsequencer.sv $(Z486_DIR)/fast_issue.sv \
+			$(Z486_DIR)/ucode_rom.sv $(Z486_DIR)/microsequencer.sv $(Z486_DIR)/hardwired_control.sv \
 			$(Z486_DIR)/data_unit.sv $(Z486_DIR)/address_unit.sv \
 			$(Z486_DIR)/shifter.sv $(Z486_DIR)/mul_div.sv \
 			$(Z486_DIR)/decoder.sv \
@@ -139,6 +139,14 @@ obj_dir_quake/Vtb_protected_mode: $(RTL_SRCS) $(RTL_DEPS) $(TB_PROT_SRCS) $(CPP_
 		-GENABLE_X87=1 -GMEM_SIZE=67108864 --top-module tb_protected_mode \
 		$(TB_PROT_SRCS) $(RTL_SRCS) $(CPP_QUAKE_SNAPSHOT_SRCS)
 	@echo "Build complete: obj_dir_quake/Vtb_protected_mode"
+
+obj_dir_quake_trace/Vtb_protected_mode: $(RTL_SRCS) $(RTL_DEPS) $(TB_PROT_SRCS) $(CPP_QUAKE_SNAPSHOT_SRCS)
+	@echo "Building trace-enabled 64MB x87 Quake snapshot replay..."
+	cp -f ../*.hex .
+	$(VERILATOR) $(VFLAGS_FST) --Mdir obj_dir_quake_trace \
+		-GENABLE_X87=1 -GMEM_SIZE=67108864 --top-module tb_protected_mode \
+		$(TB_PROT_SRCS) $(RTL_SRCS) $(CPP_QUAKE_SNAPSHOT_SRCS)
+	@echo "Build complete: obj_dir_quake_trace/Vtb_protected_mode"
 
 obj_dir_x87_int/Vtb_z486: $(RTL_SRCS) $(RTL_DEPS) $(TB_SRCS) $(CPP_SRCS)
 	@echo "Building x87-enabled integer testbench with Verilator..."

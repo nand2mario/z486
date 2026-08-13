@@ -1,4 +1,4 @@
-// CPU-facing x87 adapter. It owns the 386-compatible port bridge and the FAST
+// CPU-facing x87 adapter. It owns the 386-compatible port bridge and the direct
 // m32 demand-read transport; paging/cache arbitration remains in z486.
 module x87_unit #(
     parameter ENABLE_X87 = 0
@@ -16,13 +16,13 @@ module x87_unit #(
     output logic        req_read_complete,
     output logic [31:0] req_rdata,
 
-    input  logic        fast_launch,
-    input  logic        fast_candidate,
-    input  logic        fast_allowed,
-    input  logic [10:0] fast_fop,
-    output logic        fast_active,
-    output logic        fast_mem_req,
-    output logic        fast_stall,
+    input  logic        direct_launch,
+    input  logic        direct_candidate,
+    input  logic        direct_allowed,
+    input  logic [10:0] direct_fop,
+    output logic        direct_active,
+    output logic        direct_mem_req,
+    output logic        direct_stall,
 
     input  logic        mem_accepted,
     input  logic [1:0]  mem_addr_low,
@@ -39,16 +39,16 @@ module x87_unit #(
 );
 
 logic        queue_safe;
-logic        fast_ready;
-logic        fast_issued_r;
-logic        fast_crossing_r;
-logic        fast_data_valid_r;
-logic [31:0] fast_data_r;
-wire         fast_valid = fast_active && fast_data_valid_r;
-wire         fast_release = fast_valid && fast_ready;
+logic        direct_ready;
+logic        direct_issued_r;
+logic        direct_crossing_r;
+logic        direct_data_valid_r;
+logic [31:0] direct_data_r;
+wire         direct_valid = direct_active && direct_data_valid_r;
+wire         direct_release = direct_valid && direct_ready;
 
-assign fast_mem_req = fast_active && !fast_issued_r && !fast_data_valid_r;
-assign fast_stall = fast_active && !fast_release;
+assign direct_mem_req = direct_active && !direct_issued_r && !direct_data_valid_r;
+assign direct_stall = direct_active && !direct_release;
 
 generate
 if (ENABLE_X87) begin : gen_x87
@@ -84,8 +84,8 @@ if (ENABLE_X87) begin : gen_x87
     x87_control control (
         .clk(clk), .reset(!reset_n),
         .cmd_valid(cmd_valid), .cmd_fop(cmd_fop), .cmd_ready(cmd_ready),
-        .fast_m32_valid(fast_valid), .fast_m32_fop(fast_fop),
-        .fast_m32_data(fast_data_r), .fast_m32_ready(fast_ready),
+        .direct_m32_valid(direct_valid), .direct_m32_fop(direct_fop),
+        .direct_m32_data(direct_data_r), .direct_m32_ready(direct_ready),
         .word_in_valid(word_in_valid), .word_in_be(word_in_be),
         .word_in_data(word_in_data), .word_in_ready(word_in_ready),
         .read_req_valid(read_req_valid),
@@ -104,50 +104,50 @@ end else begin : gen_no_x87
     assign pereq = 1'b0;
     assign error_n = 1'b1;
     assign queue_safe = 1'b0;
-    assign fast_ready = 1'b0;
+    assign direct_ready = 1'b0;
     assign debug_state = 32'h8000_0000;
 end
 endgenerate
 
 always_ff @(posedge clk) begin
     if (!reset_n) begin
-        fast_active       <= 1'b0;
-        fast_issued_r     <= 1'b0;
-        fast_crossing_r   <= 1'b0;
-        fast_data_valid_r <= 1'b0;
-        fast_data_r       <= 32'h0;
+        direct_active       <= 1'b0;
+        direct_issued_r     <= 1'b0;
+        direct_crossing_r   <= 1'b0;
+        direct_data_valid_r <= 1'b0;
+        direct_data_r       <= 32'h0;
     end else begin
-        if (fast_release) begin
-            fast_active       <= 1'b0;
-            fast_issued_r     <= 1'b0;
-            fast_data_valid_r <= 1'b0;
+        if (direct_release) begin
+            direct_active       <= 1'b0;
+            direct_issued_r     <= 1'b0;
+            direct_data_valid_r <= 1'b0;
         end
 
-        if (fast_launch) begin
-            fast_active       <= ENABLE_X87 && fast_candidate &&
-                                 fast_allowed && queue_safe;
-            fast_issued_r     <= 1'b0;
-            fast_crossing_r   <= 1'b0;
-            fast_data_valid_r <= 1'b0;
+        if (direct_launch) begin
+            direct_active       <= ENABLE_X87 && direct_candidate &&
+                                 direct_allowed && queue_safe;
+            direct_issued_r     <= 1'b0;
+            direct_crossing_r   <= 1'b0;
+            direct_data_valid_r <= 1'b0;
         end
 
-        if (fast_mem_req && mem_accepted) begin
-            fast_issued_r   <= 1'b1;
-            fast_crossing_r <= mem_addr_low != 2'b00;
+        if (direct_mem_req && mem_accepted) begin
+            direct_issued_r   <= 1'b1;
+            direct_crossing_r <= mem_addr_low != 2'b00;
         end
 
-        if (fast_issued_r && !fast_crossing_r && mem_read_complete) begin
-            fast_data_r       <= mem_rdata;
-            fast_data_valid_r <= 1'b1;
-        end else if (fast_issued_r && fast_crossing_r && !mem_servicing) begin
-            fast_data_r       <= split_rdata;
-            fast_data_valid_r <= 1'b1;
+        if (direct_issued_r && !direct_crossing_r && mem_read_complete) begin
+            direct_data_r       <= mem_rdata;
+            direct_data_valid_r <= 1'b1;
+        end else if (direct_issued_r && direct_crossing_r && !mem_servicing) begin
+            direct_data_r       <= split_rdata;
+            direct_data_valid_r <= 1'b1;
         end
 
         if (cancel) begin
-            fast_active       <= 1'b0;
-            fast_issued_r     <= 1'b0;
-            fast_data_valid_r <= 1'b0;
+            direct_active       <= 1'b0;
+            direct_issued_r     <= 1'b0;
+            direct_data_valid_r <= 1'b0;
         end
     end
 end

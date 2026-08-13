@@ -78,15 +78,122 @@ module tb_protected_mode #(
     reg prev_instruction_boundary = 0;
     longint instruction_count = 0;
     longint x87_command_count = 0;
-    longint fast_x87_load_count = 0;
+    longint x87_direct_load_count = 0;
     longint x87_control_busy_cycles = 0;
     longint x87_executor_busy_cycles = 0;
     longint x87_wait_stall_cycles = 0;
     longint x87_fop_count [0:2047];
-    longint fast_x87_load_fop_count [0:2047];
+    longint x87_direct_load_fop_count [0:2047];
     longint x87_exec_start_count [0:15];
     longint x87_exec_busy_count [0:15];
+    longint cpu_entry_count [0:4095];
+    longint cpu_entry_cycles [0:4095];
+    longint cpu_entry_mem_stall [0:4095];
+    longint cpu_entry_x87_stall [0:4095];
+    longint cpu_entry_frontend_wait [0:4095];
+    longint cpu_opcode_count [0:255];
+    longint cpu_opcode_cycles [0:255];
+    longint cpu_hardwired_count [0:1];
+    longint cpu_hardwired_cycles [0:1];
+    longint cpu_commit_count [0:7];
+    longint cpu_commit_cycles [0:7];
+    longint cpu_stall_cycles [0:9];
+    longint cpu_load_chain [0:11];
+    longint cpu_load_intervals [0:16];
+    longint cpu_current_start;
+    logic [11:0] cpu_current_entry;
+    logic [7:0] cpu_current_opcode;
+    logic cpu_current_hardwired;
+    logic [2:0] cpu_current_commit;
+    logic cpu_profile_active;
     event load_snapshot_x87_state;
+
+    // Snapshot-only CPU profiler. Attribute issue-to-issue time to the older
+    // instruction and separately count mutually exclusive pipeline states.
+    always @(posedge clk) begin
+        if (reset_n && $test$plusargs("profile_cpu")) begin
+            if (dut.i_issue) begin
+                if (cpu_profile_active) begin
+                    cpu_entry_cycles[cpu_current_entry] += cycle - cpu_current_start;
+                    cpu_opcode_cycles[cpu_current_opcode] += cycle - cpu_current_start;
+                    cpu_hardwired_cycles[cpu_current_hardwired] += cycle - cpu_current_start;
+                    cpu_commit_cycles[cpu_current_commit] += cycle - cpu_current_start;
+                    if (cpu_current_entry == 12'h019) begin
+                        if ((cycle - cpu_current_start) >= 16)
+                            cpu_load_intervals[16] += 1;
+                        else
+                            cpu_load_intervals[cycle - cpu_current_start] += 1;
+                    end
+                end
+                cpu_current_start = cycle;
+                cpu_current_entry = dut.i_bus.entry_point;
+                cpu_current_opcode = dut.i_bus.opcode;
+                cpu_current_hardwired = dut.d2_recipe.hardwired;
+                cpu_current_commit = dut.d2_recipe.commit_sel;
+                cpu_entry_count[dut.i_bus.entry_point] += 1;
+                cpu_opcode_count[dut.i_bus.opcode] += 1;
+                cpu_hardwired_count[dut.d2_recipe.hardwired] += 1;
+                cpu_commit_count[dut.d2_recipe.commit_sel] += 1;
+                cpu_profile_active = 1'b1;
+            end
+
+            cpu_stall_cycles[0] += dut.stall_mem;
+            cpu_stall_cycles[1] += !dut.stall_mem && dut.stall_wio;
+            cpu_stall_cycles[2] += !dut.stall_mem && !dut.stall_wio && dut.stall_d2;
+            cpu_stall_cycles[3] += !dut.stall_mem && !dut.stall_wio &&
+                                   !dut.stall_d2 && dut.stall_x87_direct;
+            cpu_stall_cycles[4] += !dut.stall && dut.throttle_parked_r;
+            cpu_stall_cycles[5] += !dut.stall && !dut.throttle_parked_r &&
+                                   !dut.uc_active && dut.decq_empty && !dut.d2_valid;
+            cpu_stall_cycles[6] += !dut.stall && !dut.throttle_parked_r &&
+                                   !dut.uc_active && !(dut.decq_empty && !dut.d2_valid);
+            cpu_stall_cycles[7] += dut.decoder_fetch_blocked;
+            cpu_stall_cycles[8] += dut.mem_servicing;
+            cpu_stall_cycles[9] += dut.q_flush;
+            if (cpu_profile_active) begin
+                cpu_entry_mem_stall[cpu_current_entry] += dut.stall_mem;
+                cpu_entry_x87_stall[cpu_current_entry] += dut.stall_x87_direct;
+                cpu_entry_frontend_wait[cpu_current_entry] +=
+                    !dut.stall && !dut.throttle_parked_r && !dut.uc_active;
+            end
+
+            // Classify the cycle where a hardwired load can preload and chain its
+            // successor. This is intentionally hierarchical: it is snapshot
+            // profiling instrumentation, not part of the synthesized core.
+            if (dut.hardwired_control_inst.recipe_state.hardwired &&
+                (dut.hardwired_control_inst.recipe_state.commit_sel ==
+                 z486_pkg::RECIPE_COMMIT_MEM) &&
+                dut.hardwired_control_inst.uc_exec && dut.hardwired_control_inst.uc_next_rni &&
+                !dut.hardwired_control_inst.i_issue) begin
+                cpu_load_chain[0] += 1;
+                if (dut.hardwired_control_inst.chain_start)
+                    cpu_load_chain[1] += 1;
+                else if (dut.hardwired_control_inst.decq_empty)
+                    cpu_load_chain[2] += 1;
+                else if (!dut.hardwired_control_inst.d2_push)
+                    cpu_load_chain[3] += 1;
+                else if (!dut.hardwired_control_inst.issue_recipe.hardwired)
+                    cpu_load_chain[4] += 1;
+                else if (dut.hardwired_control_inst.issue_recipe.reads_flags &&
+                         dut.hardwired_control_inst.recipe_state.writes_flags &&
+                         !dut.hardwired_control_inst.issue_recipe.jcc)
+                    cpu_load_chain[5] += 1;
+                else if (dut.hardwired_control_inst.issue_recipe.uses_ea &&
+                         dut.hardwired_control_inst.ea2_conflict)
+                    cpu_load_chain[6] += 1;
+                else if (dut.hardwired_control_inst.loaduse_conflict)
+                    cpu_load_chain[7] += 1;
+                else if (dut.hardwired_control_inst.mem_confN)
+                    cpu_load_chain[8] += 1;
+                else if (dut.hardwired_control_inst.shift_confN)
+                    cpu_load_chain[9] += 1;
+                else if (!dut.hardwired_control_inst.head_chain_safe)
+                    cpu_load_chain[10] += 1;
+                else
+                    cpu_load_chain[11] += 1;
+            end
+        end
+    end
 
     generate
     if (ENABLE_X87) begin : gen_snapshot_x87_counters
@@ -97,10 +204,10 @@ module tb_protected_mode #(
                     x87_fop_count[dut.x87.gen_x87.cmd_fop] <=
                         x87_fop_count[dut.x87.gen_x87.cmd_fop] + 1;
                 end
-                if (dut.x87.fast_valid && dut.x87.fast_ready) begin
-                    fast_x87_load_count <= fast_x87_load_count + 1;
-                    fast_x87_load_fop_count[dut.i.immediate[10:0]] <=
-                        fast_x87_load_fop_count[dut.i.immediate[10:0]] + 1;
+                if (dut.x87.direct_valid && dut.x87.direct_ready) begin
+                    x87_direct_load_count <= x87_direct_load_count + 1;
+                    x87_direct_load_fop_count[dut.i.immediate[10:0]] <=
+                        x87_direct_load_fop_count[dut.i.immediate[10:0]] + 1;
                 end
                 if (!dut.x87_busy_n)
                     x87_control_busy_cycles <= x87_control_busy_cycles + 1;
@@ -505,11 +612,42 @@ module tb_protected_mode #(
         for (int i = 0; i < 2048; i++)
             x87_fop_count[i] = 0;
         for (int i = 0; i < 2048; i++)
-            fast_x87_load_fop_count[i] = 0;
+            x87_direct_load_fop_count[i] = 0;
         for (int i = 0; i < 16; i++) begin
             x87_exec_start_count[i] = 0;
             x87_exec_busy_count[i] = 0;
         end
+        for (int i = 0; i < 4096; i++) begin
+            cpu_entry_count[i] = 0;
+            cpu_entry_cycles[i] = 0;
+            cpu_entry_mem_stall[i] = 0;
+            cpu_entry_x87_stall[i] = 0;
+            cpu_entry_frontend_wait[i] = 0;
+        end
+        for (int i = 0; i < 256; i++) begin
+            cpu_opcode_count[i] = 0;
+            cpu_opcode_cycles[i] = 0;
+        end
+        for (int i = 0; i < 2; i++) begin
+            cpu_hardwired_count[i] = 0;
+            cpu_hardwired_cycles[i] = 0;
+        end
+        for (int i = 0; i < 8; i++) begin
+            cpu_commit_count[i] = 0;
+            cpu_commit_cycles[i] = 0;
+        end
+        for (int i = 0; i < 10; i++)
+            cpu_stall_cycles[i] = 0;
+        for (int i = 0; i < 12; i++)
+            cpu_load_chain[i] = 0;
+        for (int i = 0; i < 17; i++)
+            cpu_load_intervals[i] = 0;
+        cpu_current_start = 0;
+        cpu_current_entry = 0;
+        cpu_current_opcode = 0;
+        cpu_current_hardwired = 0;
+        cpu_current_commit = 0;
+        cpu_profile_active = 0;
 
         // Get max cycles
         if ($value$plusargs("cycles=%d", max_cycles))
@@ -745,8 +883,8 @@ module tb_protected_mode #(
                 instruction_count <= instruction_count + 1;
 
             // Snapshot completion is the first instruction at the saved
-            // return address. EIP still names that instruction on i_pop.
-            if (stop_eip_valid && dut.i_pop &&
+            // return address. EIP still names that instruction on i_issue.
+            if (stop_eip_valid && dut.i_issue &&
                 (dut.CS == stop_cs[15:0]) && (dut.EIP == stop_eip)) begin
                 longint unsigned checksum;
                 checksum = 64'hcbf29ce484222325;
@@ -764,7 +902,7 @@ module tb_protected_mode #(
                 $display("  CPI: %f", instruction_count ?
                          real'(cycle) / real'(instruction_count) : 0.0);
                 $display("  x87 commands: %0d", x87_command_count);
-                $display("  x87 FAST loads: %0d", fast_x87_load_count);
+                $display("  x87 direct loads: %0d", x87_direct_load_count);
                 $display("  x87 control busy cycles: %0d", x87_control_busy_cycles);
                 $display("  x87 executor busy cycles: %0d", x87_executor_busy_cycles);
                 $display("  x87 WAIT stall cycles: %0d", x87_wait_stall_cycles);
@@ -772,9 +910,9 @@ module tb_protected_mode #(
                     for (int i = 0; i < 2048; i++) begin
                         if (x87_fop_count[i] != 0)
                             $display("X87_FOP protocol %03x %0d", i, x87_fop_count[i]);
-                        if (fast_x87_load_fop_count[i] != 0)
+                        if (x87_direct_load_fop_count[i] != 0)
                             $display("X87_FOP direct-load %03x %0d", i,
-                                     fast_x87_load_fop_count[i]);
+                                     x87_direct_load_fop_count[i]);
                     end
                     for (int i = 0; i < 16; i++) begin
                         if (x87_exec_start_count[i] != 0)
@@ -782,6 +920,36 @@ module tb_protected_mode #(
                                      x87_exec_start_count[i],
                                      x87_exec_busy_count[i]);
                     end
+                end
+                if ($test$plusargs("profile_cpu")) begin
+                    for (int i = 0; i < 4096; i++) begin
+                        if (cpu_entry_count[i] != 0)
+                            $display("CPU_ENTRY %03x %0d %0d %0d %0d %0d", i,
+                                     cpu_entry_count[i], cpu_entry_cycles[i],
+                                     cpu_entry_mem_stall[i], cpu_entry_x87_stall[i],
+                                     cpu_entry_frontend_wait[i]);
+                    end
+                    for (int i = 0; i < 256; i++) begin
+                        if (cpu_opcode_count[i] != 0)
+                            $display("CPU_OPCODE %02x %0d %0d", i,
+                                     cpu_opcode_count[i], cpu_opcode_cycles[i]);
+                    end
+                    for (int i = 0; i < 2; i++)
+                        $display("CPU_HARDWIRED %0d %0d %0d", i,
+                                 cpu_hardwired_count[i], cpu_hardwired_cycles[i]);
+                    for (int i = 0; i < 8; i++) begin
+                        if (cpu_commit_count[i] != 0)
+                            $display("CPU_COMMIT %0d %0d %0d", i,
+                                     cpu_commit_count[i], cpu_commit_cycles[i]);
+                    end
+                    for (int i = 0; i < 10; i++)
+                        $display("CPU_STATE %0d %0d", i, cpu_stall_cycles[i]);
+                    for (int i = 0; i < 12; i++)
+                        $display("CPU_LOAD_CHAIN %0d %0d", i,
+                                 cpu_load_chain[i]);
+                    for (int i = 0; i < 17; i++)
+                        $display("CPU_LOAD_INTERVAL %0d %0d", i,
+                                 cpu_load_intervals[i]);
                 end
                 $display("  FNV64[%08x+%08x]: %016x",
                          checksum_start, checksum_bytes, checksum);

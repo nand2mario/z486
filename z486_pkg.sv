@@ -5,12 +5,12 @@ package z486_pkg;
 // Decoded Instruction Entry Type
 //=============================================================================
 
-// z486 FAST-path class descriptor. V52 derives it from the registered
-// microcode entry point instead of carrying these 16 bits in every decoded
-// instruction queue entry.
+// Optimizer metadata derived from the registered microcode entry. A hardwired
+// recipe and a qualified overlay are distinct controls; commit_sel applies only
+// to a hardwired recipe.
 typedef struct packed {
-    logic fast;        // completes at its RNI word (+ optional commit sideband)
-    logic multi_word;  // RNI word is not the entry word (shifts, loads,
+    logic hardwired;   // executes a bounded one-to-three-uStep recipe
+    logic multi_ustep; // RNI word is not the entry word (shifts, loads,
                        // ALU/CMP r,m, MOVZX); the chain fires one cycle before
                        // the RNI word, detected via uc_next
     logic [2:0] commit_sel; // 0 none; ALU (alu_result->DSTREG), SHIFT
@@ -18,12 +18,12 @@ typedef struct packed {
                        // width from the executing BITS16/32) commit at the
                        // RNI-word cycle; MEM (OPR_R) commits one cycle later
                        // (deferred), only when the slot was chained away
-    logic keep_slot;   // memory classes: the slot word (OPR_R writeback / WR
+    logic slot_has_work;   // memory classes: the slot word (OPR_R writeback / WR
                        // DLY) is real work — execute it normally when
                        // unchained; never turn it into a dead slot
     logic reads_flags; // consumes CF (ADC/SBB/RCL/RCR): never chain INTO — the
                        // previous instruction's flags are still in two-cycle retirement
-    logic uses_ea;     // consumes EA/moffs/IND at i_pop (LEA, loads, stores):
+    logic uses_ea;     // consumes EA/moffs/IND at i_issue (LEA, loads, stores):
                        // never chain INTO — base/index GPRs may be written by
                        // the still-executing predecessor
     logic reads_dst;   // EX-cycle GPR sources, for the load-use chain-out gate
@@ -33,32 +33,32 @@ typedef struct packed {
                        //   via uc_dest - the EA chain-into gate must see it
     logic op_byte;     // operand size is byte (precomputed: byte selectors
                        //   encode {high,reg[1:0]}, needed by overlap checks)
-    logic jcc;         // Jcc rel: chains only when NOT taken (fast_issueJ at
-                       //   i_first, gated on the settled-EFLAGS condition);
+    logic jcc;         // Jcc rel: chains only when NOT taken at i_first,
+                       //   gated on the settled-EFLAGS condition;
                        //   taken keeps the 21.z386 early redirect + microcode
     logic writes_flags; // produces arithmetic flags: a reads_flags successor
                        //   may chain only after a non-flag-writing predecessor
     logic br_rel;      // relative branch (Jcc/JMP rel/CALL rel): its target is
                        //   a decode-time constant - request a speculative
-                       //   target-line fetch at i_pop (independent of .fast)
-} fast_class_t;
+                       //   target-line fetch at i_issue (independent of .hardwired)
+} recipe_meta_t;
 
-// Registered state carried by the instruction currently using the FAST path.
+// Registered state carried by the current bounded hardwired recipe.
 typedef struct packed {
-    logic       fast;
-    logic       multi_word;
+    logic       hardwired;
+    logic       multi_ustep;
     logic       jcc;
     logic       writes_flags;
     logic [2:0] commit_sel;
-    logic       keep_slot;
-} fast_exec_state_t;
+    logic       slot_has_work;
+} recipe_state_t;
 
 // A deferred GPR write visible to issue-time dependency checks.
 typedef struct packed {
     logic       valid;
     logic [2:0] dst;
     logic [1:0] size;
-} fast_pending_write_t;
+} recipe_pending_write_t;
 
 // A selected architectural GPR input and a forwarded GPR write.
 typedef struct packed {
@@ -121,14 +121,15 @@ function automatic logic [63:0] ea_scale_operands(
     end
 endfunction
 
-localparam [2:0] FAST_COMMIT_NONE   = 3'd0;
-localparam [2:0] FAST_COMMIT_ALU    = 3'd1;
-localparam [2:0] FAST_COMMIT_SHIFT  = 3'd2;
-localparam [2:0] FAST_COMMIT_MEM    = 3'd3;
-localparam [2:0] FAST_COMMIT_SIGSRC = 3'd4;
-localparam [2:0] FAST_COMMIT_ESP    = 3'd5;  // PUSH: SIGMA (post-push ESP,
-                                             // precomputed at i_pop) -> ESP
-localparam [2:0] FAST_COMMIT_X87    = 3'd6;  // fault-checked m32 operand -> x87
+localparam [2:0] RECIPE_COMMIT_NONE   = 3'd0;
+localparam [2:0] RECIPE_COMMIT_ALU    = 3'd1;
+localparam [2:0] RECIPE_COMMIT_SHIFT  = 3'd2;
+localparam [2:0] RECIPE_COMMIT_MEM    = 3'd3;
+localparam [2:0] RECIPE_COMMIT_SIGSRC = 3'd4;
+localparam [2:0] RECIPE_COMMIT_ESP    = 3'd5;  // PUSH: SIGMA (post-push ESP,
+                                             // precomputed at i_issue) -> ESP
+localparam [2:0] RECIPE_ACTION_X87_DIRECT = 3'd6; // Overlay discriminator;
+                                                  // not a recipe commit
 
 // Condition facts consumed by the microsequencer's ALU/JMP decoder. Producers
 // reduce architectural state locally so the sequencer does not need wide
@@ -206,7 +207,7 @@ typedef struct packed {
     logic [3:0]  mem_seg;             // resolved SS/DS/override segment for memory EA
 } dec_entry_t;
 
-// Normalized effective-address metadata shared by D2, FAST issue hazard
+// Normalized effective-address metadata shared by D2, chaining hazard
 // checking, and the architectural Address Unit.
 typedef struct packed {
     logic [7:0]  base_sel;
@@ -239,7 +240,7 @@ function automatic logic condition_true(input logic [3:0] cond,
     endcase
 endfunction
 
-// Optimizer-generated recipe lookup and entry-point-derived FAST classifier.
+// Optimizer-generated recipe lookup and entry-point-derived metadata.
 `include "ucode_recipes.svh"
 
 // Prefix enums
@@ -260,18 +261,18 @@ typedef enum logic [2:0] {
     PREFIX_GS    = 3'b110
 } prefix_seg_t;
 
-// z486 FAST-path classification (doc/z486/design.md)
+// Legacy hardwired-recipe classifier (simulation equivalence oracle)
 // Details: doc/z486/implementation_notes.md#src-24-z486-z486-pkg-sv-118
 
 
-function automatic fast_class_t dec_fast_class(input dec_entry_t e);
+function automatic recipe_meta_t dec_recipe_metadata(input dec_entry_t e);
     logic mod11;
     logic [2:0] grp;
-    fast_class_t r;
+    recipe_meta_t r;
     r = '0;
     mod11 = e.has_modrm && (e.modrm[7:6] == 2'b11);
     // Operand byte-ness: 40-4F and 50-5F are always wide, B0-BF use
-    // opcode[3], everything else in the FAST set is a w-bit form.
+    // opcode[3], everything else in the hardwired set is a w-bit form.
     if (e.opcode[7:4] == 4'h4 || e.opcode[7:4] == 4'h5)
         r.op_byte = 1'b0;
     else if (e.opcode[7:4] == 4'hB && !e.has_0f)
@@ -282,13 +283,13 @@ function automatic fast_class_t dec_fast_class(input dec_entry_t e);
         // 0F B6/B7/BE/BF MOVZX/MOVSX r,r/m: SZ_EXT then BITS16/32+RNI; the
         // slot (SIGMA->SRCREG) is replaced by the SIGSRC sideband whose width
         // comes from the executing BITS op. DSTREG (the r/m source) is read
-        // at the entry word, one cycle after i_pop - settled, so no gates.
+        // at the entry word, one cycle after i_issue - settled, so no gates.
         if (e.opcode[7:4] == 4'h8) begin
             // 0F 80-8F Jcc rel16/32: same shape as 70-7F
-            r.fast = 1'b1; r.jcc = 1'b1; r.multi_word = 1'b1;
+            r.hardwired = 1'b1; r.jcc = 1'b1; r.multi_ustep = 1'b1;
             r.reads_flags = 1'b1; r.br_rel = 1'b1;
         end else if ((e.opcode[7:4] == 4'hB) && (e.opcode[2:1] == 2'b11) && e.has_modrm) begin
-            r.fast = 1'b1; r.multi_word = 1'b1; r.commit_sel = FAST_COMMIT_SIGSRC;
+            r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.commit_sel = RECIPE_COMMIT_SIGSRC;
             r.writes_srcreg = 1'b1;
             if (!mod11) r.uses_ea = 1'b1;
             else r.reads_dst = 1'b1;   // SZ_EXT reads DSTREG at the entry word =
@@ -298,8 +299,8 @@ function automatic fast_class_t dec_fast_class(input dec_entry_t e);
                       (e.opcode == 8'hAC) || (e.opcode == 8'hAD)) && mod11) begin
             // SHLD/SHRD r,r,imm/CL: SHIFT1 then SHIFT2+RNI; replace the
             // SIGMA->DSTREG slot with the existing deferred SHIFT commit.
-            r.fast = 1'b1; r.multi_word = 1'b1;
-            r.commit_sel = FAST_COMMIT_SHIFT;
+            r.hardwired = 1'b1; r.multi_ustep = 1'b1;
+            r.commit_sel = RECIPE_COMMIT_SHIFT;
             r.reads_dst = 1'b1; r.reads_src = 1'b1;
             r.reads_ecx = e.opcode[0];
             r.writes_flags = 1'b1;
@@ -309,8 +310,8 @@ function automatic fast_class_t dec_fast_class(input dec_entry_t e);
             // 00-3B ALU/CMP r,r (mod=11) and 04..3D ALU/CMP A,imm forms
             grp = e.opcode[5:3];
             if ((!e.opcode[2] && mod11) || (e.opcode[2:1] == 2'b10)) begin
-                r.fast        = 1'b1;
-                r.commit_sel  = (grp != 3'b111) ? FAST_COMMIT_ALU : FAST_COMMIT_NONE; // CMP: flags only
+                r.hardwired        = 1'b1;
+                r.commit_sel  = (grp != 3'b111) ? RECIPE_COMMIT_ALU : RECIPE_COMMIT_NONE; // CMP: flags only
                 r.reads_flags = (grp == 3'b010) || (grp == 3'b011);  // ADC/SBB
                 r.writes_flags = 1'b1;
                 r.reads_dst   = 1'b1;
@@ -319,174 +320,174 @@ function automatic fast_class_t dec_fast_class(input dec_entry_t e);
                 // 06/0E/16/1E PUSH seg (07/17/1F POP seg load segments - SEQ).
                 // 09B: SEGREG->OPR_W + WR + RNI; slot = SIGMA->eSP + DLY,
                 // replaced by the ESP commit when chained away.
-                r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ESP;
-                r.keep_slot = 1'b1; r.uses_ea = 1'b1;
+                r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ESP;
+                r.slot_has_work = 1'b1; r.uses_ea = 1'b1;
             end else if (!e.opcode[2] && e.has_modrm) begin
-                // Memory forms: only the read-only shapes are FAST. ALU r,m (d=1, groups 0-6): 027 RD/DLY/OPR_R->TMPB/ALU+RNI CMP r,m / CMP m,r (group...
+                // Memory forms: only read-only shapes use hardwired recipes.
                 // Details: doc/z486/implementation_notes.md#src-24-z486-z486-pkg-sv-182
                 if (e.opcode[1]) begin
-                    r.fast = 1'b1; r.multi_word = 1'b1; r.uses_ea = 1'b1;
-                    r.commit_sel = (grp != 3'b111) ? FAST_COMMIT_ALU : FAST_COMMIT_NONE;
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.uses_ea = 1'b1;
+                    r.commit_sel = (grp != 3'b111) ? RECIPE_COMMIT_ALU : RECIPE_COMMIT_NONE;
                     r.writes_flags = 1'b1;
                 end else if (grp == 3'b111) begin
-                    r.fast = 1'b1; r.multi_word = 1'b1; r.uses_ea = 1'b1;   // CMP m,r
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.uses_ea = 1'b1;   // CMP m,r
                     r.writes_flags = 1'b1;
                 end else begin
                     // ALU m,r RMW (d=0, groups 0-6): M5 F-RMW retimed ucode 04A RD / 04B DLY+JMP / 04C ALU(OPR_R,SRCREG) / 046 SIGMA->OPR_W+WR+RNI / 047 DLY....
                     // Details: doc/z486/implementation_notes.md#src-24-z486-z486-pkg-sv-196
-                    r.fast = 1'b1; r.multi_word = 1'b1; r.uses_ea = 1'b1;
-                    r.keep_slot = 1'b1; r.writes_flags = 1'b1;
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.uses_ea = 1'b1;
+                    r.slot_has_work = 1'b1; r.writes_flags = 1'b1;
                 end
             end
         end else if (e.opcode[7:4] == 4'h4) begin
             // 40-4F INC/DEC r
-            r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU; r.reads_dst = 1'b1;
+            r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU; r.reads_dst = 1'b1;
             r.writes_flags = 1'b1;
         end else if (e.opcode[7:4] == 4'h7) begin
             // 70-7F Jcc rel8: not-taken flow is 065 JNcond -> 066 RNi(+PREF suppressed) - chainJ fires at 065 on the settled condition. Taken flow...
             // Details: doc/z486/implementation_notes.md#src-24-z486-z486-pkg-sv-213
-            r.fast = 1'b1; r.jcc = 1'b1; r.multi_word = 1'b1;
+            r.hardwired = 1'b1; r.jcc = 1'b1; r.multi_ustep = 1'b1;
             r.reads_flags = 1'b1; r.br_rel = 1'b1;
         end else if (e.opcode[7:3] == 5'b01010) begin
             // 50-57 PUSH r: 086 DSTREG->OPR_W + WR + RNI; slot SIGMA->eSP+DLY.
             // reads_dst: the pushed register is read at the entry word (the
             // deferred-load-commit cycle when chained out of a load).
-            r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ESP;
-            r.keep_slot = 1'b1; r.uses_ea = 1'b1; r.reads_dst = 1'b1;
+            r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ESP;
+            r.slot_has_work = 1'b1; r.uses_ea = 1'b1; r.reads_dst = 1'b1;
         end else if (e.opcode[7:3] == 5'b01011) begin
             // 58-5F POP r: 09F SIGMA->eSP + RD (ESP written at the entry word),
             // 0A0 DLY+RNI, slot OPR_R->DSTREG - the load shape: deferred MEM
             // commit when chained away.
-            r.fast = 1'b1; r.multi_word = 1'b1; r.commit_sel = FAST_COMMIT_MEM;
-            r.keep_slot = 1'b1; r.uses_ea = 1'b1;
+            r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.commit_sel = RECIPE_COMMIT_MEM;
+            r.slot_has_work = 1'b1; r.uses_ea = 1'b1;
         end else if (e.opcode == 8'h68 || e.opcode == 8'h6A) begin
             // PUSH imm: 09D IMM->OPR_W + WR + RNI; slot SIGMA->eSP+DLY
-            r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ESP;
-            r.keep_slot = 1'b1; r.uses_ea = 1'b1;
+            r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ESP;
+            r.slot_has_work = 1'b1; r.uses_ea = 1'b1;
         end else if (e.opcode == 8'h80 || e.opcode == 8'h81 || e.opcode == 8'h83) begin
             grp = e.modrm[5:3];
             if (mod11) begin
                 // ALU/CMP r,imm
-                r.fast        = 1'b1;
-                r.commit_sel  = (grp != 3'b111) ? FAST_COMMIT_ALU : FAST_COMMIT_NONE;
+                r.hardwired        = 1'b1;
+                r.commit_sel  = (grp != 3'b111) ? RECIPE_COMMIT_ALU : RECIPE_COMMIT_NONE;
                 r.reads_flags = (grp == 3'b010) || (grp == 3'b011);
                 r.writes_flags = 1'b1;
                 r.reads_dst   = 1'b1;
             end else if (grp == 3'b111) begin
                 // CMP m,imm: read-only mem CMPTST shape
-                r.fast = 1'b1; r.multi_word = 1'b1; r.uses_ea = 1'b1;
+                r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.uses_ea = 1'b1;
                 r.writes_flags = 1'b1;
             end else begin
-                // ALU m,imm RMW (039 retimed like 04A): store-shaped FAST,
+                // ALU m,imm RMW (039 retimed like 04A): store-shaped hardwired recipe,
                 // same rationale as the ALU m,r class above.
-                r.fast = 1'b1; r.multi_word = 1'b1; r.uses_ea = 1'b1;
-                r.keep_slot = 1'b1; r.writes_flags = 1'b1;
+                r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.uses_ea = 1'b1;
+                r.slot_has_work = 1'b1; r.writes_flags = 1'b1;
             end
         end else if (e.opcode == 8'h84 || e.opcode == 8'h85) begin
             if (mod11) begin
                 // TEST r,r
-                r.fast = 1'b1; r.reads_dst = 1'b1; r.reads_src = 1'b1;
+                r.hardwired = 1'b1; r.reads_dst = 1'b1; r.reads_src = 1'b1;
             end else begin
                 // TEST m,r: read-only mem CMPTST shape
-                r.fast = 1'b1; r.multi_word = 1'b1; r.uses_ea = 1'b1;
+                r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.uses_ea = 1'b1;
             end
             r.writes_flags = 1'b1;
         end else if (e.opcode[7:2] == 6'b100010) begin
             if (mod11) begin
                 // 88-8B MOV r,r
-                r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU; r.reads_src = 1'b1;
+                r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU; r.reads_src = 1'b1;
             end else if (e.opcode[1]) begin
                 // 8A/8B MOV r,m: 019 RD, 01A DLY+RNI (v43 fold); slot writes
                 // OPR_R->DSTREG and stays live when unchained; when chained
                 // away, the deferred MEM commit replaces it.
-                r.fast = 1'b1; r.multi_word = 1'b1; r.commit_sel = FAST_COMMIT_MEM;
-                r.keep_slot = 1'b1; r.uses_ea = 1'b1;
+                r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.commit_sel = RECIPE_COMMIT_MEM;
+                r.slot_has_work = 1'b1; r.uses_ea = 1'b1;
             end else begin
                 // 88/89 MOV m,r: 013 OPR_W write + WR + RNI; slot is the DLY.
                 // Retire-on-accept is enforced at the WR issue (mem_block_idle).
-                r.fast = 1'b1; r.keep_slot = 1'b1; r.uses_ea = 1'b1;
+                r.hardwired = 1'b1; r.slot_has_work = 1'b1; r.uses_ea = 1'b1;
                 r.reads_src = 1'b1;
             end
         end else if (e.opcode == 8'h8D && e.has_modrm && (e.modrm[7:6] != 2'b11)) begin
             // LEA r,m: entry word 0B9 writes SRCREG (modrm reg field) from IND
             // itself (no sideband); mod=11 is #UD and stays on the SEQ path
-            r.fast = 1'b1; r.uses_ea = 1'b1; r.writes_srcreg = 1'b1;
+            r.hardwired = 1'b1; r.uses_ea = 1'b1; r.writes_srcreg = 1'b1;
         end else if (e.opcode[7:2] == 6'b101000) begin
             // A0/A1 MOV A,moffs (load) — same 019 routine as MOV r,m;
             // A2/A3 MOV moffs,A (store) — same 013 routine as MOV m,r
-            r.fast = 1'b1; r.keep_slot = 1'b1; r.uses_ea = 1'b1;
+            r.hardwired = 1'b1; r.slot_has_work = 1'b1; r.uses_ea = 1'b1;
             if (!e.opcode[1]) begin
-                r.multi_word = 1'b1; r.commit_sel = FAST_COMMIT_MEM;
+                r.multi_ustep = 1'b1; r.commit_sel = RECIPE_COMMIT_MEM;
             end else begin
                 r.reads_src = 1'b1;   // 013 reads SRCREG (the accumulator)
             end
         end else if (e.opcode == 8'hEB || e.opcode == 8'hE9 || e.opcode == 8'hE8) begin
             // JMP rel8/rel32, CALL rel: speculative target-line fetch, and the
             // routines end at 068 SIGMA->eIP+RNI - chainN reclaims the final
-            // slot with the composed EIP write. CALL's i_pop does the stack
+            // slot with the composed EIP write. CALL's i_issue does the stack
             // SIGMA precompute (uses_ea via the stack gate).
             r.br_rel = 1'b1;
-            r.fast = 1'b1; r.multi_word = 1'b1;
+            r.hardwired = 1'b1; r.multi_ustep = 1'b1;
             if (e.opcode == 8'hE8) begin
                 r.uses_ea = 1'b1;
                 if (e.data32)
-                    r.commit_sel = FAST_COMMIT_ESP;
+                    r.commit_sel = RECIPE_COMMIT_ESP;
             end
         end else if (e.opcode == 8'hC3 || e.opcode == 8'hC2) begin
             // RET / RET iw (near): 072 RD + new-ESP, 073 eSP + jump, 074
             // IND=OPR_R, JMP_PREF..., 068 eIP+RNI - chainN reclaims the final
             // slot when the PREF refill decodes the return target in time.
-            r.fast = 1'b1; r.multi_word = 1'b1; r.uses_ea = 1'b1;
+            r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.uses_ea = 1'b1;
         end else if (e.opcode == 8'h98) begin
             // CBW/CWDE: same SZ_EXT + BITS16/32 + RNI shape as MOVZX r,r.
             // reads_dst: SZ_EXT reads AL/AX at the entry word, which is the
             // deferred-commit cycle when chained out of a load (mov al,[m];
             // cbw read stale AL - broke the DOS 7.1 boot loader).
-            r.fast = 1'b1; r.multi_word = 1'b1; r.commit_sel = FAST_COMMIT_SIGSRC;
+            r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.commit_sel = RECIPE_COMMIT_SIGSRC;
             r.writes_srcreg = 1'b1; r.reads_dst = 1'b1;
         end else if (e.opcode[7:1] == 7'b1010100) begin
             // A8/A9 TEST A,imm
-            r.fast = 1'b1; r.reads_dst = 1'b1; r.writes_flags = 1'b1;
+            r.hardwired = 1'b1; r.reads_dst = 1'b1; r.writes_flags = 1'b1;
         end else if (e.opcode[7:4] == 4'hB) begin
             // B0-BF MOV r,imm
-            r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU;
+            r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU;
         end else if ((e.opcode[7:1] == 7'b1100011) && (e.modrm[5:3] == 3'b000)) begin
             if (mod11) begin
                 // C6/C7 MOV r,imm register form (other reg fields are #UD -> SEQ)
-                r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU;
+                r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU;
             end else begin
                 // C6/C7 MOV m,imm: 015 IMM->OPR_W + WR + RNI; slot is the DLY
-                r.fast = 1'b1; r.keep_slot = 1'b1; r.uses_ea = 1'b1;
+                r.hardwired = 1'b1; r.slot_has_work = 1'b1; r.uses_ea = 1'b1;
             end
         end else if (e.opcode[7:1] == 7'b1111011) begin
             // F6/F7 group 3: /0 TEST r/m,imm; register /2 NOT, /3 NEG
             if (e.modrm[5:3] == 3'b000) begin
                 if (mod11) begin
-                    r.fast = 1'b1; r.reads_dst = 1'b1;        // TEST r,imm
+                    r.hardwired = 1'b1; r.reads_dst = 1'b1;        // TEST r,imm
                 end else begin
-                    r.fast = 1'b1; r.multi_word = 1'b1; r.uses_ea = 1'b1; // TEST m,imm
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.uses_ea = 1'b1; // TEST m,imm
                 end
                 r.writes_flags = 1'b1;
             end else if (mod11 && (e.modrm[5:3] == 3'b010 || e.modrm[5:3] == 3'b011)) begin
                 // NOT preserves flags but NEG writes them - be conservative
-                r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU; r.reads_dst = 1'b1;
+                r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU; r.reads_dst = 1'b1;
                 r.writes_flags = 1'b1;
             end
         end else if ((e.opcode[7:1] == 7'b1111111) && mod11 && (e.modrm[5:4] == 2'b00)) begin
             // FE/FF INC/DEC r (register forms, /0 /1)
-            r.fast = 1'b1; r.commit_sel = FAST_COMMIT_ALU; r.reads_dst = 1'b1;
+            r.hardwired = 1'b1; r.commit_sel = RECIPE_COMMIT_ALU; r.reads_dst = 1'b1;
             r.writes_flags = 1'b1;
         end else if (((e.opcode[7:1] == 7'b1100000) || (e.opcode[7:2] == 6'b110100)) && mod11
                      && (e.modrm[5:3] != 3'b010) && (e.modrm[5:3] != 3'b011)
                      && (e.modrm[5:3] != 3'b110)) begin
             // C0/C1 shift r,imm; D0/D1 shift r,1; D2/D3 shift r,CL - two-word routines (0F9/0FF): SHIFT1 count capture, then SHIFT2 with RNI; the...
             // Details: doc/z486/implementation_notes.md#src-24-z486-z486-pkg-sv-349
-            r.fast = 1'b1; r.multi_word = 1'b1; r.commit_sel = FAST_COMMIT_SHIFT;
+            r.hardwired = 1'b1; r.multi_ustep = 1'b1; r.commit_sel = RECIPE_COMMIT_SHIFT;
             r.reads_dst = 1'b1; r.writes_flags = 1'b1;
             r.reads_ecx = e.opcode[1] && (e.opcode[7:2] == 6'b110100); // D2/D3 r,CL
         end
     end
-    dec_fast_class = r;
+    dec_recipe_metadata = r;
 endfunction
 
 // EA register decode helpers (moved from z486.sv; shared with the decoder).
@@ -615,7 +616,7 @@ localparam [3:0] SEG_CMD_DESCSW      = 4'd11; // Switch to CS-based push mode (c
 localparam [3:0] SEG_CMD_STSSAF      = 4'd12; // Set TSS access flag, clear push/descsw mode
 localparam [3:0] SEG_CMD_CTSSAF      = 4'd13; // Clear TSS access flag
 localparam [3:0] SEG_CMD_DESC        = 4'd14; // Full descriptor write (BUSOP_LLIM in PM)
-localparam [3:0] SEG_CMD_INIT_SEG    = 4'd15; // Initialize segment for new instruction (at i_pop)
+localparam [3:0] SEG_CMD_INIT_SEG    = 4'd15; // Initialize segment for new instruction (at i_issue)
 
 // Segment descriptor cache entry
 // Matches the 386 hidden descriptor cache loaded when segment register changes
@@ -982,7 +983,7 @@ localparam DEST_PFERRC = 7'h7A;  // Page fault error code
 localparam DEST_PDBR = 7'h7B;    // Page directory base register (CR3) for LPCR reads
 localparam DEST_USTEP_BSWAP = 7'h7C; // 486 BSWAP extension: byte-swap SRCREG
 localparam DEST_PAGER5 = 7'h7D;  // Page cache register (paging-related, NOP for now)
-localparam DEST_USTEP_ALU = 7'h7E; // Optimized FAST word: ALU result -> DSTREG
+localparam DEST_USTEP_ALU = 7'h7E; // Optimized recipe word: ALU result -> DSTREG
 
 // ALU Source field (ABCDEF) constants
 localparam ALUSRC_EAX = 6'h00;
