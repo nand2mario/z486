@@ -8,11 +8,40 @@ localparam logic [2:0] RECIPE_EARLY_RMW    = 3'd5;
 localparam logic [2:0] RECIPE_EARLY_BRANCH = 3'd6;
 localparam logic [2:0] RECIPE_EARLY_STACK  = 3'd7;
 
+localparam logic [1:0] RECIPE_ACTION_NONE = 2'd0;
+localparam logic [1:0] RECIPE_ACTION_X87_M32_LOAD = 2'd1;
+
+// Resolve opcode-qualified overlays during D1 structural decode.
+function automatic logic [11:0] recipe_effective_entry(input dec_entry_t e);
+    recipe_effective_entry = e.entry_point;
+    unique case (e.entry_point)
+        12'h4D7: begin
+            if ((e.opcode == 8'hD8) || ((e.opcode == 8'hD9) && (e.modrm[5:3] == 3'd0)))
+                recipe_effective_entry = 12'h9C5;
+        end
+        default: ;
+    endcase
+endfunction
+
+function automatic logic [11:0] recipe_fallback_entry(input logic [11:0] entry);
+    unique case (entry)
+        12'h9C5: recipe_fallback_entry = 12'h4D7;
+        default: recipe_fallback_entry = entry;
+    endcase
+endfunction
+
+function automatic logic [1:0] recipe_action(input logic [11:0] entry);
+    unique case (entry)
+        12'h9C5: recipe_action = RECIPE_ACTION_X87_M32_LOAD;
+        default: recipe_action = RECIPE_ACTION_NONE;
+    endcase
+endfunction
+
 function automatic logic [2:0] recipe_early_kind(input logic [11:0] entry);
     unique case (entry)
         12'h003, 12'h005, 12'h01D, 12'h01F, 12'h021, 12'h023, 12'h025, 12'h0F9, 12'h0FC, 12'h0FF, 12'h102, 12'h105, 12'h1E8, 12'h1F0: recipe_early_kind = RECIPE_EARLY_NONE;
         12'h0B9: recipe_early_kind = RECIPE_EARLY_EA;
-        12'h019, 12'h027, 12'h02C, 12'h031, 12'h035, 12'h1EB, 12'h1F3: recipe_early_kind = RECIPE_EARLY_LOAD;
+        12'h019, 12'h027, 12'h02C, 12'h031, 12'h035, 12'h1EB, 12'h1F3, 12'h9C5: recipe_early_kind = RECIPE_EARLY_LOAD;
         12'h013, 12'h015: recipe_early_kind = RECIPE_EARLY_STORE;
         12'h039, 12'h04A: recipe_early_kind = RECIPE_EARLY_RMW;
         12'h065, 12'h06A: recipe_early_kind = RECIPE_EARLY_BRANCH;
@@ -238,6 +267,10 @@ function automatic fast_class_t recipe_fast_class(input dec_entry_t e);
                     r.commit_sel = FAST_COMMIT_MEM; r.keep_slot = 1'b1;
                     r.uses_ea = 1'b1;
                 end
+            end
+            12'h9C5: begin
+                // Variable-latency FAST transport, normal sequencer retirement.
+                r.commit_sel = FAST_COMMIT_X87; r.uses_ea = 1'b1;
             end
             default: ;
         endcase

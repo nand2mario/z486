@@ -64,6 +64,19 @@ class EarlyKind(IntEnum):
     STACK = 7
 
 
+class OverlayQualifier(IntEnum):
+    """Structured decoder predicates for optimizer-owned entry overlays."""
+
+    X87_M32_FLOAT = 1
+
+
+class RecipeAction(IntEnum):
+    """Registered D2 actions selected by optimizer-owned entry addresses."""
+
+    NONE = 0
+    X87_M32_LOAD = 1
+
+
 @dataclass(frozen=True)
 class Recipe:
     name: str
@@ -77,12 +90,35 @@ class Recipe:
     overlay_retire: bool = False
 
 
+@dataclass(frozen=True)
+class OverlayRecipe:
+    """Qualified architectural entry redirected to optimizer-owned usteps."""
+
+    name: str
+    source_entry: int
+    entry: int
+    early: EarlyKind
+    targets: tuple[int, ...]
+    qualifier: OverlayQualifier
+    action: RecipeAction
+    commit: str
+    hazards: tuple[str, ...] = ()
+
+
 PATCHES = [
     # ---- 80486 instruction extensions -----------------------------------
     # 0F C8-CF has no 80386 PLA entry. The decoder redirects it to this
     # otherwise unused word and selects the register through opcode[2:0].
     Patch(0x9C4, "BSWAP r32 extension: SRCREG -> byte-swapped SRCREG + RNI",
           copy_from=0x003, fields=dict(dst=DEST_USTEP_BSWAP)),
+
+    # D8 m32 arithmetic and D9 /0 FLD use a paging-owned demand read and post
+    # the completed operand directly to the integrated x87. Dynamic CR0/x87
+    # eligibility falls back to the original 4D7 routine.
+    Patch(0x9C5, "x87 m32 direct-load overlay: wait for fault-checked operand",
+          copy_from=0x20E),
+    Patch(0x9C6, "x87 m32 direct-load overlay: retire after x87 queue accepts operand",
+          copy_from=0x20F),
 
     # ---- v52 direct ALU usteps -------------------------------------------
     # Every FAST ALU retire word owns its architectural write through one
@@ -266,6 +302,14 @@ FAST_RECIPES = [
 ]
 
 
+OVERLAY_RECIPES = [
+    OverlayRecipe("x87-m32-load", 0x4D7, 0x9C5, EarlyKind.LOAD,
+                  (0x9C5, 0x9C6), OverlayQualifier.X87_M32_FLOAT,
+                  RecipeAction.X87_M32_LOAD, "x87-direct-m32",
+                  ("ea", "paging", "x87-order")),
+]
+
+
 def read_words(path: Path) -> list[int]:
     words: list[int] = []
     for lineno, raw in enumerate(path.read_text().splitlines(), start=1):
@@ -317,6 +361,8 @@ def annotate_recipes(words: list[int]) -> list[int]:
     """Attach the D2 early kind to each FAST entry word."""
     annotated = words[:]
     for recipe in FAST_RECIPES:
+        annotated[recipe.entry] |= int(recipe.early) << UCODE_BITS
+    for recipe in OVERLAY_RECIPES:
         annotated[recipe.entry] |= int(recipe.early) << UCODE_BITS
     if any(word >= (1 << ROM_BITS) for word in annotated):
         raise ValueError(f"annotated word exceeds {ROM_BITS}-bit ROM width")
@@ -377,6 +423,25 @@ def validate_recipes(words: list[int]) -> None:
                         f"recipe {recipe.name}: final target word 0x{path[-1]:03X} is not RNI"
                     )
 
+    overlay_entries: set[int] = set()
+    overlay_actions: set[RecipeAction] = set()
+    for recipe in OVERLAY_RECIPES:
+        if recipe.entry in entries or recipe.entry in overlay_entries:
+            raise ValueError(f"overlay {recipe.name}: duplicate entry 0x{recipe.entry:03X}")
+        if recipe.source_entry == recipe.entry:
+            raise ValueError(f"overlay {recipe.name}: source and overlay entries match")
+        if recipe.action == RecipeAction.NONE or recipe.action in overlay_actions:
+            raise ValueError(f"overlay {recipe.name}: invalid or duplicate action {recipe.action}")
+        if not 1 <= len(recipe.targets) <= 3 or recipe.targets[0] != recipe.entry:
+            raise ValueError(f"overlay {recipe.name}: target must be 1..3 words from its entry")
+        for addr in recipe.targets:
+            if not 0 <= addr < ROM_DEPTH or words[addr] == default_word:
+                raise ValueError(f"overlay {recipe.name}: invalid target word 0x{addr:03X}")
+        if get_field(words[recipe.targets[-1]], "op") != 0:
+            raise ValueError(f"overlay {recipe.name}: final target word is not RNI")
+        overlay_entries.add(recipe.entry)
+        overlay_actions.add(recipe.action)
+
 
 def render_recipe_manifest(words: list[int]) -> str:
     validate_recipes(words)
@@ -404,7 +469,19 @@ def render_recipe_manifest(words: list[int]) -> str:
         f"Recipes: {len(FAST_RECIPES)}. Native microcode remains {UCODE_BITS}-bit.",
         "The generated 40-bit ROM image stores the D2 early kind in bits 39:37.",
         "",
+        "## Qualified overlays",
+        "",
+        "| overlay | architectural entry | effective entry | action | target usteps | hazards |",
+        "| --- | ---: | ---: | --- | --- | --- |",
     ]
+    for recipe in OVERLAY_RECIPES:
+        hazards = ", ".join(recipe.hazards) if recipe.hazards else "-"
+        lines.append(
+            f"| `{recipe.name}` | `{recipe.source_entry:03X}` | `{recipe.entry:03X}` | "
+            f"`{recipe.action.name}` | `{' '.join(f'{a:03X}' for a in recipe.targets)}` | "
+            f"{hazards} |"
+        )
+    lines += ["", f"Qualified overlays: {len(OVERLAY_RECIPES)}.", ""]
     return "\n".join(lines)
 
 
@@ -417,6 +494,11 @@ def render_recipe_svh(words: list[int]) -> str:
         emitted.update(names)
         return ", ".join(f"12'h{recipes[name].entry:03X}" for name in names)
 
+    def overlay_qualifier_expr(recipe: OverlayRecipe) -> str:
+        if recipe.qualifier == OverlayQualifier.X87_M32_FLOAT:
+            return "(e.opcode == 8'hD8) || ((e.opcode == 8'hD9) && (e.modrm[5:3] == 3'd0))"
+        raise ValueError(f"overlay {recipe.name}: unhandled qualifier {recipe.qualifier}")
+
     lines = [
         "// Generated by scripts/ucode_optimize.py; do not edit.",
         "localparam logic [2:0] RECIPE_EARLY_SEQ    = 3'd0;",
@@ -428,11 +510,63 @@ def render_recipe_svh(words: list[int]) -> str:
         "localparam logic [2:0] RECIPE_EARLY_BRANCH = 3'd6;",
         "localparam logic [2:0] RECIPE_EARLY_STACK  = 3'd7;",
         "",
+        f"localparam logic [1:0] RECIPE_ACTION_NONE = 2'd{int(RecipeAction.NONE)};",
+    ]
+    for action in RecipeAction:
+        if action != RecipeAction.NONE:
+            lines.append(
+                f"localparam logic [1:0] RECIPE_ACTION_{action.name} = 2'd{int(action)};"
+            )
+    lines += [
+        "",
+        "// Resolve opcode-qualified overlays during D1 structural decode.",
+        "function automatic logic [11:0] recipe_effective_entry(input dec_entry_t e);",
+        "    recipe_effective_entry = e.entry_point;",
+        "    unique case (e.entry_point)",
+    ]
+    for recipe in OVERLAY_RECIPES:
+        lines += [
+            f"        12'h{recipe.source_entry:03X}: begin",
+            f"            if ({overlay_qualifier_expr(recipe)})",
+            f"                recipe_effective_entry = 12'h{recipe.entry:03X};",
+            "        end",
+        ]
+    lines += [
+        "        default: ;",
+        "    endcase",
+        "endfunction",
+        "",
+        "function automatic logic [11:0] recipe_fallback_entry(input logic [11:0] entry);",
+        "    unique case (entry)",
+    ]
+    for recipe in OVERLAY_RECIPES:
+        lines.append(
+            f"        12'h{recipe.entry:03X}: recipe_fallback_entry = 12'h{recipe.source_entry:03X};"
+        )
+    lines += [
+        "        default: recipe_fallback_entry = entry;",
+        "    endcase",
+        "endfunction",
+        "",
+        "function automatic logic [1:0] recipe_action(input logic [11:0] entry);",
+        "    unique case (entry)",
+    ]
+    for recipe in OVERLAY_RECIPES:
+        lines.append(
+            f"        12'h{recipe.entry:03X}: recipe_action = RECIPE_ACTION_{recipe.action.name};"
+        )
+    lines += [
+        "        default: recipe_action = RECIPE_ACTION_NONE;",
+        "    endcase",
+        "endfunction",
+        "",
         "function automatic logic [2:0] recipe_early_kind(input logic [11:0] entry);",
         "    unique case (entry)",
     ]
     by_kind: dict[EarlyKind, list[int]] = {}
     for recipe in FAST_RECIPES:
+        by_kind.setdefault(recipe.early, []).append(recipe.entry)
+    for recipe in OVERLAY_RECIPES:
         by_kind.setdefault(recipe.early, []).append(recipe.entry)
     for kind in EarlyKind:
         if kind == EarlyKind.SEQ or kind not in by_kind:
@@ -662,6 +796,20 @@ def render_recipe_svh(words: list[int]) -> str:
         "                    r.uses_ea = 1'b1;",
         "                end",
         "            end",
+    ]
+    for recipe in OVERLAY_RECIPES:
+        if recipe.action == RecipeAction.X87_M32_LOAD:
+            lines += [
+                f"            12'h{recipe.entry:03X}: begin",
+                "                // Variable-latency FAST transport, normal sequencer retirement.",
+                "                r.commit_sel = FAST_COMMIT_X87; r.uses_ea = 1'b1;",
+                "            end",
+            ]
+        else:
+            raise ValueError(
+                f"overlay {recipe.name}: no FAST class for action {recipe.action}"
+            )
+    lines += [
         "            default: ;",
         "        endcase",
         "    end",

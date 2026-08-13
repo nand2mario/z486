@@ -78,31 +78,31 @@ module tb_protected_mode #(
     reg prev_instruction_boundary = 0;
     longint instruction_count = 0;
     longint x87_command_count = 0;
-    longint x87_direct_load_count = 0;
+    longint fast_x87_load_count = 0;
     longint x87_control_busy_cycles = 0;
     longint x87_executor_busy_cycles = 0;
     longint x87_wait_stall_cycles = 0;
     longint x87_fop_count [0:2047];
-    longint x87_direct_load_fop_count [0:2047];
+    longint fast_x87_load_fop_count [0:2047];
     event load_snapshot_x87_state;
 
     generate
     if (ENABLE_X87) begin : gen_snapshot_x87_counters
         always @(posedge clk) begin
             if (reset_n) begin
-                if (dut.gen_x87.cmd_valid && dut.gen_x87.cmd_ready) begin
+                if (dut.x87.gen_x87.cmd_valid && dut.x87.gen_x87.cmd_ready) begin
                     x87_command_count <= x87_command_count + 1;
-                    x87_fop_count[dut.gen_x87.cmd_fop] <=
-                        x87_fop_count[dut.gen_x87.cmd_fop] + 1;
+                    x87_fop_count[dut.x87.gen_x87.cmd_fop] <=
+                        x87_fop_count[dut.x87.gen_x87.cmd_fop] + 1;
                 end
-                if (dut.x87_direct_m32_valid && dut.x87_direct_m32_ready) begin
-                    x87_direct_load_count <= x87_direct_load_count + 1;
-                    x87_direct_load_fop_count[dut.x87_direct_m32_fop_r] <=
-                        x87_direct_load_fop_count[dut.x87_direct_m32_fop_r] + 1;
+                if (dut.x87.fast_valid && dut.x87.fast_ready) begin
+                    fast_x87_load_count <= fast_x87_load_count + 1;
+                    fast_x87_load_fop_count[dut.i.immediate[10:0]] <=
+                        fast_x87_load_fop_count[dut.i.immediate[10:0]] + 1;
                 end
                 if (!dut.x87_busy_n)
                     x87_control_busy_cycles <= x87_control_busy_cycles + 1;
-                if (dut.gen_x87.control.executor.busy)
+                if (dut.x87.gen_x87.control.executor.busy)
                     x87_executor_busy_cycles <= x87_executor_busy_cycles + 1;
                 if (dut.stall_wio)
                     x87_wait_stall_cycles <= x87_wait_stall_cycles + 1;
@@ -114,18 +114,18 @@ module tb_protected_mode #(
     generate
     if (ENABLE_X87) begin : gen_snapshot_x87_init
         always @(load_snapshot_x87_state) begin
-            dut.gen_x87.control.control_word = x87_control_arg;
-            dut.gen_x87.control.status_flags = x87_status_arg;
-            dut.gen_x87.control.top = x87_top_arg;
-            dut.gen_x87.control.tag_word = x87_tag_arg;
-            dut.gen_x87.control.stack_mem.mem[0] = x87_fpr_arg[0];
-            dut.gen_x87.control.stack_mem.mem[1] = x87_fpr_arg[1];
-            dut.gen_x87.control.stack_mem.mem[2] = x87_fpr_arg[2];
-            dut.gen_x87.control.stack_mem.mem[3] = x87_fpr_arg[3];
-            dut.gen_x87.control.stack_mem.mem[4] = x87_fpr_arg[4];
-            dut.gen_x87.control.stack_mem.mem[5] = x87_fpr_arg[5];
-            dut.gen_x87.control.stack_mem.mem[6] = x87_fpr_arg[6];
-            dut.gen_x87.control.stack_mem.mem[7] = x87_fpr_arg[7];
+            dut.x87.gen_x87.control.control_word = x87_control_arg;
+            dut.x87.gen_x87.control.status_flags = x87_status_arg;
+            dut.x87.gen_x87.control.top = x87_top_arg;
+            dut.x87.gen_x87.control.tag_word = x87_tag_arg;
+            dut.x87.gen_x87.control.stack_mem.mem[0] = x87_fpr_arg[0];
+            dut.x87.gen_x87.control.stack_mem.mem[1] = x87_fpr_arg[1];
+            dut.x87.gen_x87.control.stack_mem.mem[2] = x87_fpr_arg[2];
+            dut.x87.gen_x87.control.stack_mem.mem[3] = x87_fpr_arg[3];
+            dut.x87.gen_x87.control.stack_mem.mem[4] = x87_fpr_arg[4];
+            dut.x87.gen_x87.control.stack_mem.mem[5] = x87_fpr_arg[5];
+            dut.x87.gen_x87.control.stack_mem.mem[6] = x87_fpr_arg[6];
+            dut.x87.gen_x87.control.stack_mem.mem[7] = x87_fpr_arg[7];
         end
     end
     endgenerate
@@ -497,7 +497,7 @@ module tb_protected_mode #(
         for (int i = 0; i < 2048; i++)
             x87_fop_count[i] = 0;
         for (int i = 0; i < 2048; i++)
-            x87_direct_load_fop_count[i] = 0;
+            fast_x87_load_fop_count[i] = 0;
 
         // Get max cycles
         if ($value$plusargs("cycles=%d", max_cycles))
@@ -752,7 +752,7 @@ module tb_protected_mode #(
                 $display("  CPI: %f", instruction_count ?
                          real'(cycle) / real'(instruction_count) : 0.0);
                 $display("  x87 commands: %0d", x87_command_count);
-                $display("  x87 direct loads: %0d", x87_direct_load_count);
+                $display("  x87 FAST loads: %0d", fast_x87_load_count);
                 $display("  x87 control busy cycles: %0d", x87_control_busy_cycles);
                 $display("  x87 executor busy cycles: %0d", x87_executor_busy_cycles);
                 $display("  x87 WAIT stall cycles: %0d", x87_wait_stall_cycles);
@@ -760,9 +760,9 @@ module tb_protected_mode #(
                     for (int i = 0; i < 2048; i++) begin
                         if (x87_fop_count[i] != 0)
                             $display("X87_FOP protocol %03x %0d", i, x87_fop_count[i]);
-                        if (x87_direct_load_fop_count[i] != 0)
+                        if (fast_x87_load_fop_count[i] != 0)
                             $display("X87_FOP direct-load %03x %0d", i,
-                                     x87_direct_load_fop_count[i]);
+                                     fast_x87_load_fop_count[i]);
                     end
                 end
                 $display("  FNV64[%08x+%08x]: %016x",

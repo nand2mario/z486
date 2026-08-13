@@ -19,10 +19,7 @@ module segmentation_unit
     input      [31:0]  desc_lo,            // Descriptor low DWORD (from TMPC)
     input      [31:0]  desc_hi,            // Descriptor high DWORD (saved at PTOVRR)
     input      [15:0]  slctr,              // SLCTR register (null selector check for SDEL)
-    input              copy_stack_dpl_s2,  // Write descriptor DPL into SS cache
-    input      [1:0]   copy_dpl_s2,        // DPL value to write
-    input              conform_dpl_s2,     // Update CS.DPL to effective CPL
-    input      [1:0]   conform_dpl_value_s2, // Effective CPL to preserve for conforming code
+    input prot_transition_t transition,    // Protection-driven descriptor updates
 
     output seg_desc_t  desc_cache [0:7],   // ES..GS, TR, and LDTR hidden descriptors
     output logic [31:0] idt_base,
@@ -429,11 +426,11 @@ always_ff @(posedge clk) begin
             default: ;
         endcase
 
-        if (copy_stack_dpl_s2)
-            desc_cache[2].DPL <= copy_dpl_s2;
+        if (transition.copy_stack_dpl)
+            desc_cache[2].DPL <= transition.copy_dpl;
 
-        if (conform_dpl_s2)
-            desc_cache[1].DPL <= conform_dpl_value_s2;
+        if (transition.conform_dpl)
+            desc_cache[1].DPL <= transition.conform_dpl_value;
     end
 end
 

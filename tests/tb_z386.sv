@@ -209,11 +209,12 @@ module tb_z386 #(
             #1;
             k = 0;
             while (k < 64 &&
-                   (dut.dcache_inst.storeq_count != 0 ||
-                    dut.dcache_inst.storeq_draining ||
-                    dut.dcache_inst.mem_valid_r ||
-                    dut.dcache_direct_req ||
-                    (dut.ext_valid_r && dut.ext_write_r))) begin
+                   (dut.memory_inst.dcache_inst.storeq_count != 0 ||
+                    dut.memory_inst.dcache_inst.storeq_draining ||
+                    dut.memory_inst.dcache_inst.mem_valid_r ||
+                    dut.memory_inst.dcache_direct_req ||
+                    (dut.memory_inst.ext_valid_r &&
+                     dut.memory_inst.ext_write_r))) begin
                 @(posedge clk);
                 #1;
                 k++;

@@ -29,13 +29,19 @@ X87_RTL := $(X87_DIR)/x87_pkg.sv \
 			$(X87_DIR)/x87_transfer_fifo.sv \
 			$(X87_DIR)/x87_stack_mem.sv \
 			$(X87_DIR)/x87_command_rom.sv \
-			$(X87_DIR)/x87_control.sv
+			$(X87_DIR)/x87_control.sv \
+			$(X87_DIR)/x87_unit.sv
 
 RTL_SRCS := $(Z386_DIR)/z386_pkg.sv $(X87_DIR)/x87_pkg.sv \
-			$(X87_DIR)/x87_ucode_pkg.sv $(Z386_DIR)/z386.sv $(Z386_DIR)/decoder.sv \
-			$(Z386_DIR)/alu.sv $(Z386_DIR)/biu.sv $(Z386_DIR)/prefetch.sv \
+			$(X87_DIR)/x87_ucode_pkg.sv $(Z386_DIR)/z386.sv \
+			$(Z386_DIR)/cpu_throttle.sv $(Z386_DIR)/interrupt_controller.sv \
+			$(Z386_DIR)/ucode_rom.sv $(Z386_DIR)/microsequencer.sv $(Z386_DIR)/fast_issue.sv \
+			$(Z386_DIR)/data_unit.sv $(Z386_DIR)/address_unit.sv \
+			$(Z386_DIR)/shifter.sv $(Z386_DIR)/mul_div.sv \
+			$(Z386_DIR)/decoder.sv \
+			$(Z386_DIR)/alu.sv $(Z386_DIR)/prefetch.sv \
 			$(Z386_DIR)/paging_unit.sv $(Z386_DIR)/paging_tlb.sv $(Z386_DIR)/paging_walker.sv \
-			$(Z386_DIR)/l1_cache.sv $(Z386_DIR)/l1_icache.sv \
+			$(Z386_DIR)/memory.sv $(Z386_DIR)/l1_cache.sv $(Z386_DIR)/l1_icache.sv \
 			$(filter-out $(X87_DIR)/x87_pkg.sv $(X87_DIR)/x87_ucode_pkg.sv,$(X87_RTL)) \
 			$(Z386_DIR)/dsp_mul.sv $(Z386_DIR)/protection.sv $(Z386_DIR)/segmentation_unit.sv
 RTL_DEPS := $(Z386_DIR)/ucode_recipes.svh $(X87_GEN)

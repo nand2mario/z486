@@ -8,20 +8,14 @@ module protection_unit
     input               reset_n,
     input               pipe_en,          // Pipeline advance enable (matches ROM latch condition)
 
-    // Test Control (alu_src field of microcode)
-    input        [5:0]  test_const,       // Test constant (ABCDEF field), selects protection test type
-    input        [3:0]  aluop_type,       // Lower 4 bits of aluop (TUVWXYZ[3:0]), controls Tiny PLA mux
-
-    // Narrowed descriptor attribute bundle used by the protection datapath.
-    // This avoids forwarding an entire 32-bit descriptor word when only a
-    // small subset of bits participates in the critical path.
-    input               descriptor_g,
-    input               descriptor_p,
-    input        [1:0]  descriptor_dpl,
-    input               descriptor_s,
-    input        [3:0]  descriptor_type,
-    input        [1:0]  descriptor_rpl,
-    input               descriptor_low16_nonzero,
+    // Current microcode operation and narrow source value.
+    input               uc_exec,
+    input               uc_exec_writeback,
+    input        [6:0]  uc_aluop,
+    input        [5:0]  uc_alu_src,
+    input        [6:0]  uc_dest,
+    input       [31:0]  uc_source_value,
+    input       [31:0]  opr_r,
 
     // Selector fields (from segment register or temp register)
     input        [1:0]  selector_rpl,     // Requested Privilege Level (bits[1:0])
@@ -31,6 +25,7 @@ module protection_unit
 
     // Processor State
     input        [1:0]  cpl,              // Current Privilege Level
+    input        [1:0]  transition_rpl,   // SLCTR RPL during an outer-level transition
     input               pe_mode,          // Protected mode enabled (CR0.PE)
 
     // CR0 flags for FPU tests (multiplexed into state vector)
@@ -39,11 +34,12 @@ module protection_unit
     input               cr0_em,           // CR0.EM (Emulation)
     input               cr0_mp,           // CR0.MP (Monitor Coprocessor)
 
-    // ARPL support: latched source RPL from READ_RPL
-    input        [1:0]  arpl_rpl,         // Source selector RPL (latched by READ_RPL at uc=6B6)
+    // Current CS descriptor facts used by PTGEN transition commands.
+    input        [1:0]  cs_descriptor_dpl,
+    input               cs_descriptor_exec,
+    input               cs_descriptor_conforming,
+    input        [1:0]  cs_selector_rpl,
 
-
-    input               test_en,          // Enable protection test
 
     // Test mode for verification (bypasses Tiny PLA preprocessing)
     input               test_mode,        // 1 = Direct state vector mode (for testbench)
@@ -58,14 +54,88 @@ module protection_unit
     output              jump_valid,       // jump_addr is a redirect (vs 0x000 = CONTINUE)
 
     output              validation_ok,    // M flag: Descriptor validated, safe to commit
+    output              result_valid,     // Pipelined result is valid (fires 2 cycles after test)
 
-    output              result_valid      // Pipelined result is valid (fires 2 cycles after test)
+    // Protection-owned architectural and pipeline state
+    output       [31:0] protun_value,
+    output       [31:0] desc_raw_hi,
+    output        [1:0] descriptor_dpl_live,
+    output              test_inflight,
+    output              result_now,
+    output              redirect_taken,
+    output              redirect_prev,
+    output              is_ptovrr,
+
+    // Protection transition commands and effective privilege state.
+    output       [1:0]  effective_cpl,
+    output prot_transition_t transition
 );
 
 //==============================================================================
 // Internal Signals
 //==============================================================================
 // Protection test constants are now defined in z386_pkg.sv
+
+logic [31:0] protun_r;
+logic [31:0] desc_raw_hi_r;
+logic  [5:0] saved_test_const_r;
+logic        test_inflight_r;
+logic        redirect_prev_r;
+logic [1:0]  arpl_rpl_r;
+logic        set_rpl_s1, set_rpl_s2;
+logic        copy_stack_dpl_s1, copy_stack_dpl_s2;
+logic [1:0]  copy_dpl_s1, copy_dpl_s2;
+logic        conform_dpl_s1, conform_dpl_s2;
+logic [1:0]  conform_dpl_value_s1, conform_dpl_value_s2;
+logic        write_rpl_s1, write_rpl_s2;
+logic        arpl_update_s1, arpl_update_s2;
+logic        cpl_transition_r;
+
+wire is_6x = (uc_aluop[6:4] == 3'b110);
+wire is_ptsav = is_6x && !uc_aluop[3];
+assign is_ptovrr = (uc_aluop == ALUJMP_PTOVRR);
+wire [5:0] test_const = is_ptovrr ? saved_test_const_r : uc_alu_src;
+wire [3:0] aluop_type = uc_aluop[3:0];
+wire is_fpu_test = test_const[5] && test_const[4] &&
+                   (test_const[3] || test_const[2]);
+wire test_en = uc_exec && is_6x && !is_ptsav &&
+               (pe_mode || is_fpu_test);
+
+wire protun_writing = uc_exec && (uc_dest == DEST_PROTUN);
+wire set_accessed = pe_mode && uc_exec && is_ptovrr;
+wire [31:0] protun_next = (set_accessed && uc_source_value[12])
+                           ? (uc_source_value | 32'h0000_0100)
+                           : uc_source_value;
+wire [31:0] protun_fwd = protun_writing ? protun_next : protun_r;
+wire [31:0] descriptor_value = is_ptovrr ? opr_r :
+                               (uc_alu_src == TST_DES_GRANUL)
+                                   ? desc_raw_hi_r : protun_fwd;
+
+wire       descriptor_g = descriptor_value[23];
+wire       descriptor_p = descriptor_value[15];
+wire [1:0] descriptor_dpl = descriptor_value[14:13];
+wire       descriptor_s = descriptor_value[12];
+wire [3:0] descriptor_type = descriptor_value[11:8];
+wire [1:0] descriptor_rpl = descriptor_value[1:0];
+wire       descriptor_low16_nonzero = |descriptor_value[15:0];
+
+assign protun_value = protun_r;
+assign desc_raw_hi = desc_raw_hi_r;
+assign descriptor_dpl_live = descriptor_dpl;
+assign test_inflight = test_inflight_r;
+assign result_now = result_valid && test_inflight_r;
+assign redirect_taken = uc_exec && result_now && jump_valid;
+assign redirect_prev = redirect_prev_r;
+wire [1:0] cpl_live = cpl_transition_r ? transition_rpl : cpl;
+
+assign effective_cpl = cpl_live;
+assign transition.set_rpl_redirect = set_rpl_s2;
+assign transition.copy_stack_dpl = copy_stack_dpl_s2;
+assign transition.copy_dpl = copy_dpl_s2;
+assign transition.conform_dpl = conform_dpl_s2;
+assign transition.conform_dpl_value = conform_dpl_value_s2;
+assign transition.write_rpl = write_rpl_s2;
+assign transition.active = cpl_transition_r;
 
 // Combinational Tiny PLA outputs (computed same cycle as test)
 logic [9:0] state_vector_comb;
@@ -166,21 +236,21 @@ always_comb begin
             // SPTR sets the descriptor cache pointer but doesn't pre-read the GDT entry,
             // so no descriptor DPL is available. The actual descriptor privilege check
             // happens later in PTOVRR inside LD_DESCRIPTOR.
-            p1_comb = (selector_rpl < cpl);     // violation when RPL < CPL
-            p2_comb = ~(selector_rpl != cpl);   // 1=match, 0=mismatch
+            p1_comb = (selector_rpl < cpl_live);     // violation when RPL < CPL
+            p2_comb = ~(selector_rpl != cpl_live);   // 1=match, 0=mismatch
         end else if (aluop_type == 4'hF) begin   // PTF
             // PTF (0x6F): direct privilege comparison using CPL vs DPL.
             // Used by TST_DES_RTOLOS (null segment if CPL > DPL),
             // TST_DES_INT_SW (!p1 = CPL <= DPL for software INT gate validation),
             // and others (INT_HW, GRANUL, READ_RPL, COPY_STACK_DPL) that don't check p1/p2.
-            p1_comb = (cpl > desc_dpl);          // privilege violation
-            p2_comb = (desc_dpl == cpl);          // same privilege level
+            p1_comb = (cpl_live > desc_dpl);          // privilege violation
+            p2_comb = (desc_dpl == cpl_live);          // same privilege level
         end else if (aluop_type == 4'hA) begin   // PTSELA
             // PTSELA (0x6A): selector-only test — no descriptor available yet.
             // Used by TST_SEL_MOREPR (uc=607), TST_SEL_GDT (uc=667), etc.
             // Compare selector RPL against CPL only (no DPL).
-            p1_comb = (selector_rpl > cpl);     // Not used by current PLA4 terms for PTSELA
-            p2_comb = ~(selector_rpl != cpl);   // 1=match (RPL == CPL), 0=mismatch
+            p1_comb = (selector_rpl > cpl_live);     // Not used by current PLA4 terms for PTSELA
+            p2_comb = ~(selector_rpl != cpl_live);   // 1=match (RPL == CPL), 0=mismatch
         end else if (aluop_type == 4'h8) begin   // PTOVRR
             // TSTDES (0x68): inside LD_DESCRIPTOR — descriptor privilege check p1: RPL vs DPL violation (0=ok, 1=violation) p2: DPL vs CPL match...
             // Details: doc/z386x/implementation_notes.md#src-24-z386x-protection-sv-208
@@ -188,11 +258,11 @@ always_comb begin
                 p1_comb = (desc_dpl > selector_rpl);
             else
                 p1_comb = (selector_rpl > desc_dpl);
-            p2_comb = ~(desc_dpl != cpl);
+            p2_comb = ~(desc_dpl != cpl_live);
         end else begin
             // TSTGT, TSTGT2, TSTPM, TSTPRV, TSTINT, TSTJ, etc.
-            p1_comb = (selector_rpl > desc_dpl) | (cpl > desc_dpl);
-            p2_comb = ~((selector_rpl != cpl) | (desc_dpl != cpl));
+            p1_comb = (selector_rpl > desc_dpl) | (cpl_live > desc_dpl);
+            p2_comb = ~((selector_rpl != cpl_live) | (desc_dpl != cpl_live));
         end
 
         // Check if this is an FPU test (test_const 0x34-0x3F)
@@ -272,9 +342,9 @@ always_ff @(posedge clk) begin
         s1_valid <= test_en;
         s1_is_checking_test <= s0_is_checking;
         s1_test_const <= test_const;
-        s1_arpl_rpl <= arpl_rpl;
+        s1_arpl_rpl <= arpl_rpl_r;
         s1_desc_rpl <= descriptor_rpl;
-        s1_cpl <= cpl;
+        s1_cpl <= cpl_live;
         s1_desc_dpl <= desc_dpl;
         s1_desc_low16_nonzero <= descriptor_low16_nonzero;
         s1_selector_oob <= selector_oob;
@@ -1225,6 +1295,100 @@ assign jump_addr      = s2_jump_addr;
 assign jump_valid     = s2_jump_valid;
 assign validation_ok  = s2_flags[1];  // M flag (bit 15)
 assign result_valid   = s2_valid;
+
+// PTGEN/PTSELA side effects advance with the same enable as the PLA pipeline.
+// Outputs are explicit architectural/cache commands consumed at stage 2.
+always_ff @(posedge clk) begin
+    if (!reset_n) begin
+        arpl_rpl_r <= 2'b00;
+        set_rpl_s1 <= 1'b0;
+        set_rpl_s2 <= 1'b0;
+        copy_stack_dpl_s1 <= 1'b0;
+        copy_stack_dpl_s2 <= 1'b0;
+        copy_dpl_s1 <= 2'b00;
+        copy_dpl_s2 <= 2'b00;
+        conform_dpl_s1 <= 1'b0;
+        conform_dpl_s2 <= 1'b0;
+        conform_dpl_value_s1 <= 2'b00;
+        conform_dpl_value_s2 <= 2'b00;
+        write_rpl_s1 <= 1'b0;
+        write_rpl_s2 <= 1'b0;
+        arpl_update_s1 <= 1'b0;
+        arpl_update_s2 <= 1'b0;
+        cpl_transition_r <= 1'b0;
+    end else if (pipe_en) begin
+        set_rpl_s1 <= uc_exec && pe_mode &&
+            (uc_aluop == ALUJMP_PTGEN) && (uc_alu_src == 6'h2D) &&
+            (cs_descriptor_dpl != cpl) &&
+            !(cs_descriptor_exec && cs_descriptor_conforming);
+        set_rpl_s2 <= set_rpl_s1;
+
+        conform_dpl_s1 <= uc_exec && pe_mode &&
+            (uc_aluop == ALUJMP_PTGEN) && (uc_alu_src == 6'h2D) &&
+            cs_descriptor_exec && cs_descriptor_conforming;
+        conform_dpl_s2 <= conform_dpl_s1;
+        conform_dpl_value_s1 <= cs_selector_rpl;
+        conform_dpl_value_s2 <= conform_dpl_value_s1;
+
+        copy_stack_dpl_s1 <= uc_exec && pe_mode &&
+            (uc_aluop == ALUJMP_PTGEN) && (uc_alu_src == 6'h2E);
+        copy_stack_dpl_s2 <= copy_stack_dpl_s1;
+        copy_dpl_s1 <= descriptor_dpl;
+        copy_dpl_s2 <= copy_dpl_s1;
+
+        write_rpl_s1 <= uc_exec && pe_mode &&
+            (uc_aluop == ALUJMP_PTGEN) && (uc_alu_src == 6'h2C);
+        write_rpl_s2 <= write_rpl_s1;
+
+        if (uc_exec && pe_mode && (uc_aluop == ALUJMP_PTSELA) &&
+            (uc_alu_src == 6'h2B))
+            arpl_rpl_r <= uc_source_value[1:0];
+        arpl_update_s1 <= uc_exec && pe_mode &&
+            (uc_aluop == ALUJMP_PTSELA) && (uc_alu_src == 6'h05);
+        arpl_update_s2 <= arpl_update_s1;
+
+        if (result_now && jump_valid && (jump_addr == 12'h686))
+            cpl_transition_r <= 1'b1;
+        if (write_rpl_s2)
+            cpl_transition_r <= 1'b1;
+        if (copy_stack_dpl_s2)
+            cpl_transition_r <= 1'b0;
+    end
+end
+
+// Protection register and command-pipeline ownership. These registers form a
+// single domain with the PLA result pipeline and therefore live here rather
+// than beside the microsequencer.
+always_ff @(posedge clk) begin
+    if (!reset_n) begin
+        protun_r <= 32'h0;
+        desc_raw_hi_r <= 32'h0;
+        saved_test_const_r <= 6'h0;
+        test_inflight_r <= 1'b0;
+        redirect_prev_r <= 1'b0;
+    end else begin
+        if (protun_writing)
+            protun_r <= protun_next;
+        else if (uc_exec && arpl_update_s2 && validation_ok)
+            protun_r[1:0] <= arpl_rpl_r;
+
+        if (uc_exec_writeback) begin
+            if (is_6x && pe_mode) begin
+                if (is_ptsav)
+                    saved_test_const_r <= uc_alu_src;
+                if (is_ptovrr)
+                    desc_raw_hi_r <= opr_r;
+            end
+
+            if (test_en)
+                test_inflight_r <= 1'b1;
+            else if (result_now)
+                test_inflight_r <= 1'b0;
+
+            redirect_prev_r <= redirect_taken;
+        end
+    end
+end
 
 //==============================================================================
 // Assertions and Debug

@@ -27,8 +27,8 @@ always #5 clk = ~clk;
 x87_control dut (
     .clk(clk), .reset(reset),
     .cmd_valid(cmd_valid), .cmd_fop(cmd_fop), .cmd_ready(cmd_ready),
-    .direct_m32_valid(1'b0), .direct_m32_fop(11'h000),
-    .direct_m32_data(32'h0), .direct_m32_ready(),
+    .fast_m32_valid(1'b0), .fast_m32_fop(11'h000),
+    .fast_m32_data(32'h0), .fast_m32_ready(),
     .word_in_valid(word_in_valid), .word_in_be(word_in_be),
     .word_in_data(word_in_data), .word_in_ready(word_in_ready),
     .read_req_valid(read_req_valid), .read_req_data_port(read_req_data_port),

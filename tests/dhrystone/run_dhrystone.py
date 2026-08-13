@@ -30,7 +30,6 @@ COMMON_RTL = [
     "ucode_rom.sv",
     "z386.sv",
     "alu.sv",
-    "biu.sv",
     "paging_unit.sv",
     "paging_tlb.sv",
     "paging_walker.sv",
@@ -163,6 +162,15 @@ def build_memory_image() -> None:
 def rtl_sources(core: str, core_dir: Path) -> list[Path]:
     names = COMMON_RTL.copy()
     names += CORE_RTL[core]
+    for optional_name in (
+        "cpu_throttle.sv",
+        "interrupt_controller.sv",
+        "shifter.sv",
+        "mul_div.sv",
+        "biu.sv",
+    ):
+        if (core_dir / optional_name).exists():
+            names.append(optional_name)
     sources = [core_dir / name for name in names]
     x87_dir = core_dir / "x87"
     legacy_x87_dir = core_dir / "x87_v1"
@@ -171,6 +179,8 @@ def rtl_sources(core: str, core_dir: Path) -> list[Path]:
         sources.insert(1, x87_dir / "x87_pkg.sv")
         sources.insert(2, x87_dir / "x87_ucode_pkg.sv")
         sources.extend(x87_dir / name for name in X87_RTL)
+        if (x87_dir / "x87_unit.sv").exists():
+            sources.append(x87_dir / "x87_unit.sv")
     elif (legacy_x87_dir / "x87_pkg.sv").exists():
         # The package must precede z386.sv; implementation modules may follow.
         sources.insert(1, legacy_x87_dir / "x87_pkg.sv")
@@ -182,7 +192,7 @@ def rtl_sources(core: str, core_dir: Path) -> list[Path]:
             optional_src = core_dir / optional_name
             if optional_src.exists():
                 sources.append(optional_src)
-    for optional_name in ("l1_cache.sv", "l1_icache.sv"):
+    for optional_name in ("memory.sv", "l1_cache.sv", "l1_icache.sv"):
         optional_src = core_dir / optional_name
         if optional_src.exists():
             sources.append(optional_src)

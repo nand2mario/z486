@@ -127,6 +127,7 @@ end
 decoder_work_t handoff_d2;
 always_comb begin
     handoff_d2 = handoff_work;
+    handoff_d2.entry.entry_point = recipe_effective_entry(handoff_work.entry);
     {handoff_d2.entry.ea_index_onehot, handoff_d2.entry.ea_base_onehot} =
         dec_ea_onehots(handoff_work.entry);
     handoff_d2.entry.mem_seg = handoff_work.entry.stack_op ? SEG_SS :
@@ -174,7 +175,7 @@ wire handoff_raw_valid = (d1_avail >= handoff_raw_end);
 // Launch the synchronous ROM as soon as structural decode owns an empty D2.
 // D2 holds the returned word while late or second literals are captured.
 assign d1_issue_direct = d1_handoff && !skel_v;
-assign d1_issue_entry_point = handoff_work.entry.entry_point;
+assign d1_issue_entry_point = handoff_d2.entry.entry_point;
 always_comb begin
     d1_issue_entry = handoff_d2.entry;
 end
@@ -487,7 +488,10 @@ reg recipe_cov_en = 1'b0;
 initial recipe_cov_en = $test$plusargs("recipe_cov");
 always @(posedge clk) begin
     if (reset_n && d2_done) begin
-        if (push_recipe_fc !== push_legacy_fc)
+        // Extension overlays add FAST classes that have no legacy opcode
+        // classifier counterpart; their generated recipe is authoritative.
+        if ((recipe_action(push_entry.entry_point) == RECIPE_ACTION_NONE) &&
+            (push_recipe_fc !== push_legacy_fc))
             $fatal(1, "FAST recipe classifier mismatch: entry=%03x opcode=%02x modrm=%02x old=%04x new=%04x",
                    push_entry.entry_point, push_entry.opcode, push_entry.modrm,
                    push_legacy_fc, push_recipe_fc);
