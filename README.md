@@ -4,7 +4,10 @@
 z486 is an 80486-class pipelined CPU core written in SystemVerilog. A fast
 frontend and hardwired implementations handle common instructions, while a
 microcoded control engine handles complex x86 operations. The core also includes
-fixed-clock speed control and a microcoded x87 floating-point unit.
+a microcoded x87 floating-point unit.
+
+In the z486_MiSTer system, the core runs the Doom timedemo at 29.1 FPS at
+maximum detail, compared with 21.0 FPS on ao486 using the same MiSTer setup.
 
 The separate [z386](https://github.com/nand2mario/z386) repository remains the
 80386-faithful implementation. This repository contains the faster extended
