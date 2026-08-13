@@ -85,6 +85,7 @@ logic [67:0] arithmetic_result;
 logic [1:0] operand_magnitude;
 logic fild_shift_four;
 logic fist_shift_four;
+logic addsub_shift_four;
 logic work_shift_four;
 logic [105:0] mul_product;
 logic [53:0] mul_p00;
@@ -93,8 +94,9 @@ logic [53:0] mul_p10;
 logic [53:0] mul_p11;
 logic [28:0] mul_limb1_r;
 logic [28:0] mul_limb2_r;
+logic [28:0] mul_limb1_sum;
+logic [28:0] mul_limb2_sum;
 logic [26:0] mul_top_sum;
-logic [1:0] mul_partial_r;
 logic [14:0] mul_exp_r;
 logic mul_result_sign_r;
 logic [52:0] divsqrt_divisor_r;
@@ -207,6 +209,8 @@ assign fild_shift_four = (exec_op == X87_CONVERT_FILD) &&
                          (work_r[51:48] == 4'b0000);
 assign fist_shift_four = (exec_op == X87_CONVERT_FIST) &&
                          (count_r >= 6'd4);
+assign addsub_shift_four =
+    (uop.engine == X87_ENGINE_ADDSUB_ALIGN) && (count_r >= 6'd4);
 assign work_shift_four = fild_shift_four || fist_shift_four;
 assign format_m32 = (exec_op == X87_CONVERT_FLD_M32) ||
                     (exec_op == X87_CONVERT_FST_M32);
@@ -239,6 +243,13 @@ assign mul_p00 = operand.sig[26:0] * operand_b.sig[26:0];
 assign mul_p01 = operand.sig[26:0] * operand_b.sig[52:27];
 assign mul_p10 = operand.sig[52:27] * operand_b.sig[26:0];
 assign mul_p11 = operand.sig[52:27] * operand_b.sig[52:27];
+assign mul_limb1_sum = {2'b0, mul_p00[53:27]} +
+                       {2'b0, mul_p01[26:0]} +
+                       {2'b0, mul_p10[26:0]};
+assign mul_limb2_sum = {2'b0, mul_p01[53:27]} +
+                       {2'b0, mul_p10[53:27]} +
+                       {2'b0, mul_p11[26:0]} +
+                       {{27{1'b0}}, mul_limb1_r[28:27]};
 assign mul_top_sum = mul_p11[53:27] +
                      {{25{1'b0}}, mul_limb2_r[28:27]};
 assign mul_product = {mul_top_sum[24:0],
@@ -531,7 +542,8 @@ always_comb begin
     conditions[X87_COND_SUBUNIT] = subunit_r;
     conditions[X87_COND_COUNT_MORE] = trans_operation
         ? (trans_count_r > 8'd1)
-        : ((exec_op == X87_CONVERT_FIST) && fist_shift_four)
+        : (((exec_op == X87_CONVERT_FIST) && fist_shift_four) ||
+           addsub_shift_four)
         ? (count_r > 6'd4) : (count_r > 6'd1);
     conditions[X87_COND_TRANSFER_READY] = 1'b1;
     conditions[X87_COND_ZERO] = trans_operation
@@ -556,6 +568,10 @@ always_comb begin
         cordic_load_index_r != 4'd8;
     conditions[X87_COND_CORDIC_ALIGN_MORE] =
         cordic_limb_r != 2'd0;
+    conditions[X87_COND_ARITH_DIRECT] =
+        is_nan(operand) || is_nan(operand_b) ||
+        is_infinity(operand) || is_infinity(operand_b) ||
+        is_zero(operand) || is_zero(operand_b);
 end
 
 x87_sequencer sequencer (
@@ -785,8 +801,10 @@ always_ff @(posedge clk) begin
                 default: ;
             endcase
 
-            if ((uop.count == X87_COUNT_DEC) && !trans_operation)
-                count_r <= count_r - (fist_shift_four ? 6'd4 : 6'd1);
+            if ((uop.count == X87_COUNT_DEC) && !trans_operation &&
+                (count_r != 6'd0))
+                count_r <= count_r -
+                    ((fist_shift_four || addsub_shift_four) ? 6'd4 : 6'd1);
 
             if ((uop.grs == X87_GRS_SHIFT) &&
                 (uop.shift_route == X87_SHIFT_RIGHT)) begin
@@ -1083,20 +1101,39 @@ always_ff @(posedge clk) begin
                         work_r <= {11'h0, 1'b0, work_r[56:2],
                                    work_r[1] | work_r[0]};
                     end else if (!work_r[55]) begin
-                        work_r <= work_r << 1;
+                        work_r <= (work_r[55:52] == 4'h0)
+                                ? work_r << 4 : work_r << 1;
                     end
                 end
 
                 X87_ALU_PREP_ROUND_ADDSUB: begin
+                    logic [67:0] prepared_work;
+                    logic prepared_guard;
+                    logic prepared_sticky;
+                    logic prepared_increment;
+
                     if (precision_control == 2'b00) begin
-                        work_r <= {44'h0, work_r[55:32]};
-                        guard_r <= work_r[31];
-                        sticky_r <= |work_r[30:0];
+                        prepared_work = {44'h0, work_r[55:32]};
+                        prepared_guard = work_r[31];
+                        prepared_sticky = |work_r[30:0];
                     end else begin
-                        work_r <= {15'h0, work_r[55:3]};
-                        guard_r <= work_r[2];
-                        sticky_r <= |work_r[1:0];
+                        prepared_work = {15'h0, work_r[55:3]};
+                        prepared_guard = work_r[2];
+                        prepared_sticky = |work_r[1:0];
                     end
+                    prepared_increment =
+                        (rounding_mode == 2'b00)
+                            ? prepared_guard &&
+                              (prepared_sticky || prepared_work[0])
+                            : directed_increment(
+                                add_result_sign_r, rounding_mode,
+                                prepared_guard || prepared_sticky);
+                    work_r <= prepared_work +
+                              {{67{1'b0}}, prepared_increment};
+                    guard_r <= prepared_guard;
+                    sticky_r <= prepared_sticky;
+                    inexact <= prepared_guard || prepared_sticky;
+                    rounded_up <= prepared_increment;
                 end
 
                 X87_ALU_PREP_ROUND_MUL: begin
@@ -1104,6 +1141,10 @@ always_ff @(posedge clk) begin
                     logic normalized_guard;
                     logic normalized_round;
                     logic normalized_sticky;
+                    logic [67:0] prepared_work;
+                    logic prepared_guard;
+                    logic prepared_sticky;
+                    logic prepared_increment;
 
                     if (mul_product[105]) begin
                         normalized_sig = mul_product[105:53];
@@ -1119,16 +1160,31 @@ always_ff @(posedge clk) begin
 
                     round_r <= 1'b0;
                     if (precision_control == 2'b00) begin
-                        work_r <= {44'h0, normalized_sig[52:29]};
-                        guard_r <= normalized_sig[28];
-                        sticky_r <= |normalized_sig[27:0] ||
-                                    normalized_guard || normalized_round ||
-                                    normalized_sticky;
+                        prepared_work = {44'h0, normalized_sig[52:29]};
+                        prepared_guard = normalized_sig[28];
+                        prepared_sticky = |normalized_sig[27:0] ||
+                                          normalized_guard ||
+                                          normalized_round ||
+                                          normalized_sticky;
                     end else begin
-                        work_r <= {15'h0, normalized_sig};
-                        guard_r <= normalized_guard;
-                        sticky_r <= normalized_round || normalized_sticky;
+                        prepared_work = {15'h0, normalized_sig};
+                        prepared_guard = normalized_guard;
+                        prepared_sticky = normalized_round ||
+                                          normalized_sticky;
                     end
+                    prepared_increment =
+                        (rounding_mode == 2'b00)
+                            ? prepared_guard &&
+                              (prepared_sticky || prepared_work[0])
+                            : directed_increment(
+                                mul_result_sign_r, rounding_mode,
+                                prepared_guard || prepared_sticky);
+                    work_r <= prepared_work +
+                              {{67{1'b0}}, prepared_increment};
+                    guard_r <= prepared_guard;
+                    sticky_r <= prepared_sticky;
+                    inexact <= prepared_guard || prepared_sticky;
+                    rounded_up <= prepared_increment;
                 end
 
                 X87_ALU_PREP_ROUND_DIVSQRT: begin
@@ -1669,15 +1725,22 @@ always_ff @(posedge clk) begin
         add_result_sign_r <= 1'b0;
         add_small_sign_r <= 1'b0;
     end else if (seq_exec_valid) begin
-        if (uop.engine == X87_ENGINE_ADDSUB_ALIGN)
-            add_small_r <= {1'b0, add_small_r[55:2],
-                            add_small_r[1] | add_small_r[0]};
+        if ((uop.engine == X87_ENGINE_ADDSUB_ALIGN) &&
+            (count_r != 6'd0)) begin
+            if (addsub_shift_four)
+                add_small_r <= {4'b0, add_small_r[55:5],
+                                |add_small_r[4:0]};
+            else
+                add_small_r <= {1'b0, add_small_r[55:2],
+                                add_small_r[1] | add_small_r[0]};
+        end
 
         if (uop.alu_route == X87_ALU_NORMALIZE_ADDSUB) begin
             if ((work_r[56:0] != 57'h0) && work_r[56])
                 add_exp_r <= add_exp_r + 15'd1;
             else if ((work_r[56:0] != 57'h0) && !work_r[55])
-                add_exp_r <= add_exp_r - 15'd1;
+                add_exp_r <= add_exp_r -
+                    ((work_r[55:52] == 4'h0) ? 15'd4 : 15'd1);
         end
 
         if (uop.prepare == X87_PREPARE_ADDSUB) begin
@@ -2134,13 +2197,12 @@ always_ff @(posedge clk) begin
     end
 end
 
-// Four radix-2^27 partial products run in parallel in DSPs. Two accumulation
-// microsteps propagate the limb carry and assemble the 106-bit result.
+// Four radix-2^27 partial products run in parallel in DSPs. The MUL prepare
+// step propagates the two limb carries and captures the middle 54 bits.
 always_ff @(posedge clk) begin
     if (reset) begin
         mul_limb1_r <= 29'h0;
         mul_limb2_r <= 29'h0;
-        mul_partial_r <= 2'd0;
         mul_exp_r <= 15'h0;
         mul_result_sign_r <= 1'b0;
     end else if (seq_exec_valid) begin
@@ -2151,21 +2213,7 @@ always_ff @(posedge clk) begin
             X87_ENGINE_MUL_ISSUE: ;
 
             X87_ENGINE_MUL_ACCUMULATE: begin
-                case (mul_partial_r)
-                    2'd0:
-                        mul_limb1_r <= {2'b0, mul_p00[53:27]} +
-                                      {2'b0, mul_p01[26:0]} +
-                                      {2'b0, mul_p10[26:0]};
-                    2'd1:
-                        mul_limb2_r <= {2'b0, mul_p01[53:27]} +
-                                      {2'b0, mul_p10[53:27]} +
-                                      {2'b0, mul_p11[26:0]} +
-                                      {{27{1'b0}}, mul_limb1_r[28:27]};
-                    default: ;
-                endcase
-                if (mul_partial_r != 2'd3) begin
-                    mul_partial_r <= mul_partial_r + 2'd1;
-                end
+                mul_limb2_r <= mul_limb2_sum;
             end
             default: ;
         endcase
@@ -2175,9 +2223,7 @@ always_ff @(posedge clk) begin
 
         if (uop.prepare == X87_PREPARE_MUL) begin
             mul_exp_r <= operand.exp + operand_b.exp - 15'h3fff;
-            mul_limb1_r <= 29'h0;
-            mul_limb2_r <= 29'h0;
-            mul_partial_r <= 2'd0;
+            mul_limb1_r <= mul_limb1_sum;
         end
     end
 end

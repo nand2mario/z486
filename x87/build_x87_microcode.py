@@ -36,6 +36,7 @@ COND = {
     "CORDIC_LIMB_MORE": 16,
     "CORDIC_LOAD_MORE": 17,
     "CORDIC_ALIGN_MORE": 18,
+    "ARITH_DIRECT": 19,
     # Operation-local aliases preserve the existing condition encoding. These values
     # are never tested by the same microprogram as their generic names.
     "TRANS_NEEDS_AUX": 3,
@@ -308,14 +309,11 @@ PROGRAM: list[ProgramItem] = [
                           side_effect="SET_STATUS")),
     (None, UOp(flow="JUMP", target="fist_commit")),
 
-    ("entry_addsub", UOp(src_a="OPERAND_A", src_b="OPERAND_B",
-                           classify="ADDSUB")),
-    (None, UOp(flow="BRANCH", target="addsub_commit",
-               condition="DIRECT_READY")),
-    (None, UOp(src_a="OPERAND_A", src_b="OPERAND_B",
-               prepare="ADDSUB", destination="WORK", count="LOAD")),
-    (None, UOp(flow="BRANCH", target="addsub_calculate",
-               condition="COUNT_ZERO")),
+    ("entry_addsub", UOp(flow="BRANCH", target="addsub_commit",
+                           condition="ARITH_DIRECT",
+                           src_a="OPERAND_A", src_b="OPERAND_B",
+                           classify="ADDSUB", prepare="ADDSUB",
+                           destination="WORK", count="LOAD")),
     ("addsub_align", UOp(flow="LOOP", target="addsub_align",
                           condition="COUNT_MORE", src_a="OPERAND_B",
                           engine="ADDSUB_ALIGN", count="DEC", grs="SHIFT")),
@@ -330,7 +328,6 @@ PROGRAM: list[ProgramItem] = [
                condition="DIRECT_READY")),
     (None, UOp(src_a="WORK", alu_route="PREP_ROUND_ADDSUB",
                destination="WORK", grs="LOAD")),
-    (None, UOp(src_a="WORK", alu_route="ROUND", destination="WORK")),
     (None, UOp(src_a="WORK", pack="PACK_ADDSUB", destination="RESULT")),
     ("addsub_commit", UOp(flow="FINISH", src_a="RESULT",
                            commit="REPLACE_ST0")),
@@ -340,21 +337,13 @@ PROGRAM: list[ProgramItem] = [
                            side_effect="SET_STATUS")),
     (None, UOp(flow="FINISH", side_effect="SET_STATUS")),
 
-    ("entry_mul", UOp(src_a="OPERAND_A", src_b="OPERAND_B",
-                       classify="MUL")),
-    (None, UOp(flow="BRANCH", target="mul_commit",
-               condition="DIRECT_READY")),
-    (None, UOp(src_a="OPERAND_A", src_b="OPERAND_B",
-               prepare="MUL", count="LOAD")),
-    ("mul_issue", UOp(src_a="OPERAND_A", src_b="OPERAND_B",
-                       engine="MUL_ISSUE")),
-    ("mul_accumulate", UOp(flow="LOOP", target="mul_issue",
-                            condition="COUNT_MORE",
-                            engine="MUL_ACCUMULATE", count="DEC")),
+    ("entry_mul", UOp(flow="BRANCH", target="mul_commit",
+                       condition="ARITH_DIRECT",
+                       src_a="OPERAND_A", src_b="OPERAND_B",
+                       classify="MUL", prepare="MUL")),
+    (None, UOp(engine="MUL_ACCUMULATE")),
     (None, UOp(alu_route="PREP_ROUND_MUL", destination="WORK",
                grs="LOAD")),
-    (None, UOp(src_a="WORK", alu_route="ROUND",
-               destination="WORK")),
     (None, UOp(src_a="WORK", pack="PACK_MUL",
                destination="RESULT")),
     ("mul_commit", UOp(flow="FINISH", src_a="RESULT",
@@ -510,7 +499,13 @@ def validate_horizontal_controls(address: int, uop: UOp) -> None:
         uop.classify != "HOLD",
         uop.state != "HOLD",
     )
-    if sum(major_lanes) > 1:
+    classify_prepare_pair = (
+        (uop.classify == "ADDSUB" and uop.prepare == "ADDSUB") or
+        (uop.classify == "MUL" and uop.prepare == "MUL")
+    )
+    if sum(major_lanes) > 1 and not (
+        classify_prepare_pair and sum(major_lanes) == 2
+    ):
         raise ValueError(f"multiple major resource lanes at {address:#x}")
 
     if (uop.shift_route in {"LEFT", "RIGHT", "FORMAT"} and

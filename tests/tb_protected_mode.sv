@@ -84,6 +84,8 @@ module tb_protected_mode #(
     longint x87_wait_stall_cycles = 0;
     longint x87_fop_count [0:2047];
     longint fast_x87_load_fop_count [0:2047];
+    longint x87_exec_start_count [0:15];
+    longint x87_exec_busy_count [0:15];
     event load_snapshot_x87_state;
 
     generate
@@ -104,6 +106,12 @@ module tb_protected_mode #(
                     x87_control_busy_cycles <= x87_control_busy_cycles + 1;
                 if (dut.x87.gen_x87.control.executor.busy)
                     x87_executor_busy_cycles <= x87_executor_busy_cycles + 1;
+                if (dut.x87.gen_x87.control.v2_exec_start)
+                    x87_exec_start_count[dut.x87.gen_x87.control.v2_exec_op] <=
+                        x87_exec_start_count[dut.x87.gen_x87.control.v2_exec_op] + 1;
+                if (dut.x87.gen_x87.control.executor.busy)
+                    x87_exec_busy_count[dut.x87.gen_x87.control.v2_exec_op] <=
+                        x87_exec_busy_count[dut.x87.gen_x87.control.v2_exec_op] + 1;
                 if (dut.stall_wio)
                     x87_wait_stall_cycles <= x87_wait_stall_cycles + 1;
             end
@@ -498,6 +506,10 @@ module tb_protected_mode #(
             x87_fop_count[i] = 0;
         for (int i = 0; i < 2048; i++)
             fast_x87_load_fop_count[i] = 0;
+        for (int i = 0; i < 16; i++) begin
+            x87_exec_start_count[i] = 0;
+            x87_exec_busy_count[i] = 0;
+        end
 
         // Get max cycles
         if ($value$plusargs("cycles=%d", max_cycles))
@@ -763,6 +775,12 @@ module tb_protected_mode #(
                         if (fast_x87_load_fop_count[i] != 0)
                             $display("X87_FOP direct-load %03x %0d", i,
                                      fast_x87_load_fop_count[i]);
+                    end
+                    for (int i = 0; i < 16; i++) begin
+                        if (x87_exec_start_count[i] != 0)
+                            $display("X87_EXEC %0d %0d %0d", i,
+                                     x87_exec_start_count[i],
+                                     x87_exec_busy_count[i]);
                     end
                 end
                 $display("  FNV64[%08x+%08x]: %016x",
