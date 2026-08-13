@@ -368,22 +368,24 @@ wire       interrupt_deliverable = tf_trap_pending || nmi_request_active ||
                                    (intr_pending && EFLAGS[9] && !inhibit_interrupts);
 wire       interrupt_at_boundary = i_rni_delay && interrupt_deliverable && !single_step;
 
-// Fixed-clock CPU throttle. A chained hardwired load/POP remains atomic while
+// Fixed-clock CPU throttle. Hardwired memory/stack pairs remain atomic while
 // the controller repays execution-rate debt between instructions.
 wire        throttle_hold;
 wire        throttle_release_ready;
 wire        throttle_full;
-// A chained hardwired load/POP commits OPR_R in the successor cycle. Do not split
-// that pair; carry the debt forward and park at the next legal boundary.
-wire        throttle_mem_chain = recipe_state.hardwired && uc_active && i_rni &&
-                                 (recipe_state.commit_sel == RECIPE_COMMIT_MEM);
+// Loads/POPs defer their GPR commit, while PUSH recipes retain an architectural
+// stack-update delay slot after WR. Splitting either pair can replay the entry
+// word; for PUSH SP that changes the posted data from old SP to post-push SP.
+wire        throttle_atomic_chain = recipe_state.hardwired && uc_active && i_rni &&
+    ((recipe_state.commit_sel == RECIPE_COMMIT_MEM) ||
+     ((recipe_state.commit_sel == RECIPE_COMMIT_ESP) && recipe_state.slot_has_work));
 // D2 launch is normally hidden under the predecessor's last cycle. When the
 // predecessor has already retired, overlap it with the final repayment cycle.
 wire        throttle_release_cycle = throttle_parked_r && throttle_release_ready;
 
 assign     d2_valid = d2_valid_r;
 assign     d2_ready = d2_push && !stall &&
-                      (!throttle_hold || throttle_mem_chain ||
+                      (!throttle_hold || throttle_atomic_chain ||
                        throttle_release_cycle) && !any_fault_issue &&
                       !(i_rni && tf_trap_pending && !single_step) &&
                       !interrupt_at_boundary && !q_flush;
