@@ -26,7 +26,6 @@ module paging_walker
     output reg          result_writable,
     output reg          result_user,
     output reg          result_dirty,
-    output reg          result_accessed,
 
     // Memory interface for page table reads and write-backs
     output reg          mem_rd,
@@ -223,7 +222,6 @@ always_comb begin
     result_writable = 1'b0;
     result_user = 1'b0;
     result_dirty = 1'b0;
-    result_accessed = 1'b0;
 
     case (state)
         PW_READ_PDE: begin
@@ -290,7 +288,6 @@ always_comb begin
             result_writable = combined_writable;
             result_user = combined_user;
             result_dirty = pte_dirty || saved_is_write;  // Updated after write-back
-            result_accessed = 1'b1;                       // Always set after successful walk
         end
 
         PW_FAULT: begin

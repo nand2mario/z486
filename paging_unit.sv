@@ -144,7 +144,6 @@ logic [19:0] tlb_update_pfn;
 logic        tlb_update_writable;
 logic        tlb_update_user;
 logic        tlb_update_dirty;
-logic        tlb_update_accessed;
 
 //=============================================================================
 // State Machine
@@ -205,7 +204,6 @@ paging_tlb tlb_inst (
     .update_writable(tlb_update_writable),
     .update_user    (tlb_update_user),
     .update_dirty   (tlb_update_dirty),
-    .update_accessed(tlb_update_accessed),
     .invalidate_all (cr3_write)
 );
 
@@ -220,7 +218,6 @@ wire [19:0] walk_result_pfn;
 wire        walk_result_writable;
 wire        walk_result_user;
 wire        walk_result_dirty;
-wire        walk_result_accessed;
 
 wire        walker_mem_rd;
 wire        walker_mem_wr;
@@ -263,7 +260,6 @@ paging_walker walker_inst (
     .result_writable(walk_result_writable),
     .result_user    (walk_result_user),
     .result_dirty   (walk_result_dirty),
-    .result_accessed(walk_result_accessed),
     .mem_rd         (walker_mem_rd),
     .mem_wr         (walker_mem_wr),
     .mem_addr       (walker_mem_addr),
@@ -481,7 +477,6 @@ always_comb begin
     tlb_update_writable = walk_result_writable;
     tlb_update_user = walk_result_user;
     tlb_update_dirty = walk_result_dirty;
-    tlb_update_accessed = walk_result_accessed;
 end
 
 function automatic [1:0] op_size_bytes_m1(input [1:0] op_size);

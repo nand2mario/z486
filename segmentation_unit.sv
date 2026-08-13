@@ -12,7 +12,10 @@ module segmentation_unit
     input              ctssaf_pulse,        // CTSSAF aluop: 608 pairs CTSSAF with SDEL, 74B STSSAF with IN=+
     input      [3:0]   seg_cmd,            // SEG_CMD_* command (computed stall-independently)
     input      [3:0]   seg_target,         // Target segment (SEG_ES..SEG_GDT, SEG_NONE)
-    input      [31:0]  seg_data,           // Command data (dest_value or alu_src_data)
+    input              init_addr32,        // D2 instruction address size for INIT_SEG
+    input              init_stack_op,      // D2 stack operation for INIT_SEG
+    input              clear_descsw,       // DESSTK mode bit for UPDATE_SEG
+    input      [31:0]  seg_data,           // Descriptor command payload
     input      [31:0]  desc_lo,            // Descriptor low DWORD (from TMPC)
     input      [31:0]  desc_hi,            // Descriptor high DWORD (saved at PTOVRR)
     input      [15:0]  slctr,              // SLCTR register (null selector check for SDEL)
@@ -21,7 +24,11 @@ module segmentation_unit
     input              conform_dpl_s2,     // Update CS.DPL to effective CPL
     input      [1:0]   conform_dpl_value_s2, // Effective CPL to preserve for conforming code
 
-    output seg_desc_t  seg_cache [0:10],   // Descriptor caches (SEG_ES=0..SEG_GDT=10)
+    output seg_desc_t  desc_cache [0:7],   // ES..GS, TR, and LDTR hidden descriptors
+    output logic [31:0] idt_base,
+    output logic [19:0] idt_limit,
+    output logic [31:0] gdt_base,
+    output logic [19:0] gdt_limit,
     output     [31:0]  lar_result,         // LAR combinational readback (keyed by seg_target)
     output     [31:0]  llim_result,        // LLIM combinational readback (keyed by seg_target)
     output     [31:0]  lbas_result,        // LBAS combinational readback (keyed by seg_target)
@@ -58,16 +65,60 @@ reg         addr_size;          // 1=32-bit, 0=16-bit effective address
 reg [31:0]  seg_base_r;         // Registered segment base
 reg [31:0]  seg_limit_r;        // Registered segment limit
 
+// Full hidden descriptors exist only for the six architectural segment
+// registers, TR, and LDTR. GDTR/IDTR contain only base+limit, and SEG_IO is a
+// stateless pseudo-segment. Keeping those out of the variable-write array
+// avoids synthesizing complete descriptor entries and their write muxes.
+function automatic [2:0] desc_index(input [3:0] target);
+    case (target)
+        SEG_ES, SEG_CS, SEG_SS, SEG_DS, SEG_FS, SEG_GS:
+            desc_index = target[2:0];
+        SEG_TR:  desc_index = 3'd6;
+        SEG_LDT: desc_index = 3'd7;
+        default: desc_index = 3'd0;
+    endcase
+endfunction
+
+function automatic logic desc_target_valid(input [3:0] target);
+    desc_target_valid = (target <= SEG_GS) || (target == SEG_TR) ||
+                        (target == SEG_LDT);
+endfunction
+
+function automatic seg_desc_t desc_for(input [3:0] target);
+    seg_desc_t d;
+    begin
+        d = '0;
+        case (target)
+            SEG_ES, SEG_CS, SEG_SS, SEG_DS, SEG_FS, SEG_GS:
+                d = desc_cache[target[2:0]];
+            SEG_TR:  d = desc_cache[6];
+            SEG_LDT: d = desc_cache[7];
+            SEG_IDT: begin
+                d = seg_desc_idt_real_mode();
+                d.base = idt_base;
+                d.limit = idt_limit;
+            end
+            SEG_GDT: begin
+                d = seg_desc_idt_real_mode();
+                d.base = gdt_base;
+                d.limit = gdt_limit;
+            end
+            default: ;
+        endcase
+        desc_for = d;
+    end
+endfunction
+
 // Instruction state latched from SEG_CMD_INIT_SEG
 reg         i_addr32_r;
 reg         i_stack_op_r;
 
-wire [31:0] ES_base = seg_cache[SEG_ES].base;
-wire [31:0] CS_base = seg_cache[SEG_CS].base;
-wire [31:0] SS_base = seg_cache[SEG_SS].base;
-wire [31:0] DS_base = seg_cache[SEG_DS].base;
-wire [31:0] FS_base = seg_cache[SEG_FS].base;
-wire [31:0] GS_base = seg_cache[SEG_GS].base;
+wire [31:0] ES_base = desc_cache[SEG_ES].base;
+wire [31:0] CS_base = desc_cache[SEG_CS].base;
+wire [31:0] SS_base = desc_cache[SEG_SS].base;
+wire [31:0] DS_base = desc_cache[SEG_DS].base;
+wire [31:0] FS_base = desc_cache[SEG_FS].base;
+wire [31:0] GS_base = desc_cache[SEG_GS].base;
 // (the old seg_sel-keyed `seg_base` combinational mux was dead -- seg_base_r is
 //  driven from seg_base_for(seg_target); removed to recover the 6-way mux.)
 
@@ -88,24 +139,25 @@ always_comb begin
         case (seg_cmd)
             SEG_CMD_INIT_SEG: begin
                 seg_base_pending_c  = seg_base_for(seg_target, 1'b0);
-                addr_size_pending_c = (seg_data[1] && pe) ? seg_cache[SEG_SS].D_B : seg_data[0];
+                addr_size_pending_c = (init_stack_op && pe) ? desc_cache[SEG_SS].D_B
+                                                            : init_addr32;
                 is_dtable_pending_c = 1'b0;
             end
             SEG_CMD_UPDATE_SEG: begin
                 is_dtable_pending_c = (seg_target == SEG_IDT || seg_target == SEG_GDT);
-                if (seg_data[0]) begin
+                if (clear_descsw) begin
                     seg_base_pending_c  = seg_base_for(seg_target, 1'b0);
-                    addr_size_pending_c = pe ? seg_cache[SEG_SS].D_B : i_addr32_r;
+                    addr_size_pending_c = pe ? desc_cache[SEG_SS].D_B : i_addr32_r;
                 end else begin
                     seg_base_pending_c  = seg_base_for(seg_target, descsw_mode);
                     addr_size_pending_c = ((i_stack_op_r || stack_push_mode) && pe && seg_target == SEG_SS)
-                                          ? (descsw_mode ? seg_cache[SEG_CS].D_B : seg_cache[SEG_SS].D_B)
+                                          ? (descsw_mode ? desc_cache[SEG_CS].D_B : desc_cache[SEG_SS].D_B)
                                           : i_addr32_r;
                 end
             end
             SEG_CMD_DESCSW: begin
                 seg_base_pending_c  = CS_base;
-                addr_size_pending_c = pe ? seg_cache[SEG_CS].D_B : i_addr32_r;
+                addr_size_pending_c = pe ? desc_cache[SEG_CS].D_B : i_addr32_r;
                 is_dtable_pending_c = 1'b0;
             end
             default: ;                         // SPCR/others: keep stssaf-or-hold
@@ -132,12 +184,12 @@ wire rm_limit_fault = !pe && (size_fault ||
 
 wire pm_limit_fault = pe && limit_violated && !is_dtable;
 
-wire seg_writable = (seg_sel == SEG_ES) ? (!seg_cache[SEG_ES].seg_type[3] && seg_cache[SEG_ES].seg_type[1]) :
+wire seg_writable = (seg_sel == SEG_ES) ? (!desc_cache[SEG_ES].seg_type[3] && desc_cache[SEG_ES].seg_type[1]) :
                     (seg_sel == SEG_CS) ? vm :
                     (seg_sel == SEG_SS) ? 1'b1 :
-                    (seg_sel == SEG_DS) ? (!seg_cache[SEG_DS].seg_type[3] && seg_cache[SEG_DS].seg_type[1]) :
-                    (seg_sel == SEG_FS) ? (!seg_cache[SEG_FS].seg_type[3] && seg_cache[SEG_FS].seg_type[1]) :
-                    (seg_sel == SEG_GS) ? (!seg_cache[SEG_GS].seg_type[3] && seg_cache[SEG_GS].seg_type[1]) :
+                    (seg_sel == SEG_DS) ? (!desc_cache[SEG_DS].seg_type[3] && desc_cache[SEG_DS].seg_type[1]) :
+                    (seg_sel == SEG_FS) ? (!desc_cache[SEG_FS].seg_type[3] && desc_cache[SEG_FS].seg_type[1]) :
+                    (seg_sel == SEG_GS) ? (!desc_cache[SEG_GS].seg_type[3] && desc_cache[SEG_GS].seg_type[1]) :
                     1'b1;  // TR/IDT/GDT/IO: no write check
 wire write_fault = pe && is_write && !seg_writable && !is_dtable;
 
@@ -153,36 +205,43 @@ function automatic [31:0] seg_base_for(input [3:0] sel, input dsw);
         SEG_DS: seg_base_for = DS_base;
         SEG_FS: seg_base_for = FS_base;
         SEG_GS: seg_base_for = GS_base;
-        SEG_TR: seg_base_for = seg_cache[SEG_TR].base;
+        SEG_TR: seg_base_for = desc_cache[6].base;
         // Descriptor-table pseudo-segments: the table base is the relocation
         // base (offset = selector index*8 / IDT offset lives in IND).  GDT vs LDT
         // is chosen by the selector's TI bit (slctr[2]); all DESSDT accesses
         // route the selector through SLCTR.
-        SEG_GDT: seg_base_for = slctr[2] ? seg_cache[SEG_LDT].base
-                                         : seg_cache[SEG_GDT].base;
-        SEG_IDT: seg_base_for = seg_cache[SEG_IDT].base;
+        SEG_GDT: seg_base_for = slctr[2] ? desc_cache[7].base : gdt_base;
+        SEG_IDT: seg_base_for = idt_base;
         default: seg_base_for = 32'h0;
     endcase
 endfunction
 
-// Effective limits expanded ONCE per segment and shared by every consumer
-// (seg_limit_for's case used to inline the G-bit expansion at each of its
-// call sites; the array guarantees the dedup - doc/z386x/area.md 2.3).
-wire [31:0] seg_eff_lim [0:10];
-genvar gs;
-generate for (gs = 0; gs <= 10; gs = gs + 1) begin : gen_eff_lim
-    assign seg_eff_lim[gs] = seg_effective_limit(seg_cache[gs[3:0]]);
-end endgenerate
+function automatic [20:0] raw_limit_for(input [3:0] sel, input dsw);
+    case (sel)
+        SEG_ES:  raw_limit_for = {desc_cache[SEG_ES].G, desc_cache[SEG_ES].limit};
+        SEG_CS:  raw_limit_for = {desc_cache[SEG_CS].G, desc_cache[SEG_CS].limit};
+        SEG_SS:  raw_limit_for = dsw
+                               ? {desc_cache[SEG_CS].G, desc_cache[SEG_CS].limit}
+                               : {desc_cache[SEG_SS].G, desc_cache[SEG_SS].limit};
+        SEG_DS:  raw_limit_for = {desc_cache[SEG_DS].G, desc_cache[SEG_DS].limit};
+        SEG_FS:  raw_limit_for = {desc_cache[SEG_FS].G, desc_cache[SEG_FS].limit};
+        SEG_GS:  raw_limit_for = {desc_cache[SEG_GS].G, desc_cache[SEG_GS].limit};
+        SEG_TR:  raw_limit_for = {desc_cache[6].G, desc_cache[6].limit};
+        SEG_LDT: raw_limit_for = {desc_cache[7].G, desc_cache[7].limit};
+        default: raw_limit_for = 21'h1F_FFFF;
+    endcase
+endfunction
+
+function automatic [31:0] expand_raw_limit(input [20:0] raw_limit);
+    expand_raw_limit = raw_limit[20]
+                     ? {raw_limit[19:0], 12'hFFF}
+                     : {12'h000, raw_limit[19:0]};
+endfunction
 
 function automatic [31:0] seg_limit_for(input [3:0] sel, input dsw);
     case (sel)
-        SEG_ES: seg_limit_for = seg_eff_lim[SEG_ES];
-        SEG_CS: seg_limit_for = seg_eff_lim[SEG_CS];
-        SEG_SS: seg_limit_for = dsw ? seg_eff_lim[SEG_CS] : seg_eff_lim[SEG_SS];
-        SEG_DS: seg_limit_for = seg_eff_lim[SEG_DS];
-        SEG_FS: seg_limit_for = seg_eff_lim[SEG_FS];
-        SEG_GS: seg_limit_for = seg_eff_lim[SEG_GS];
-        SEG_TR: seg_limit_for = seg_eff_lim[SEG_TR];
+        SEG_ES, SEG_CS, SEG_SS, SEG_DS, SEG_FS, SEG_GS, SEG_TR:
+            seg_limit_for = expand_raw_limit(raw_limit_for(sel, dsw));
         default: seg_limit_for = 32'hFFFFFFFF;
     endcase
 endfunction
@@ -194,9 +253,17 @@ endfunction
 // LAR/LLIM/LBAS: z386 routes these to IND in same cycle
 seg_desc_t lar_desc;
 wire [7:0] lar_ar_byte = {lar_desc.P, lar_desc.DPL, lar_desc.S, lar_desc.seg_type};
-assign lar_desc = (seg_target <= SEG_GDT) ? seg_cache[seg_target] : '0;
+assign lar_desc = desc_for(seg_target);
 assign lar_result = {16'h0, lar_ar_byte, 8'h0};
-assign llim_result = (seg_target <= SEG_GDT) ? seg_eff_lim[seg_target] : 32'h0;
+always_comb begin
+    case (seg_target)
+        SEG_ES, SEG_CS, SEG_SS, SEG_DS, SEG_FS, SEG_GS, SEG_TR, SEG_LDT:
+            llim_result = expand_raw_limit(raw_limit_for(seg_target, 1'b0));
+        SEG_IDT: llim_result = {12'h0, idt_limit};
+        SEG_GDT: llim_result = {12'h0, gdt_limit};
+        default: llim_result = 32'h0;
+    endcase
+end
 assign lbas_result = lar_desc.base;
 
 // Testbench can't force unpacked array struct elements, so use individual regs
@@ -224,27 +291,31 @@ end
 always_ff @(posedge clk) begin
     if (!reset_n) begin
 `ifdef VERILATOR
-        seg_cache[SEG_ES]  <= seg_init_es;
-        seg_cache[SEG_CS]  <= seg_init_cs;
-        seg_cache[SEG_SS]  <= seg_init_ss;
-        seg_cache[SEG_DS]  <= seg_init_ds;
-        seg_cache[SEG_FS]  <= seg_init_fs;
-        seg_cache[SEG_GS]  <= seg_init_gs;
-        seg_cache[SEG_IDT] <= seg_init_idt;
-        seg_cache[SEG_TR]  <= seg_init_tr;
-        seg_cache[SEG_LDT] <= seg_init_ldt;
-        seg_cache[SEG_GDT] <= seg_init_gdt;
+        desc_cache[0] <= seg_init_es;
+        desc_cache[1] <= seg_init_cs;
+        desc_cache[2] <= seg_init_ss;
+        desc_cache[3] <= seg_init_ds;
+        desc_cache[4] <= seg_init_fs;
+        desc_cache[5] <= seg_init_gs;
+        desc_cache[6] <= seg_init_tr;
+        desc_cache[7] <= seg_init_ldt;
+        idt_base <= seg_init_idt.base;
+        idt_limit <= seg_init_idt.limit;
+        gdt_base <= seg_init_gdt.base;
+        gdt_limit <= seg_init_gdt.limit;
 `else
-        seg_cache[SEG_ES]  <= seg_desc_real_mode(16'h0000);
-        seg_cache[SEG_CS]  <= seg_desc_reset_cs();
-        seg_cache[SEG_SS]  <= seg_desc_real_mode(16'h0000);
-        seg_cache[SEG_DS]  <= seg_desc_real_mode(16'h0000);
-        seg_cache[SEG_FS]  <= seg_desc_real_mode(16'h0000);
-        seg_cache[SEG_GS]  <= seg_desc_real_mode(16'h0000);
-        seg_cache[SEG_IDT] <= seg_desc_idt_real_mode();
-        seg_cache[SEG_TR]  <= seg_desc_real_mode(16'h0000);
-        seg_cache[SEG_LDT] <= seg_desc_real_mode(16'h0000);
-        seg_cache[SEG_GDT] <= seg_desc_idt_real_mode();  // GDTR: base=0, limit=0x3FF
+        desc_cache[0] <= seg_desc_real_mode(16'h0000);
+        desc_cache[1] <= seg_desc_reset_cs();
+        desc_cache[2] <= seg_desc_real_mode(16'h0000);
+        desc_cache[3] <= seg_desc_real_mode(16'h0000);
+        desc_cache[4] <= seg_desc_real_mode(16'h0000);
+        desc_cache[5] <= seg_desc_real_mode(16'h0000);
+        desc_cache[6] <= seg_desc_real_mode(16'h0000);
+        desc_cache[7] <= seg_desc_real_mode(16'h0000);
+        idt_base <= 32'h0;
+        idt_limit <= 20'h003FF;
+        gdt_base <= 32'h0;
+        gdt_limit <= 20'h003FF;
 `endif
     end else if (seg_cmd_valid) begin
         case (seg_cmd)
@@ -252,44 +323,65 @@ always_ff @(posedge clk) begin
                 // Real-mode segment register load: set base = segment × 16.
                 // Limit and granularity are NOT reset, thus preserving "unreal mode"
                 case (seg_target[2:0])
-                    SEG_ES:  seg_cache[SEG_ES].base <= {12'h0, seg_data[15:0], 4'h0};
+                    SEG_ES:  desc_cache[0].base <= {12'h0, seg_data[15:0], 4'h0};
                     SEG_CS: begin
-                        seg_cache[SEG_CS].base <= {12'h0, seg_data[15:0], 4'h0};
-                        seg_cache[SEG_CS].D_B <= 1'b0;
+                        desc_cache[1].base <= {12'h0, seg_data[15:0], 4'h0};
+                        desc_cache[1].D_B <= 1'b0;
                     end
-                    SEG_SS:  seg_cache[SEG_SS].base <= {12'h0, seg_data[15:0], 4'h0};
-                    SEG_DS:  seg_cache[SEG_DS].base <= {12'h0, seg_data[15:0], 4'h0};
-                    SEG_FS:  seg_cache[SEG_FS].base <= {12'h0, seg_data[15:0], 4'h0};
-                    SEG_GS:  seg_cache[SEG_GS].base <= {12'h0, seg_data[15:0], 4'h0};
-                    SEG_IDT: seg_cache[SEG_IDT].base <= {12'h0, seg_data[15:0], 4'h0};
+                    SEG_SS:  desc_cache[2].base <= {12'h0, seg_data[15:0], 4'h0};
+                    SEG_DS:  desc_cache[3].base <= {12'h0, seg_data[15:0], 4'h0};
+                    SEG_FS:  desc_cache[4].base <= {12'h0, seg_data[15:0], 4'h0};
+                    SEG_GS:  desc_cache[5].base <= {12'h0, seg_data[15:0], 4'h0};
+                    SEG_IDT: idt_base <= {12'h0, seg_data[15:0], 4'h0};
                     default: ;
                 endcase
             end
 
             SEG_CMD_SAR: begin
-                automatic seg_desc_t sar_merged;
                 automatic logic [3:0] sar_seg;
+                automatic logic [2:0] sar_idx;
                 sar_seg = effective_target(seg_target);
-                sar_merged = merge_sar(seg_cache[sar_seg], seg_data);
-                seg_cache[sar_seg] <= sar_merged;
+                sar_idx = desc_index(sar_seg);
+                if (desc_target_valid(sar_seg)) begin
+                    desc_cache[sar_idx].P        <= seg_data[15];
+                    desc_cache[sar_idx].DPL      <= seg_data[14:13];
+                    desc_cache[sar_idx].S        <= seg_data[12];
+                    desc_cache[sar_idx].seg_type <= seg_data[11:8];
+                    desc_cache[sar_idx].G        <= seg_data[7];
+                    desc_cache[sar_idx].D_B      <= seg_data[6];
+                    desc_cache[sar_idx].A        <= seg_data[8];
+                end
             end
 
             SEG_CMD_SLIM: begin
-                seg_cache[effective_target(seg_target)].limit <= seg_data[19:0];
+                automatic logic [3:0] slim_seg;
+                slim_seg = effective_target(seg_target);
+                if (desc_target_valid(slim_seg))
+                    desc_cache[desc_index(slim_seg)].limit <= seg_data[19:0];
             end
 
             SEG_CMD_SDEH: begin
-                automatic seg_desc_t sdeh_merged;
                 automatic logic [3:0] sdeh_seg;
+                automatic logic [2:0] sdeh_idx;
                 sdeh_seg = effective_target(seg_target);
-                sdeh_merged = merge_sdeh(seg_cache[sdeh_seg], seg_data);
-                seg_cache[sdeh_seg] <= sdeh_merged;
+                sdeh_idx = desc_index(sdeh_seg);
+                if (desc_target_valid(sdeh_seg)) begin
+                    desc_cache[sdeh_idx].base[31:24]  <= seg_data[31:24];
+                    desc_cache[sdeh_idx].G            <= seg_data[23];
+                    desc_cache[sdeh_idx].D_B          <= seg_data[22];
+                    desc_cache[sdeh_idx].limit[19:16] <= seg_data[19:16];
+                end
             end
 
             SEG_CMD_SDES: begin
-                automatic seg_desc_t sdes_merged;
-                sdes_merged = merge_sdes(seg_cache[desc_write_seg], seg_data);
-                seg_cache[desc_write_seg] <= sdes_merged;
+                automatic logic [2:0] sdes_idx;
+                sdes_idx = desc_index(desc_write_seg);
+                desc_cache[sdes_idx].P          <= seg_data[31];
+                desc_cache[sdes_idx].DPL        <= seg_data[30:29];
+                desc_cache[sdes_idx].S          <= seg_data[28];
+                desc_cache[sdes_idx].seg_type   <= seg_data[27:24];
+                desc_cache[sdes_idx].base[23:0] <= seg_data[23:0];
+                desc_cache[sdes_idx].A          <= seg_data[24];
             end
 
             SEG_CMD_SDEL: begin
@@ -299,42 +391,43 @@ always_ff @(posedge clk) begin
                     null_desc.base = 32'hFFFFFFFF;
                     null_desc.limit = 20'hFFFFF;
                     null_desc.P = 1'b1;
-                    seg_cache[desc_write_seg] <= null_desc;
+                    desc_cache[desc_index(desc_write_seg)] <= null_desc;
                 end else begin
-                    automatic seg_desc_t sdel_merged;
-                    sdel_merged = merge_sdel(seg_cache[desc_write_seg], seg_data);
-                    seg_cache[desc_write_seg] <= sdel_merged;
+                    desc_cache[desc_index(desc_write_seg)].limit[15:0] <= seg_data[15:0];
                     if (desc_write_seg == SEG_TR)
-                        seg_cache[SEG_TR].seg_type[1] <= 1'b1;
+                        desc_cache[6].seg_type[1] <= 1'b1;
                 end
             end
 
             SEG_CMD_DESC: begin
-                seg_cache[effective_target(seg_target)] <= decode_descriptor(desc_lo, desc_hi);
+                automatic logic [3:0] full_seg;
+                full_seg = effective_target(seg_target);
+                if (desc_target_valid(full_seg))
+                    desc_cache[desc_index(full_seg)] <= decode_descriptor(desc_lo, desc_hi);
             end
 
             SEG_CMD_SBAS: begin
                 if (dt_target_idt)
-                    seg_cache[SEG_IDT].base <= seg_data;
+                    idt_base <= seg_data;
                 else
-                    seg_cache[SEG_GDT].base <= seg_data;
+                    gdt_base <= seg_data;
             end
 
             SEG_CMD_SLIM_TABLE: begin
                 if (dt_target_idt)
-                    seg_cache[SEG_IDT].limit <= {4'h0, seg_data[15:0]};
+                    idt_limit <= {4'h0, seg_data[15:0]};
                 else
-                    seg_cache[SEG_GDT].limit <= {4'h0, seg_data[15:0]};
+                    gdt_limit <= {4'h0, seg_data[15:0]};
             end
 
             default: ;
         endcase
 
         if (copy_stack_dpl_s2)
-            seg_cache[SEG_SS].DPL <= copy_dpl_s2;
+            desc_cache[2].DPL <= copy_dpl_s2;
 
         if (conform_dpl_s2)
-            seg_cache[SEG_CS].DPL <= conform_dpl_value_s2;
+            desc_cache[1].DPL <= conform_dpl_value_s2;
     end
 end
 
@@ -385,7 +478,7 @@ always_ff @(posedge clk) begin
             descsw_mode <= 1'b0;
             tss_access_flag <= 1'b1;
             if (seg_sel == SEG_SS)
-                seg_limit_r <= seg_eff_lim[SEG_SS];
+                seg_limit_r <= seg_limit_for(SEG_SS, 1'b0);
         end
         if (ctssaf_pulse)
             tss_access_flag <= 1'b0;
@@ -394,8 +487,8 @@ always_ff @(posedge clk) begin
                 seg_sel <= seg_target;
                 seg_is_io <= (seg_target == SEG_IO);
                 seg_limit_r <= seg_limit_for(seg_target, 1'b0);
-                i_addr32_r <= seg_data[0];
-                i_stack_op_r <= seg_data[1];
+                i_addr32_r <= init_addr32;
+                i_stack_op_r <= init_stack_op;
                 stack_push_mode <= 1'b0;
                 descsw_mode <= 1'b0;
             end
@@ -403,7 +496,7 @@ always_ff @(posedge clk) begin
             SEG_CMD_UPDATE_SEG: begin
                 seg_sel <= seg_target;
                 seg_is_io <= (seg_target == SEG_IO);
-                if (seg_data[0]) begin
+                if (clear_descsw) begin
                     descsw_mode <= 1'b0;
                     seg_limit_r <= seg_limit_for(seg_target, 1'b0);
                 end else begin
@@ -420,7 +513,7 @@ always_ff @(posedge clk) begin
                 seg_sel <= SEG_SS;
                 seg_is_io <= 1'b0;
                 descsw_mode <= 1'b1;
-                seg_limit_r <= seg_eff_lim[SEG_CS];
+                seg_limit_r <= seg_limit_for(SEG_CS, 1'b0);
             end
 
             default: ;

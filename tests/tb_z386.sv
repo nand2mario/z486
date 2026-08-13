@@ -55,6 +55,7 @@ module tb_z386;
         .snoop_addr(32'h0),
         .snoop_valid(1'b0),
         .a20_enable(1'b1),
+        .cpu_speed_sel(2'd0),
         .single_step(1'b1), // Halt after each instruction for single-step tests
         .dbg_CS(),
         .dbg_EIP(),
@@ -403,7 +404,7 @@ module tb_z386;
         release dut.GS;
         release dut.EIP;
         release dut.prefetch_inst.pf_fetch_addr;
-        // Release init value forces — reset block has already loaded them into seg_cache
+        // Release init value forces; reset has loaded the compact descriptor bank.
         release dut.seg_unit.seg_init_cs;
         release dut.seg_unit.seg_init_ds;
         release dut.seg_unit.seg_init_es;
@@ -466,26 +467,26 @@ module tb_z386;
 
                 // Print segment caches (for protected mode tests)
                 $display("RESULT SEG: cs base=0x%08x limit=0x%05x flags=0x%04x",
-                         dut.seg_unit.seg_cache[SEG_CS].base, dut.seg_unit.seg_cache[SEG_CS].limit,
-                         extract_seg_flags(dut.seg_unit.seg_cache[SEG_CS]));
+                         dut.seg_unit.desc_cache[SEG_CS].base, dut.seg_unit.desc_cache[SEG_CS].limit,
+                         extract_seg_flags(dut.seg_unit.desc_cache[SEG_CS]));
                 $display("RESULT SEG: ds base=0x%08x limit=0x%05x flags=0x%04x",
-                         dut.seg_unit.seg_cache[SEG_DS].base, dut.seg_unit.seg_cache[SEG_DS].limit,
-                         extract_seg_flags(dut.seg_unit.seg_cache[SEG_DS]));
+                         dut.seg_unit.desc_cache[SEG_DS].base, dut.seg_unit.desc_cache[SEG_DS].limit,
+                         extract_seg_flags(dut.seg_unit.desc_cache[SEG_DS]));
                 $display("RESULT SEG: es base=0x%08x limit=0x%05x flags=0x%04x",
-                         dut.seg_unit.seg_cache[SEG_ES].base, dut.seg_unit.seg_cache[SEG_ES].limit,
-                         extract_seg_flags(dut.seg_unit.seg_cache[SEG_ES]));
+                         dut.seg_unit.desc_cache[SEG_ES].base, dut.seg_unit.desc_cache[SEG_ES].limit,
+                         extract_seg_flags(dut.seg_unit.desc_cache[SEG_ES]));
                 $display("RESULT SEG: ss base=0x%08x limit=0x%05x flags=0x%04x",
-                         dut.seg_unit.seg_cache[SEG_SS].base, dut.seg_unit.seg_cache[SEG_SS].limit,
-                         extract_seg_flags(dut.seg_unit.seg_cache[SEG_SS]));
+                         dut.seg_unit.desc_cache[SEG_SS].base, dut.seg_unit.desc_cache[SEG_SS].limit,
+                         extract_seg_flags(dut.seg_unit.desc_cache[SEG_SS]));
                 $display("RESULT SEG: fs base=0x%08x limit=0x%05x flags=0x%04x",
-                         dut.seg_unit.seg_cache[SEG_FS].base, dut.seg_unit.seg_cache[SEG_FS].limit,
-                         extract_seg_flags(dut.seg_unit.seg_cache[SEG_FS]));
+                         dut.seg_unit.desc_cache[SEG_FS].base, dut.seg_unit.desc_cache[SEG_FS].limit,
+                         extract_seg_flags(dut.seg_unit.desc_cache[SEG_FS]));
                 $display("RESULT SEG: gs base=0x%08x limit=0x%05x flags=0x%04x",
-                         dut.seg_unit.seg_cache[SEG_GS].base, dut.seg_unit.seg_cache[SEG_GS].limit,
-                         extract_seg_flags(dut.seg_unit.seg_cache[SEG_GS]));
+                         dut.seg_unit.desc_cache[SEG_GS].base, dut.seg_unit.desc_cache[SEG_GS].limit,
+                         extract_seg_flags(dut.seg_unit.desc_cache[SEG_GS]));
                 $display("RESULT SEG: tr sel=0x%04x base=0x%08x limit=0x%05x flags=0x%04x",
-                         dut.TR, dut.seg_unit.seg_cache[SEG_TR].base, dut.seg_unit.seg_cache[SEG_TR].limit,
-                         extract_seg_flags(dut.seg_unit.seg_cache[SEG_TR]));
+                         dut.TR, dut.seg_unit.desc_cache[6].base, dut.seg_unit.desc_cache[6].limit,
+                         extract_seg_flags(dut.seg_unit.desc_cache[6]));
 
                 // Print requested RAM locations
                 for (int i = 0; i < ram_cnt; i++) begin
@@ -514,26 +515,26 @@ module tb_z386;
 
                 // Print segment caches (for protected mode tests)
                 $display("RESULT SEG: cs base=0x%08x limit=0x%05x flags=0x%04x",
-                         dut.seg_unit.seg_cache[SEG_CS].base, dut.seg_unit.seg_cache[SEG_CS].limit,
-                         extract_seg_flags(dut.seg_unit.seg_cache[SEG_CS]));
+                         dut.seg_unit.desc_cache[SEG_CS].base, dut.seg_unit.desc_cache[SEG_CS].limit,
+                         extract_seg_flags(dut.seg_unit.desc_cache[SEG_CS]));
                 $display("RESULT SEG: ds base=0x%08x limit=0x%05x flags=0x%04x",
-                         dut.seg_unit.seg_cache[SEG_DS].base, dut.seg_unit.seg_cache[SEG_DS].limit,
-                         extract_seg_flags(dut.seg_unit.seg_cache[SEG_DS]));
+                         dut.seg_unit.desc_cache[SEG_DS].base, dut.seg_unit.desc_cache[SEG_DS].limit,
+                         extract_seg_flags(dut.seg_unit.desc_cache[SEG_DS]));
                 $display("RESULT SEG: es base=0x%08x limit=0x%05x flags=0x%04x",
-                         dut.seg_unit.seg_cache[SEG_ES].base, dut.seg_unit.seg_cache[SEG_ES].limit,
-                         extract_seg_flags(dut.seg_unit.seg_cache[SEG_ES]));
+                         dut.seg_unit.desc_cache[SEG_ES].base, dut.seg_unit.desc_cache[SEG_ES].limit,
+                         extract_seg_flags(dut.seg_unit.desc_cache[SEG_ES]));
                 $display("RESULT SEG: ss base=0x%08x limit=0x%05x flags=0x%04x",
-                         dut.seg_unit.seg_cache[SEG_SS].base, dut.seg_unit.seg_cache[SEG_SS].limit,
-                         extract_seg_flags(dut.seg_unit.seg_cache[SEG_SS]));
+                         dut.seg_unit.desc_cache[SEG_SS].base, dut.seg_unit.desc_cache[SEG_SS].limit,
+                         extract_seg_flags(dut.seg_unit.desc_cache[SEG_SS]));
                 $display("RESULT SEG: fs base=0x%08x limit=0x%05x flags=0x%04x",
-                         dut.seg_unit.seg_cache[SEG_FS].base, dut.seg_unit.seg_cache[SEG_FS].limit,
-                         extract_seg_flags(dut.seg_unit.seg_cache[SEG_FS]));
+                         dut.seg_unit.desc_cache[SEG_FS].base, dut.seg_unit.desc_cache[SEG_FS].limit,
+                         extract_seg_flags(dut.seg_unit.desc_cache[SEG_FS]));
                 $display("RESULT SEG: gs base=0x%08x limit=0x%05x flags=0x%04x",
-                         dut.seg_unit.seg_cache[SEG_GS].base, dut.seg_unit.seg_cache[SEG_GS].limit,
-                         extract_seg_flags(dut.seg_unit.seg_cache[SEG_GS]));
+                         dut.seg_unit.desc_cache[SEG_GS].base, dut.seg_unit.desc_cache[SEG_GS].limit,
+                         extract_seg_flags(dut.seg_unit.desc_cache[SEG_GS]));
                 $display("RESULT SEG: tr sel=0x%04x base=0x%08x limit=0x%05x flags=0x%04x",
-                         dut.TR, dut.seg_unit.seg_cache[SEG_TR].base, dut.seg_unit.seg_cache[SEG_TR].limit,
-                         extract_seg_flags(dut.seg_unit.seg_cache[SEG_TR]));
+                         dut.TR, dut.seg_unit.desc_cache[6].base, dut.seg_unit.desc_cache[6].limit,
+                         extract_seg_flags(dut.seg_unit.desc_cache[6]));
 
                 // Print requested RAM locations
                 for (int i = 0; i < ram_cnt; i++) begin

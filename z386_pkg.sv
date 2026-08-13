@@ -1314,12 +1314,11 @@ localparam [11:0] UADDR_PAGE_FAULT = 12'h8E9;
 // TLB entry structure - 4 entries fully-associative
 typedef struct packed {
     logic        valid;         // Entry is valid
-    logic [19:0] vpn;           // Virtual Page Number (tag) - linear[31:12]
+    logic [16:0] tag;           // VPN[19:3]; VPN[2:0] is implicit in the set
     logic [19:0] pfn;           // Physical Frame Number
     logic        writable;      // R/W permission (combined PDE & PTE)
     logic        user;          // U/S permission (combined PDE & PTE)
     logic        dirty;         // D bit from PTE
-    logic        accessed;      // A bit from PTE
 } tlb_entry_t;
 
 // Page table entry format (PDE and PTE have same format)

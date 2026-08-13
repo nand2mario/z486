@@ -18,7 +18,8 @@ module z386
 #(
     parameter PROTECT_UMA_ROM = 0,
     parameter DCACHE_SET_BITS = 8,   // dcache size: 8 = 16KB, 7 = 8KB
-    parameter ICACHE_SET_BITS = 8    // icache size: 8 = 16KB, 7 = 8KB
+    parameter ICACHE_SET_BITS = 8,   // icache size: 8 = 16KB, 7 = 8KB
+    parameter [6:0] CLOCK_RATE_MHZ = 7'd85
 )
 (
     input              clk,
@@ -46,6 +47,9 @@ module z386
     input              snoop_valid,
 
     input              a20_enable,  // A20 gate input
+
+    // Architectural execution rate: 0=full, 1=15, 2=30, 3=56 MHz.
+    input       [1:0]  cpu_speed_sel,
 
     // Debug/test control
     input              single_step, // Halt after each instruction (for single-step tests)
@@ -81,7 +85,7 @@ wire [15:0] SI = ESI[15:0];
 wire [15:0] DI = EDI[15:0];
 
 seg_desc_t cs_seg_desc;
-assign cs_seg_desc = seg_cache[SEG_CS];
+assign cs_seg_desc = desc_cache[SEG_CS];
 wire D = cs_seg_desc.D_B;  // Default operand size (0=16-bit in real mode, 1=32-bit)
 
 // Bits: 31..22 21 20 19 18 17 16 15..14 13..12 11 10 9  8  7  6  5  4  3  2  1  0
@@ -140,8 +144,12 @@ wire [31:0] slctr_fwd = slctr_fwd_en ? dest_value : SLCTR;
 reg [31:0] desc_raw_hi;             // raw high DWORD saved at TSTDES time (before barrel-shift modifies PROTUN)
 reg [5:0]  prot_saved_test_const;   // Protection test: PTSAV saves test constant for later PTOVRR to use
 
-seg_desc_t seg_cache [0:10];        // Indexed by SEG_* constants
-wire [31:0] CS_base = seg_cache[SEG_CS].base;
+seg_desc_t desc_cache [0:7];        // ES..GS, TR, and LDTR hidden descriptors
+wire [31:0] idt_base;
+wire [19:0] idt_limit;
+wire [31:0] gdt_base;
+wire [19:0] gdt_limit;
+wire [31:0] CS_base = desc_cache[SEG_CS].base;
 
 wire       pe = CR0[0];             // Protected mode enable
 wire       vm = EFLAGS[17];         // Virtual 8086 mode
@@ -292,8 +300,43 @@ wire       tf_trap_pending = tf_active_r && !tf_trap_suppress_r;
 wire       interrupt_deliverable = tf_trap_pending || nmi_request_active ||
                                    (intr_pending && EFLAGS[9] && !inhibit_interrupts);
 wire       interrupt_at_boundary = i_rni_delay && interrupt_deliverable && !single_step;
+
+// Fixed-clock CPU throttle. Memory and peripherals continue at clk speed;
+// active execution cycles accrue debt that is repaid between instructions.
+localparam [6:0] THROTTLE_CLOCK_MHZ = CLOCK_RATE_MHZ;
+reg  [15:0] throttle_debt;
+reg   [1:0] throttle_speed_r;
+wire  [6:0] throttle_target_mhz = cpu_speed_sel == 2'd1 ? 7'd15 :
+                                       cpu_speed_sel == 2'd2 ? 7'd30 : 7'd56;
+wire [15:0] throttle_target = {9'd0, throttle_target_mhz};
+wire        throttle_full = cpu_speed_sel == 2'd0 ||
+                            throttle_target_mhz >= THROTTLE_CLOCK_MHZ;
+wire  [6:0] throttle_charge = THROTTLE_CLOCK_MHZ - throttle_target_mhz;
+wire        throttle_hold = !throttle_full &&
+                            throttle_debt >= throttle_target;
+wire        throttle_active_cycle;
+wire [16:0] throttle_debt_sum = {1'b0, throttle_debt} +
+                                {10'd0, throttle_charge};
+
+always_ff @(posedge clk) begin
+    if (!reset_n) begin
+        throttle_debt <= 16'd0;
+        throttle_speed_r <= 2'd0;
+    end else if (cpu_speed_sel != throttle_speed_r) begin
+        throttle_debt <= 16'd0;
+        throttle_speed_r <= cpu_speed_sel;
+    end else if (throttle_full) begin
+        throttle_debt <= 16'd0;
+    end else if (throttle_active_cycle) begin
+        throttle_debt <= throttle_debt_sum[16] ? 16'hffff :
+                                                     throttle_debt_sum[15:0];
+    end else if (throttle_hold) begin
+        throttle_debt <= throttle_debt - throttle_target;
+    end
+end
+
 assign     d2_valid = d2_valid_r;
-assign     d2_ready = d2_push && !stall && !any_fault_pop &&
+assign     d2_ready = d2_push && !stall && !throttle_hold && !any_fault_pop &&
                       !(i_rni && tf_trap_pending && !single_step) &&
                       !interrupt_at_boundary && !q_flush;
 assign     d2_fire  = d2_valid && d2_ready;
@@ -311,7 +354,10 @@ wire       stall_wio = (uc_is_wio && !interrupt_pending && !single_step);
 // instruction execute its architectural RNI delay slot, then hold the ROM word
 // until D2 can transfer it to EX.
 wire       stall_d2 = d2_valid && !d2_push && !i_rni_delay;
-wire       stall = stall_mem || stall_wio || stall_d2;
+// Repay execution-rate debt at the existing RNI boundary. Holding the delay
+// slot keeps uc_active and ROM ownership coherent until the successor fires.
+wire       stall_throttle = throttle_hold && d2_valid && i_rni_delay;
+wire       stall = stall_mem || stall_wio || stall_d2 || stall_throttle;
 
 // Repeat
 wire       prot_result_now = prot_result_valid && prot_test_inflight;
@@ -320,8 +366,11 @@ wire       repeat_active = uc_is_rpt && (COUNTR[4:0] != 0 || prot_test_inflight)
 
 // uc_exec: master enable for microcode execution
 wire       d2_release_hold = d2_valid && (d2_waited_r || d2_stale_slot_r);
+assign     throttle_active_cycle = d2_fire ||
+                                   (uc_active && !stall && !d2_release_hold);
 wire       uc_exec = core_live && !(mem_servicing ? mem_block_busy : mem_block_idle) &&
-                     !stall_wio && !stall_d2 && !d2_release_hold && !fast_dead_slot;
+                     !stall_wio && !stall_d2 && !stall_throttle &&
+                     !d2_release_hold && !fast_dead_slot;
 wire       uc_exec_writeback = uc_exec;  // local copies for reducing fanout
 wire       uc_exec_mul_start = uc_exec;
 wire       uc_exec_result = uc_exec;
@@ -453,6 +502,7 @@ wire       fast_issueJ    = fast_active && fast_jcc_r && uc_exec &&
 wire       fast_issue     = (fast_issue1 || fast_issueN || fast_issueJ) &&
                             (!d2_valid || d2_fire) &&
                             !d2_waited_r &&
+                            !throttle_hold &&
                             !interrupt_pending && !tf_active_r &&
                             !single_step && !any_fault_pop;
 
@@ -1182,7 +1232,7 @@ function automatic [5:0] decode_dly_gpr(input [6:0] dest);
                 begin we = 1'b1; sel = dest[2:0]; mode = FWD_D; end
             DEST_eSP:
                 begin we = 1'b1; sel = 3'd4;
-                      mode = (pe && seg_cache[SEG_SS].D_B) ? FWD_D : FWD_W; end
+                      mode = (pe && desc_cache[SEG_SS].D_B) ? FWD_D : FWD_W; end
             DEST_AX, DEST_CX, DEST_DX, DEST_BX, DEST_SP, DEST_BP, DEST_SI, DEST_DI:
                 begin we = 1'b1; sel = dest[2:0]; mode = FWD_W; end
             DEST_AL, DEST_CL, DEST_DL, DEST_BL:
@@ -1315,8 +1365,8 @@ wire [63:0] d2_agu_prep  = calc_ea_prep(d2_agu_base, d2_agu_index,
 wire [31:0] d2_agu_a = d2_agu_prep[63:32];
 wire [31:0] d2_agu_b = d2_agu_prep[31:0];
 wire [31:0] d2_agu_c = d2_agu_dec.disp;
-wire [3:0] d2_agu_seg = d2_entry.mem_seg;
-wire [31:0] d2_agu_segbase = seg_cache[d2_agu_seg].base;
+wire [2:0] d2_agu_seg = d2_entry.mem_seg[2:0];
+wire [31:0] d2_agu_segbase = desc_cache[d2_agu_seg].base;
 wire [31:0] d2_agu_lin = (d2_agu_a ^ d2_agu_b ^ d2_agu_c)
                        + (((d2_agu_a & d2_agu_b) | (d2_agu_a & d2_agu_c) |
                            (d2_agu_b & d2_agu_c)) << 1)
@@ -1326,40 +1376,48 @@ wire [31:0] d2_agu_lin = (d2_agu_a ^ d2_agu_b ^ d2_agu_c)
 function automatic [7:0] gpr_wr_expand(input [2:0] sel);
     gpr_wr_expand = (8'h1 << sel) | (8'h1 << {1'b0, sel[1:0]});
 endfunction
-// {inval_all, onehot} for the current uc word's destination
-function automatic [8:0] gpr_dest_probe(input [6:0] dst);
-    gpr_dest_probe = {1'b1, 8'h00};
+// Architectural GPRs written by the current microword. Non-GPR destinations
+// default to zero; segment/address-mode changes invalidate the sidecar through
+// the independent controls below. This keeps their broad destination decode
+// out of the D2 AGU conflict path.
+function automatic [7:0] gpr_dest_mask(input [6:0] dst);
+    gpr_dest_mask = 8'h00;
     case (dst)
-        DEST_EAX, DEST_AX, DEST_eAX_AL: gpr_dest_probe = {1'b0, 8'h01};
-        DEST_ECX, DEST_CX, DEST_eCX:    gpr_dest_probe = {1'b0, 8'h02};
-        DEST_EDX, DEST_DX:              gpr_dest_probe = {1'b0, 8'h04};
-        DEST_EBX, DEST_BX:              gpr_dest_probe = {1'b0, 8'h08};
-        DEST_ESP, DEST_SP, DEST_eSP:    gpr_dest_probe = {1'b0, 8'h10};
-        DEST_EBP, DEST_BP:              gpr_dest_probe = {1'b0, 8'h20};
-        DEST_ESI, DEST_SI, DEST_eSI:    gpr_dest_probe = {1'b0, 8'h40};
-        DEST_EDI, DEST_DI, DEST_eDI:    gpr_dest_probe = {1'b0, 8'h80};
-        DEST_DSTREG: gpr_dest_probe = {1'b0, gpr_wr_expand(i.dst_reg_sel)};
-        DEST_SRCREG: gpr_dest_probe = {1'b0, gpr_wr_expand(i.src_reg_sel)};
-        DEST_USTEP_BSWAP: gpr_dest_probe = {1'b0, gpr_wr_expand(i.src_reg_sel)};
-        DEST_USTEP_ALU: gpr_dest_probe = {1'b0, gpr_wr_expand(i.dst_reg_sel)};
-        DEST_IRF:    gpr_dest_probe = (COUNTR[5:3] != 3'b100)
-                                    ? {1'b0, 8'h01 << COUNTR[2:0]}
-                                    : {1'b1, 8'h00};   // seg selector row: clear all
-        // Frequent, provably GPR/segment-free destinations: no-op.
-        DEST_TMPB, DEST_TMPC, DEST_TMPD, DEST_TMPE, DEST_TMPF,
-        DEST_TMPG, DEST_TMPH, DEST_TMPeIP, DEST_TMPeSP,
-        DEST_OPR_W, DEST_OPROFF, DEST_CSOPCD, DEST_CR2,
-        DEST_EIP, DEST_eIP, DEST_IP, DEST_EFLAGS, DEST_FLAGS,
-        DEST_FLAGSB, DEST_FLAGSL, DEST_COUNTR, DEST_COUNT5,
-        DEST_MDTMP, DEST_MDTMP4, DEST_PROTUN, DEST_SLCTR,
-        DEST_TMP_TR, DEST_FSVeIP, DEST_DR6, DEST_DR7,
-        7'h7F:                          gpr_dest_probe = 9'h0;
+        DEST_EAX, DEST_AX, DEST_AL, DEST_AH, DEST_eAX_AL:
+            gpr_dest_mask = 8'h01;
+        DEST_ECX, DEST_CX, DEST_CL, DEST_CH, DEST_eCX:
+            gpr_dest_mask = 8'h02;
+        DEST_EDX, DEST_DX:
+            gpr_dest_mask = 8'h04;
+        DEST_eDX_AH:
+            gpr_dest_mask = op_size == 2'd0 ? 8'h01 : 8'h04;
+        DEST_DL, DEST_DH:
+            gpr_dest_mask = 8'h04;
+        DEST_EBX, DEST_BX, DEST_BL, DEST_BH:
+            gpr_dest_mask = 8'h08;
+        DEST_ESP, DEST_SP, DEST_eSP:
+            gpr_dest_mask = 8'h10;
+        DEST_EBP, DEST_BP:
+            gpr_dest_mask = 8'h20;
+        DEST_ESI, DEST_SI, DEST_eSI:
+            gpr_dest_mask = 8'h40;
+        DEST_EDI, DEST_DI, DEST_eDI:
+            gpr_dest_mask = 8'h80;
+        DEST_DSTREG:
+            gpr_dest_mask = gpr_wr_expand(i.dst_reg_sel);
+        DEST_SRCREG, DEST_USTEP_BSWAP:
+            gpr_dest_mask = gpr_wr_expand(i.src_reg_sel);
+        DEST_USTEP_ALU:
+            gpr_dest_mask = gpr_wr_expand(i.dst_reg_sel);
+        DEST_IRF:
+            if (COUNTR[5:3] != 3'b100)
+                gpr_dest_mask = 8'h01 << COUNTR[2:0];
         default: ;
     endcase
 endfunction
-wire [8:0] d2_agu_ucprobe = uc_exec ? gpr_dest_probe(uc_dest) : 9'h0;
+wire [7:0] d2_agu_ucmask = uc_exec ? gpr_dest_mask(uc_dest) : 8'h00;
 wire [7:0] ea_inval_gpr =
-    d2_agu_ucprobe[7:0] |
+    d2_agu_ucmask |
     (fast_shc_pending ? gpr_wr_expand(fast_shc_dst) : 8'h0) |
     ((uc_exec && fast_memc_pending) ? gpr_wr_expand(fast_memc_dst) : 8'h0) |
     ((uc_exec && fast_last && !any_fault && fast_commit_sel_r == FAST_COMMIT_ALU)
@@ -1381,8 +1439,7 @@ wire seg_cmd_mutates = (seg_cmd != SEG_CMD_NONE) &&
                        (seg_cmd != SEG_CMD_INIT_SEG) &&
                        (seg_cmd != SEG_CMD_UPDATE_SEG) &&
                        (seg_cmd != SEG_CMD_SPCR);
-wire ea_inval_all = d2_agu_ucprobe[8] ||
-                    (seg_cmd_valid && seg_cmd_mutates) ||
+wire ea_inval_all = (seg_cmd_valid && seg_cmd_mutates) ||
                     (d2_agu_effmask_r != eff_mask_pending);
 
 // Eligibility (MVP): plain 32-bit MEMORY modrm EA (mod!=11), no
@@ -1571,6 +1628,9 @@ segmentation_unit seg_unit (
     .ctssaf_pulse     (uc_exec && uc_aluop == ALUJMP_CTSSAF),
     .seg_cmd          (seg_cmd),
     .seg_target       (seg_cmd_target),
+    .init_addr32      (i_bus.addr32),
+    .init_stack_op    (i_bus.stack_op),
+    .clear_descsw     (uc_dest == DEST_DESSTK),
     .seg_data         (seg_cmd_data),
     .desc_lo          (TMPC),
     .desc_hi          (desc_raw_hi),
@@ -1579,7 +1639,11 @@ segmentation_unit seg_unit (
     .copy_dpl_s2      (copy_dpl_s2),
     .conform_dpl_s2   (conform_dpl_s2),
     .conform_dpl_value_s2(conform_dpl_value_s2),
-    .seg_cache        (seg_cache),
+    .desc_cache       (desc_cache),
+    .idt_base         (idt_base),
+    .idt_limit        (idt_limit),
+    .gdt_base         (gdt_base),
+    .gdt_limit        (gdt_limit),
     .lar_result       (seg_lar_result),
     .llim_result      (seg_llim_result),
     .lbas_result      (seg_lbas_result),
@@ -1611,7 +1675,6 @@ always_comb begin
 
     if (d2_valid) begin
         seg_cmd_target = init_final_seg;
-        seg_cmd_data = {30'd0, i_bus.stack_op, i_bus.addr32};
     end else if ((uc_buscode == BUSOP_IND_PLUS_ALU || uc_buscode == BUSOP_IND_ALU2 ||
                   uc_buscode == BUSOP_IND_SRC)
                  && (uc_dest == DEST_DES_OS || uc_dest == DEST_DES_SR)) begin
@@ -1630,11 +1693,6 @@ always_comb begin
             BUSOP_IND_ALU2,
             BUSOP_IND_SRC: begin
                 seg_cmd = SEG_CMD_UPDATE_SEG;
-                // DESSTK: set clear_descsw flag in seg_data[0]
-                if (uc_dest == DEST_DESSTK)
-                    seg_cmd_data = {31'd0, 1'b1};
-                else
-                    seg_cmd_data = 32'd0;
             end
             BUSOP_SBRM: begin
                 if (!pe || vm)
@@ -1895,8 +1953,8 @@ wire prot_test_en = uc_exec && prot_is_6x && !prot_is_ptsav && (pe || is_fpu_pro
 wire selector_null_wire = (slctr_fwd[15:3] == 13'b0) && !slctr_fwd[2]; // Null selector: Index=0, TI=0
 wire [15:0] selector_desc_end = {slctr_fwd[15:3], 3'b111}; // Last byte offset of 8-byte descriptor
 wire selector_oob_wire = slctr_fwd[2] ?
-    ({12'h0, seg_cache[SEG_LDT].limit} < {4'h0, selector_desc_end}) :  // LDT: compare against LDTR limit
-    (seg_cache[SEG_GDT].limit[15:0] < selector_desc_end);              // GDT: compare against GDTR limit
+    ({12'h0, desc_cache[7].limit} < {4'h0, selector_desc_end}) : // LDT: compare against LDTR limit
+    (gdt_limit[15:0] < selector_desc_end);                       // GDT: compare against GDTR limit
 
 // PROTUN forwarding
 wire        protun_writing = uc_exec && (uc_dest == DEST_PROTUN);
@@ -2225,7 +2283,7 @@ function automatic logic is_reljump_taken(input [6:0] aluop);
         ALUJMP_JNBUSY:  is_reljump_taken = 1'b1;                // FPU busy — always taken (no FPU)
         ALUJMP_JBUSY,
         ALUJMP_JICEWT:  is_reljump_taken = 1'b0;                // No x87 BUSY# or ICE wait source
-        ALUJMP_J16BIT:  is_reljump_taken = !seg_cache[SEG_TR].seg_type[3];
+        ALUJMP_J16BIT:  is_reljump_taken = !desc_cache[6].seg_type[3];
         default:        is_reljump_taken = 1'b0;
     endcase
 endfunction
@@ -2318,13 +2376,13 @@ always_ff @(posedge clk) begin
     end else if (prot_pipe_en) begin
         set_rpl_redirect_s1 <= uc_exec && pe &&
             (uc_aluop == ALUJMP_PTGEN) && (uc_alu_src == 6'h2D) &&
-            (seg_cache[SEG_CS].DPL != cpl) &&
-            !(seg_cache[SEG_CS].seg_type[3] && seg_cache[SEG_CS].seg_type[2]);
+            (desc_cache[SEG_CS].DPL != cpl) &&
+            !(desc_cache[SEG_CS].seg_type[3] && desc_cache[SEG_CS].seg_type[2]);
         set_rpl_redirect_s2 <= set_rpl_redirect_s1;
-        // Conforming code: set seg_cache[SEG_CS].DPL = CPL (no privilege change)
+        // Conforming code: set the CS cache DPL to CPL (no privilege change).
         conform_dpl_s1 <= uc_exec && pe &&
             (uc_aluop == ALUJMP_PTGEN) && (uc_alu_src == 6'h2D) &&
-            seg_cache[SEG_CS].seg_type[3] && seg_cache[SEG_CS].seg_type[2];
+            desc_cache[SEG_CS].seg_type[3] && desc_cache[SEG_CS].seg_type[2];
         conform_dpl_s2 <= conform_dpl_s1;
         conform_dpl_value_s1 <= CS[1:0];
         conform_dpl_value_s2 <= conform_dpl_value_s1;
@@ -2536,7 +2594,6 @@ always_ff @(posedge clk) begin
         uc_pref_suppress_prev <= 1'b0;
         stack_init_pending <= 1'b0;
         dbg_first_done <= 1'b0;
-        halted <= 1'b0;
         debug_ip <= 32'h0;
         gate_in_progress <= 1'b0;
         interrupt_entry <= 1'b0;
@@ -3167,7 +3224,7 @@ always_ff @(posedge clk) begin
 
     if (i_pop & i_bus.stack_op) begin
         automatic logic [31:0] stack_delta = i_bus.data32 ? 32'd4 : 32'd2;
-        if (seg_cache[SEG_SS].D_B) begin
+        if (desc_cache[SEG_SS].D_B) begin
             // B=1: 32-bit stack - use full ESP
             SIGMA <= i_bus.stack_dir ? (forwarded_esp + stack_delta) : (forwarded_esp - stack_delta);
         end else begin
@@ -3766,7 +3823,7 @@ always_ff @(posedge clk) begin
             DEST_ESP: ESP <= dest_value;
             // eSP: stack-pointer-aware write. B bit (SS descriptor) controls
             // whether ESP (32-bit, B=1) or SP (16-bit, B=0) is the stack pointer.
-            DEST_eSP: if (pe && seg_cache[SEG_SS].D_B)
+            DEST_eSP: if (pe && desc_cache[SEG_SS].D_B)
                           ESP <= dest_value;
                       else
                           ESP[15:0] <= dest_value[15:0];
@@ -4046,13 +4103,13 @@ always_ff @(posedge clk) begin
             if (i_bus.stack_op && i_bus.stack_dir) begin
                 // Stack pop/ret: IND = ESP, relocate at i_pop
                 automatic logic [31:0] stk =
-                    seg_cache[SEG_SS].D_B ? forwarded_esp : {16'h0, forwarded_esp[15:0]};
+                    desc_cache[SEG_SS].D_B ? forwarded_esp : {16'h0, forwarded_esp[15:0]};
                 IND <= stk;
                 ind_linear <= reloc(stk);
                 ind_linear_valid <= 1'b1;
             end else if (i_bus.stack_op && !i_bus.stack_dir) begin
                 // Stack push/call: IND = ESP-delta, relocate at i_pop.
-                automatic logic [31:0] stk = seg_cache[SEG_SS].D_B
+                automatic logic [31:0] stk = desc_cache[SEG_SS].D_B
                     ? forwarded_esp - (i_bus.data32 ? 32'd4 : 32'd2)
                     : {16'h0, forwarded_esp[15:0] - (i_bus.data32 ? 16'd4 : 16'd2)};
                 IND <= stk;
@@ -4072,9 +4129,16 @@ always_ff @(posedge clk) begin
         else if (uc_exec) begin
             automatic logic [31:0] ind_reloc_src = IND;
             automatic logic        ind_lin_use3 = 1'b0;
+            automatic logic        ind_lin_write = 1'b0;
             automatic logic [31:0] lin_a = IND;
             automatic logic [31:0] lin_b = 32'h0;
             automatic logic        ind_lin_mask16 = !eff_mask_pending;  // 16-bit mask
+            // DESCSW and STSSAF can change the active relocation base without
+            // changing IND. All other refreshes are tied to address-producing
+            // IND bus operations below.
+            if (seg_cmd == SEG_CMD_DESCSW ||
+                (uc_aluop == ALUJMP_STSSAF && mem_seg_sel == SEG_SS))
+                ind_lin_write = 1'b1;
             case (uc_buscode)
                 BUSOP_IND_PLUS_ALU: begin  // IN=+ - IND = source + ALU operand, IND_DELTA = ALU operand
                     automatic logic [31:0] ind_next;
@@ -4085,7 +4149,7 @@ always_ff @(posedge clk) begin
                     if (uc_alu_src != ALUSRC_ZERO)
                         IND_DELTA <= alu2;
                     if (uc_dest == DEST_DESSTK)
-                        ind_lin_mask16 = !pe || !seg_cache[SEG_SS].D_B;
+                        ind_lin_mask16 = !pe || !desc_cache[SEG_SS].D_B;
                     else if (uc_dest == DEST_DESCOD)
                         ind_lin_mask16 = !is_dword;
                     else if (uc_dest == DEST_DES_ES || uc_dest == DEST_DES_OS || uc_dest == DEST_DES_SR)
@@ -4096,18 +4160,21 @@ always_ff @(posedge clk) begin
                         ind_next = {16'h0, ind_next[15:0]};
                     // common EA: fuse alu1 + alu2 + seg_base into one add
                     ind_lin_use3 = 1'b1; lin_a = alu1; lin_b = alu2;
+                    ind_lin_write = 1'b1;
                     IND <= ind_next;
                     ind_reloc_src = ind_next;
                     ind_linear_valid <= 1'b1;
                 end
                 BUSOP_IND_ALU2: begin  // IN=2 - Set IND from ALU2 (alu_src)
+                    ind_lin_write = 1'b1;
                     IND <= alu_src;
                     ind_reloc_src = alu_src;
                     ind_linear_valid <= 1'b1;
                 end
                 BUSOP_IND_SRC: begin  // IND= - Set IND from source register
                     automatic logic [31:0] ind_val = alu_dst;
-                    if (uc_dest == DEST_DESSTK && (!pe || !seg_cache[SEG_SS].D_B))
+                    ind_lin_write = 1'b1;
+                    if (uc_dest == DEST_DESSTK && (!pe || !desc_cache[SEG_SS].D_B))
                         ind_val = {16'h0, ind_val[15:0]};
                     else if (uc_dest == DEST_DESCOD && !is_dword)
                         ind_val = {16'h0, ind_val[15:0]};
@@ -4120,6 +4187,7 @@ always_ff @(posedge clk) begin
                     // IN+= latches the delta like IN=+: PUSHA latches -1 at 089
                     // (IN=+) then +WORDSZ at 08B (IN+=) for the 08E IN+D loop.
                     automatic logic [31:0] ind_next = IND + alu_src;
+                    ind_lin_write = 1'b1;
                     if (!pe && !i.addr32)
                         ind_next = {16'h0, ind_next[15:0]};
                     IND <= ind_next;
@@ -4131,8 +4199,9 @@ always_ff @(posedge clk) begin
                 end
                 BUSOP_IN_PLUS_D: begin  // IN+D - IND += IND_DELTA (signed, latched by IN=+/IN+=)
                     automatic logic [31:0] ind_next;
+                    ind_lin_write = 1'b1;
                     ind_next = IND + IND_DELTA;
-                    if (!pe ? !i.addr32 : !(descsw_mode ? seg_cache[SEG_CS].D_B : seg_cache[SEG_SS].D_B))
+                    if (!pe ? !i.addr32 : !(descsw_mode ? desc_cache[SEG_CS].D_B : desc_cache[SEG_SS].D_B))
                         ind_next = {16'h0, ind_next[15:0]};
                     IND <= ind_next;
                     ind_reloc_src = ind_next;
@@ -4162,10 +4231,12 @@ always_ff @(posedge clk) begin
                 end
                 default: ;  // IND already holds the early EA from instruction start
             endcase
-            if (ind_lin_use3)
-                ind_linear <= reloc_add2(lin_a, lin_b, ind_lin_mask16); // Fused 3-input add
-            else
-                ind_linear <= reloc_uc(ind_reloc_src);
+            if (ind_lin_write) begin
+                if (ind_lin_use3)
+                    ind_linear <= reloc_add2(lin_a, lin_b, ind_lin_mask16); // Fused 3-input add
+                else
+                    ind_linear <= reloc_uc(ind_reloc_src);
+            end
         end
     end
 end
@@ -4508,7 +4579,7 @@ always_ff @(posedge clk) begin
             2'd1:    count_mod = {2'd0, count_raw[3:0]};  // mod 16
             default: count_mod = count_raw;               // mod 32, count is already 0..31
         endcase
-        shift_size <= count_raw;  // Store original count for OF check (count==1)
+        shift_size = count_raw;  // Store original count for OF check (count==1)
         sh1_width_r <= width;
 
         if (instr_is_shxd) begin   // i.opcode[3], 1: SHRD, 0: SHLD

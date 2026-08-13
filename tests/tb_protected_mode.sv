@@ -54,6 +54,7 @@ module tb_protected_mode;
         .snoop_addr(32'h0),
         .snoop_valid(1'b0),
         .a20_enable(1'b1),
+        .cpu_speed_sel(2'd0),
         .single_step(1'b0), // Continuous execution
         .dbg_CS(),
         .dbg_EIP(),
@@ -490,9 +491,7 @@ module tb_protected_mode;
         #1;
 
         // Initialize CPU state immediately after reset release, before the next
-        // clock edge.  The 17.z386 seg_cache is an unpacked struct array, and
-        // the simulator currently trips an internal force-pass bug if this
-        // testbench uses hierarchical force.
+        // clock edge. Write the compact hidden-descriptor bank directly.
         dut.CS = init_cs[15:0];
         dut.DS = init_ds[15:0];
         dut.SS = init_ss[15:0];
@@ -502,13 +501,13 @@ module tb_protected_mode;
 
         dut.EIP = eip_arg;
 
-        dut.seg_cache[SEG_CS] = build_seg_desc(cs_base, cs_limit[19:0], cs_flags);
-        dut.seg_cache[SEG_DS] = build_seg_desc(ds_base, ds_limit[19:0], ds_flags);
-        dut.seg_cache[SEG_SS] = build_seg_desc(ss_base, ss_limit[19:0], ss_flags);
-        dut.seg_cache[SEG_ES] = build_seg_desc(es_base, es_limit[19:0], es_flags);
-        dut.seg_cache[SEG_FS] = build_seg_desc(fs_base, fs_limit[19:0], fs_flags);
-        dut.seg_cache[SEG_GS] = build_seg_desc(gs_base, gs_limit[19:0], gs_flags);
-        dut.seg_cache[SEG_CS].D_B = d_init[0];
+        dut.seg_unit.desc_cache[1] = build_seg_desc(cs_base, cs_limit[19:0], cs_flags);
+        dut.seg_unit.desc_cache[3] = build_seg_desc(ds_base, ds_limit[19:0], ds_flags);
+        dut.seg_unit.desc_cache[2] = build_seg_desc(ss_base, ss_limit[19:0], ss_flags);
+        dut.seg_unit.desc_cache[0] = build_seg_desc(es_base, es_limit[19:0], es_flags);
+        dut.seg_unit.desc_cache[4] = build_seg_desc(fs_base, fs_limit[19:0], fs_flags);
+        dut.seg_unit.desc_cache[5] = build_seg_desc(gs_base, gs_limit[19:0], gs_flags);
+        dut.seg_unit.desc_cache[1].D_B = d_init[0];
 
         // Set prefetch to physical address where code resides
         // (prefetch currently bypasses paging, so we use physical address directly)
