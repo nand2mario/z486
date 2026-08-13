@@ -5,7 +5,9 @@
 // Based on z8086/tests/tb_z8086.sv but adapted for 32-bit
 //
 
-module tb_z386;
+module tb_z386 #(
+    parameter ENABLE_X87 = 0
+);
     // Segment cache array indices (from z386_pkg)
     localparam SEG_ES = 0, SEG_CS = 1, SEG_SS = 2, SEG_DS = 3;
     localparam SEG_FS = 4, SEG_GS = 5, SEG_IDT = 6, SEG_TR = 8, SEG_GDT = 10;
@@ -36,7 +38,9 @@ module tb_z386;
     wire        inta;
 
     // Instantiate the z386 CPU
-    z386 dut (
+    z386 #(
+        .ENABLE_X87(ENABLE_X87)
+    ) dut (
         .clk(clk),
         .reset_n(reset_n),
         .addr(addr),

@@ -43,6 +43,29 @@ CORE_RTL = {
     "z386": ["decoder.sv", "prefetch.sv"],
 }
 
+X87_RTL = [
+    "x87_bridge.sv",
+    "x87_cordic_rom.sv",
+    "x87_ucode_rom.sv",
+    "x87_sequencer.sv",
+    "x87_executor.sv",
+    "x87_transfer_fifo.sv",
+    "x87_stack_mem.sv",
+    "x87_core.sv",
+]
+
+LEGACY_X87_RTL = [
+    "x87_bridge.sv",
+    "x87_stack_mem.sv",
+    "x87_addsub.sv",
+    "x87_mul.sv",
+    "x87_divsqrt.sv",
+    "x87_roundint.sv",
+    "x87_cordic_rom.sv",
+    "x87_trans.sv",
+    "x87_core.sv",
+]
+
 
 @dataclass(frozen=True)
 class RunResult:
@@ -137,8 +160,27 @@ def build_memory_image() -> None:
 
 
 def rtl_sources(core: str, core_dir: Path) -> list[Path]:
-    names = COMMON_RTL + CORE_RTL[core]
+    names = COMMON_RTL.copy()
+    names += CORE_RTL[core]
     sources = [core_dir / name for name in names]
+    x87_dir = core_dir / "x87"
+    legacy_x87_dir = core_dir / "x87_v1"
+    if (x87_dir / "x87_pkg.sv").exists():
+        # Packages must precede z386.sv; implementation modules may follow.
+        sources.insert(1, x87_dir / "x87_pkg.sv")
+        sources.insert(2, x87_dir / "x87_ucode_pkg.sv")
+        sources.extend(x87_dir / name for name in X87_RTL)
+    elif (legacy_x87_dir / "x87_pkg.sv").exists():
+        # The package must precede z386.sv; implementation modules may follow.
+        sources.insert(1, legacy_x87_dir / "x87_pkg.sv")
+        sources.extend(legacy_x87_dir / name for name in LEGACY_X87_RTL)
+    elif (core_dir / "x87_pkg.sv").exists():
+        # Retain support for snapshots made before the versioned source split.
+        sources.insert(1, core_dir / "x87_pkg.sv")
+        for optional_name in ("x87_bridge.sv", "x87_core.sv"):
+            optional_src = core_dir / optional_name
+            if optional_src.exists():
+                sources.append(optional_src)
     for optional_name in ("l1_cache.sv", "l1_icache.sv"):
         optional_src = core_dir / optional_name
         if optional_src.exists():
@@ -200,6 +242,10 @@ def build_core(
         "--top-module",
         "tb_dhrystone",
     ]
+    if (core_dir / "x87").is_dir():
+        cmd.insert(cmd.index("-CFLAGS"), f"-I{core_dir / 'x87'}")
+    elif (core_dir / "x87_v1").is_dir():
+        cmd.insert(cmd.index("-CFLAGS"), f"-I{core_dir / 'x87_v1'}")
 
     sources = [
         THIS_DIR / "tb_dhrystone.sv",

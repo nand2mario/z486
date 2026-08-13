@@ -10,12 +10,30 @@ VERILATOR := verilator
 # Note: muldiv.sv and bus_prefetch.sv are standalone modules that can optionally
 # replace the inline mul/div and bus/prefetch code in z386.sv.
 # Currently z386.sv uses inline code; uncomment modules below when integrating.
-RTL_SRCS := $(Z386_DIR)/z386_pkg.sv $(Z386_DIR)/z386.sv $(Z386_DIR)/decoder.sv \
+X87_DIR := $(Z386_DIR)/x87
+X87_REF_DIR := x87_reference
+X87_GEN := $(X87_DIR)/x87_ucode.svh \
+			$(X87_DIR)/x87_ucode.mif \
+			$(X87_DIR)/x87_entries.svh
+X87_RTL := $(X87_DIR)/x87_pkg.sv \
+			$(X87_DIR)/x87_ucode_pkg.sv \
+			$(X87_DIR)/x87_bridge.sv \
+			$(X87_DIR)/x87_cordic_rom.sv \
+			$(X87_DIR)/x87_ucode_rom.sv \
+			$(X87_DIR)/x87_sequencer.sv \
+			$(X87_DIR)/x87_executor.sv \
+			$(X87_DIR)/x87_transfer_fifo.sv \
+			$(X87_DIR)/x87_stack_mem.sv \
+			$(X87_DIR)/x87_core.sv
+
+RTL_SRCS := $(Z386_DIR)/z386_pkg.sv $(X87_DIR)/x87_pkg.sv \
+			$(X87_DIR)/x87_ucode_pkg.sv $(Z386_DIR)/z386.sv $(Z386_DIR)/decoder.sv \
 			$(Z386_DIR)/alu.sv $(Z386_DIR)/biu.sv $(Z386_DIR)/prefetch.sv \
 			$(Z386_DIR)/paging_unit.sv $(Z386_DIR)/paging_tlb.sv $(Z386_DIR)/paging_walker.sv \
 			$(Z386_DIR)/l1_cache.sv $(Z386_DIR)/l1_icache.sv \
+			$(filter-out $(X87_DIR)/x87_pkg.sv $(X87_DIR)/x87_ucode_pkg.sv,$(X87_RTL)) \
 			$(Z386_DIR)/dsp_mul.sv $(Z386_DIR)/protection.sv $(Z386_DIR)/segmentation_unit.sv
-RTL_DEPS := $(Z386_DIR)/ucode_recipes.svh
+RTL_DEPS := $(Z386_DIR)/ucode_recipes.svh $(X87_GEN)
 # Optional modules (not yet integrated):
 # RTL_SRCS += $(Z386_DIR)/muldiv.sv $(Z386_DIR)/bus_prefetch.sv
 TB_SRCS := tb_z386.sv
@@ -29,6 +47,8 @@ VFLAGS_BASE += -O3
 VFLAGS_BASE += --build
 VFLAGS_BASE += -j 0
 VFLAGS_BASE += -I$(Z386_DIR)
+VFLAGS_BASE += -I$(X87_DIR)
+VFLAGS_BASE += -I$(X87_REF_DIR)
 VFLAGS_BASE += -CFLAGS "-std=c++14 -O3"
 
 # With VCD trace support (singlestep tests — short runs, need waveforms)
@@ -55,6 +75,18 @@ TB_L1_SRCS := tb_l1_cache.sv
 CPP_L1_SRCS := sim_main_l1_cache.cpp
 TB_L1I_SRCS := tb_l1_icache.sv
 CPP_L1I_SRCS := sim_main_l1_icache.cpp
+TB_X87_BRIDGE_SRCS := tb_x87_bridge.sv
+CPP_X87_BRIDGE_SRCS := sim_main_x87_bridge.cpp
+TB_X87_SEQ_SRCS := tb_x87_sequencer.sv
+CPP_X87_SEQ_SRCS := sim_main_x87_sequencer.cpp
+TB_X87_EXECUTOR_SRCS := tb_x87_executor.sv
+CPP_X87_EXECUTOR_SRCS := sim_main_x87_executor.cpp
+TB_X87_TESTFLOAT_SRCS := tb_x87_testfloat.sv
+CPP_X87_TESTFLOAT_SRCS := sim_main_x87_testfloat.cpp
+TB_X87_CORE_SRCS := tb_x87_core.sv
+CPP_X87_CORE_SRCS := sim_main_x87_core.cpp
+TB_X87_FIFO_SRCS := tb_x87_transfer_fifo.sv
+CPP_X87_FIFO_SRCS := sim_main_x87_transfer_fifo.cpp
 
 # PLA4 verification testbench sources
 TB_PLA4_SRCS := tb_protection_pla4.sv
@@ -62,7 +94,7 @@ CPP_PLA4_SRCS := sim_main_pla4.cpp
 PLA4_RTL := $(Z386_DIR)/protection.sv
 
 # Targets
-.PHONY: all build test-simple test-full test-386 test-186 test-protected test-pla4 test-l1-cache test-l1-icache dhrystone clean help
+.PHONY: all build test-simple test-full test-386 test-186 test-protected test-pla4 test-l1-cache test-l1-icache test-x87-bridge test-x87-sequencer test-x87-executor test-x87-testfloat test-x87-fifo test-x87-core test-x87-integration test-x87-integer dhrystone clean help
 
 all: build
 
@@ -81,6 +113,20 @@ obj_dir/Vtb_protected_mode: $(RTL_SRCS) $(RTL_DEPS) $(TB_PROT_SRCS) $(CPP_PROT_S
 	$(VERILATOR) $(VFLAGS) --top-module tb_protected_mode $(TB_PROT_SRCS) $(RTL_SRCS) $(CPP_PROT_SRCS)
 	@echo "Build complete: obj_dir/Vtb_protected_mode"
 
+obj_dir_x87/Vtb_protected_mode: $(RTL_SRCS) $(RTL_DEPS) $(TB_PROT_SRCS) $(CPP_PROT_SRCS)
+	@echo "Building x87-enabled protected mode testbench with Verilator..."
+	cp -f ../*.hex .
+	$(VERILATOR) $(VFLAGS) --Mdir obj_dir_x87 -GENABLE_X87=1 --top-module tb_protected_mode \
+		$(TB_PROT_SRCS) $(RTL_SRCS) $(CPP_PROT_SRCS)
+	@echo "Build complete: obj_dir_x87/Vtb_protected_mode"
+
+obj_dir_x87_int/Vtb_z386: $(RTL_SRCS) $(RTL_DEPS) $(TB_SRCS) $(CPP_SRCS)
+	@echo "Building x87-enabled integer testbench with Verilator..."
+	cp -f ../*.hex .
+	$(VERILATOR) $(VFLAGS) --Mdir obj_dir_x87_int -GENABLE_X87=1 --top-module tb_z386 \
+		$(TB_SRCS) $(RTL_SRCS) $(CPP_SRCS)
+	@echo "Build complete: obj_dir_x87_int/Vtb_z386"
+
 obj_dir/Vtb_test386: $(RTL_SRCS) $(RTL_DEPS) $(TB386_SRCS) $(CPP386_SRCS)
 	@echo "Building test386 testbench with Verilator..."
 	cp -f ../*.hex .
@@ -96,6 +142,87 @@ obj_dir/Vtb_l1_icache: $(Z386_DIR)/l1_icache.sv $(TB_L1I_SRCS) $(CPP_L1I_SRCS)
 	@echo "Building L1 instruction cache unit test with Verilator..."
 	$(VERILATOR) $(VFLAGS_NOTRACE) --top-module tb_l1_icache $(TB_L1I_SRCS) $(Z386_DIR)/l1_icache.sv $(CPP_L1I_SRCS)
 	@echo "Build complete: obj_dir/Vtb_l1_icache"
+
+obj_dir/Vtb_x87_bridge: $(X87_DIR)/x87_bridge.sv $(TB_X87_BRIDGE_SRCS) $(CPP_X87_BRIDGE_SRCS)
+	@echo "Building x87 bridge unit test with Verilator..."
+	$(VERILATOR) $(VFLAGS_NOTRACE) --top-module tb_x87_bridge $(TB_X87_BRIDGE_SRCS) $(X87_DIR)/x87_bridge.sv $(CPP_X87_BRIDGE_SRCS)
+	@echo "Build complete: obj_dir/Vtb_x87_bridge"
+
+$(X87_DIR)/x87_ucode.svh $(X87_DIR)/x87_ucode.mif $(X87_DIR)/x87_entries.svh: $(X87_DIR)/build_x87_microcode.py
+	cd $(X87_DIR) && ./build_x87_microcode.py
+
+obj_dir/Vtb_x87_sequencer: $(X87_DIR)/x87_ucode.svh $(X87_DIR)/x87_entries.svh \
+		$(X87_DIR)/x87_ucode_pkg.sv $(X87_DIR)/x87_ucode_rom.sv \
+		$(X87_DIR)/x87_sequencer.sv $(TB_X87_SEQ_SRCS) $(CPP_X87_SEQ_SRCS)
+	@echo "Building x87 sequencer unit test with Verilator..."
+	$(VERILATOR) $(VFLAGS_NOTRACE) --top-module tb_x87_sequencer \
+		$(X87_DIR)/x87_ucode_pkg.sv $(TB_X87_SEQ_SRCS) \
+		$(X87_DIR)/x87_ucode_rom.sv $(X87_DIR)/x87_sequencer.sv \
+		$(CPP_X87_SEQ_SRCS)
+	@echo "Build complete: obj_dir/Vtb_x87_sequencer"
+
+obj_dir/Vtb_x87_executor: $(X87_DIR)/x87_ucode.svh $(X87_DIR)/x87_entries.svh \
+		$(X87_DIR)/x87_pkg.sv $(X87_REF_DIR)/x87_roundint.sv \
+		$(X87_REF_DIR)/x87_addsub.sv $(X87_REF_DIR)/x87_mul.sv \
+		$(X87_REF_DIR)/x87_divsqrt.sv $(X87_DIR)/x87_cordic_rom.sv \
+		$(X87_REF_DIR)/x87_trans.sv \
+		$(X87_DIR)/x87_ucode_pkg.sv $(X87_DIR)/x87_ucode_rom.sv \
+		$(X87_DIR)/x87_sequencer.sv $(X87_DIR)/x87_executor.sv \
+		$(TB_X87_EXECUTOR_SRCS) $(CPP_X87_EXECUTOR_SRCS)
+	@echo "Building x87 executor unit test with Verilator..."
+	$(VERILATOR) $(VFLAGS_NOTRACE) --top-module tb_x87_executor \
+		$(X87_DIR)/x87_pkg.sv $(X87_DIR)/x87_ucode_pkg.sv \
+		$(TB_X87_EXECUTOR_SRCS) $(X87_REF_DIR)/x87_roundint.sv \
+		$(X87_REF_DIR)/x87_addsub.sv $(X87_REF_DIR)/x87_mul.sv \
+		$(X87_REF_DIR)/x87_divsqrt.sv $(X87_DIR)/x87_cordic_rom.sv \
+		$(X87_REF_DIR)/x87_trans.sv \
+		$(X87_DIR)/x87_ucode_rom.sv $(X87_DIR)/x87_sequencer.sv \
+		$(X87_DIR)/x87_executor.sv $(CPP_X87_EXECUTOR_SRCS)
+	@echo "Build complete: obj_dir/Vtb_x87_executor"
+
+obj_dir_x87_testfloat/Vtb_x87_testfloat: \
+		$(X87_DIR)/x87_ucode.svh $(X87_DIR)/x87_entries.svh \
+		$(X87_DIR)/x87_pkg.sv $(X87_DIR)/x87_cordic_rom.sv \
+		$(X87_DIR)/x87_ucode_pkg.sv $(X87_DIR)/x87_ucode_rom.sv \
+		$(X87_DIR)/x87_sequencer.sv $(X87_DIR)/x87_executor.sv \
+		$(TB_X87_TESTFLOAT_SRCS) $(CPP_X87_TESTFLOAT_SRCS)
+	@echo "Building x87 TestFloat testbench with Verilator..."
+	$(VERILATOR) $(VFLAGS_NOTRACE) --Mdir obj_dir_x87_testfloat \
+		--top-module tb_x87_testfloat \
+		$(X87_DIR)/x87_pkg.sv $(X87_DIR)/x87_ucode_pkg.sv \
+		$(TB_X87_TESTFLOAT_SRCS) $(X87_DIR)/x87_cordic_rom.sv \
+		$(X87_DIR)/x87_ucode_rom.sv $(X87_DIR)/x87_sequencer.sv \
+		$(X87_DIR)/x87_executor.sv $(CPP_X87_TESTFLOAT_SRCS)
+	@echo "Build complete: obj_dir_x87_testfloat/Vtb_x87_testfloat"
+
+obj_dir_x87_core/Vtb_x87_core: $(X87_DIR)/x87_ucode.svh \
+		$(X87_DIR)/x87_entries.svh $(X87_DIR)/x87_pkg.sv \
+		$(X87_DIR)/x87_cordic_rom.sv $(X87_DIR)/x87_ucode_pkg.sv \
+		$(X87_DIR)/x87_ucode_rom.sv $(X87_DIR)/x87_sequencer.sv \
+		$(X87_DIR)/x87_executor.sv \
+		$(X87_DIR)/x87_transfer_fifo.sv \
+		$(X87_DIR)/x87_stack_mem.sv \
+		$(X87_DIR)/x87_core.sv $(TB_X87_CORE_SRCS) \
+		$(CPP_X87_CORE_SRCS)
+	@echo "Building x87 core unit test with Verilator..."
+	$(VERILATOR) $(VFLAGS_NOTRACE) --Mdir obj_dir_x87_core \
+		--top-module tb_x87_core $(TB_X87_CORE_SRCS) \
+		$(X87_DIR)/x87_pkg.sv $(X87_DIR)/x87_cordic_rom.sv \
+		$(X87_DIR)/x87_ucode_pkg.sv $(X87_DIR)/x87_ucode_rom.sv \
+		$(X87_DIR)/x87_sequencer.sv $(X87_DIR)/x87_executor.sv \
+		$(X87_DIR)/x87_transfer_fifo.sv \
+		$(X87_DIR)/x87_stack_mem.sv $(X87_DIR)/x87_core.sv \
+		$(CPP_X87_CORE_SRCS)
+	@echo "Build complete: obj_dir_x87_core/Vtb_x87_core"
+
+obj_dir_x87_fifo/Vtb_x87_transfer_fifo: \
+		$(X87_DIR)/x87_transfer_fifo.sv $(TB_X87_FIFO_SRCS) \
+		$(CPP_X87_FIFO_SRCS)
+	@echo "Building x87 transfer FIFO unit test with Verilator..."
+	$(VERILATOR) $(VFLAGS_NOTRACE) --Mdir obj_dir_x87_fifo \
+		--top-module tb_x87_transfer_fifo $(TB_X87_FIFO_SRCS) \
+		$(X87_DIR)/x87_transfer_fifo.sv $(CPP_X87_FIFO_SRCS)
+	@echo "Build complete: obj_dir_x87_fifo/Vtb_x87_transfer_fifo"
 
 test: test-simple
 
@@ -124,11 +251,55 @@ test-l1-icache: obj_dir/Vtb_l1_icache
 	@echo "Running L1 instruction cache unit test..."
 	./obj_dir/Vtb_l1_icache
 
+test-x87-bridge: obj_dir/Vtb_x87_bridge
+	@echo "Running x87 bridge unit test..."
+	./obj_dir/Vtb_x87_bridge
+
+test-x87-sequencer: obj_dir/Vtb_x87_sequencer
+	@echo "Running x87 sequencer unit test..."
+	./obj_dir/Vtb_x87_sequencer
+
+test-x87-executor: obj_dir/Vtb_x87_executor
+	@echo "Running x87 executor unit test..."
+	./obj_dir/Vtb_x87_executor
+
+TESTFLOAT_GEN ?= $(CURDIR)/../../qemu/subprojects/berkeley-testfloat-3/build/Linux-x86_64-GCC/testfloat_gen
+X87_TESTFLOAT_CASES ?= 512
+
+test-x87-testfloat: obj_dir_x87_testfloat/Vtb_x87_testfloat
+	@echo "Running x87 arithmetic against Berkeley TestFloat..."
+	./run_x87_testfloat.sh "$(TESTFLOAT_GEN)" \
+		./obj_dir_x87_testfloat/Vtb_x87_testfloat \
+		"$(X87_TESTFLOAT_CASES)"
+
+test-x87-fifo: obj_dir_x87_fifo/Vtb_x87_transfer_fifo
+	@echo "Running x87 transfer FIFO unit test..."
+	./obj_dir_x87_fifo/Vtb_x87_transfer_fifo
+
+test-x87-core: obj_dir_x87_core/Vtb_x87_core
+	@echo "Running x87 core unit test..."
+	./obj_dir_x87_core/Vtb_x87_core
+
+test-x87-integration: obj_dir_x87/Vtb_protected_mode
+	@echo "Running x87-enabled CPU protocol tests..."
+	Z386_ENABLE_X87=1 Z386_TESTBENCH=$(CURDIR)/obj_dir_x87/Vtb_protected_mode ./test_protected_mode.py x87_protocol x87_env32 x87_arithmetic x87_heap32 x87_qemu_special x87_qemu_exceptions
+
+test-x87-integer: obj_dir_x87_int/Vtb_z386
+	@echo "Running integer regressions with x87 enabled..."
+	Z386_TESTBENCH=$(CURDIR)/obj_dir_x87_int/Vtb_z386 ./test_simple.py --no-color
+	Z386_TESTBENCH=$(CURDIR)/obj_dir_x87_int/Vtb_z386 ./test_singlestep_real.py --no-color
+	Z386_TESTBENCH=$(CURDIR)/obj_dir_x87_int/Vtb_z386 ./test_singlestep_protected.py -nt
+
 dhrystone:
 	$(MAKE) -C dhrystone compare
 
 # Clean build artifacts
 clean:
+	rm -rf obj_dir_x87_testfloat
+	rm -rf obj_dir_x87_fifo
+	rm -rf obj_dir_x87_core
+	rm -rf obj_dir_x87
+	rm -rf obj_dir_x87_int
 	rm -rf obj_dir
 	rm -f trace.fst trace.vcd
 	rm -f result.txt
@@ -145,6 +316,10 @@ help:
 	@echo "  make test-386       - Run test386.asm"
 	@echo "  make test-l1-cache  - Run PIPT L1 cache unit test"
 	@echo "  make test-l1-icache - Run PIPT L1 instruction cache unit test"
+	@echo "  make test-x87-bridge - Run x87 protocol bridge unit test"
+	@echo "  make test-x87-core - Run x87 state and transfer unit test"
+	@echo "  make test-x87-testfloat - Check arithmetic with Berkeley TestFloat"
+	@echo "  make test-x87-integration - Run x87-enabled CPU protocol test"
 	@echo "  make dhrystone      - Compare z386 0.1 and current z386 on Dhrystone"
 	@echo "  make clean          - Remove build artifacts"
 	@echo "  make help           - Show this help message"

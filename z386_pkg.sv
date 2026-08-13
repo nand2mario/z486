@@ -688,7 +688,7 @@ localparam ALUJMP_CMISC2 = 7'h3C;  // Clear MISC2 microcode flag
 localparam ALUJMP_CREPF  = 7'h3D;  // Clear the REP restart/correction latch
 localparam ALUJMP_SERRCF = 7'h36;  // Set error code flag (ERROR_CODE_FLAG = true)
 localparam ALUJMP_J16BIT = 7'h40;   // Jump if 286-format TSS in TR (16-bit stack switch / task save-load / IO map)
-localparam ALUJMP_JNBUSY = 7'h42;   // Jump if BUSY# inactive (always taken: no FPU)
+localparam ALUJMP_JNBUSY = 7'h42;   // Jump if x87 BUSY# is inactive (high)
 localparam ALUJMP_JTSSAF  = 7'h50;   // JTSSAF: Jump if TSS access flag is set
 localparam ALUJMP_JG = 7'h51;        // JG: Jump if Greater (ZF=0 AND SF=OF)
 localparam ALUJMP_JINTSW = 7'h52;    // JINTSW: Jump if software interrupt (!interrupt_hw)
@@ -697,8 +697,8 @@ localparam ALUJMP_JEXTFT = 7'h4C;   // Jump when the current event is external t
 localparam ALUJMP_JMISC2 = 7'h55;   // JMISC2: Jump if MISC2 flag set
 localparam ALUJMP_JNERRC = 7'h56;    // JNERRC: Jump if no error code (!error_code_flag)
 localparam ALUJMP_JNOFLT = 7'h57;   // Suppress a descriptor-probe fault
-localparam ALUJMP_JPEREQ = 7'h4E;    // JPEREQ: Jump if PEREQ (coprocessor request) — always taken (no FPU)
-localparam ALUJMP_JBUSY = 7'h4F;     // x87 BUSY# branch; never taken without an FPU
+localparam ALUJMP_JPEREQ = 7'h4E;   // Historical name: branch while PEREQ is inactive
+localparam ALUJMP_JBUSY = 7'h4F;    // Historical name; x87 ERROR#-asserted branch
 localparam ALUJMP_JNFLGB = 7'h58;    // JNFLGB: Jump if flags backup NOT active
 localparam ALUJMP_JREP = 7'h59;      // Jump when interrupted REP MOVS needs state correction
 localparam ALUJMP_JNO = 7'h5C;       // JNO: Jump if Not Overflow (OF=0) - used by INTO
@@ -869,7 +869,9 @@ localparam ALUSRC_CONST_40 = 6'h1A;    // 0x40
 localparam ALUSRC_CONST_F0000 = 6'h1B; // 0xF0000
 localparam ALUSRC_CONST_0D = 6'h1C;    // 0x0D (13)
 localparam ALUSRC_CONST_5D = 6'h1D;    // 0x5D (93)
-localparam ALUSRC_SIGMA = 6'h1E;       // NOTE: fields.txt says 0x800000f8, but we use SIGMA
+// The immutable ROM uses 1e for both the historical f8 coprocessor port and
+// z386x's SIGMA path. ucode_rom supplies q_fpu_f8 to distinguish them.
+localparam ALUSRC_SIGMA = 6'h1E;
 localparam ALUSRC_CONST_FC = 6'h1F;    // 0x800000fc (FPU port address)
 localparam ALUSRC_CONST_70 = 6'h20;    // 0x70
 localparam ALUSRC_CONST_73 = 6'h21;    // 0x73

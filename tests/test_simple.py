@@ -12,10 +12,11 @@ from pathlib import Path
 import tempfile
 import argparse
 import math
+import os
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / 'tests'
-TB = TESTS / 'obj_dir' / 'Vtb_z386'
+TB = Path(os.environ.get('Z386_TESTBENCH', TESTS / 'obj_dir' / 'Vtb_z386'))
 TEST_DIR = TESTS / 'simple'
 VERBOSE = False
 
@@ -73,6 +74,11 @@ OPCODE_NAMES = [
 
 def build_if_needed():
     """Build the testbench if it doesn't exist or source files have changed."""
+    if os.environ.get('Z386_TESTBENCH'):
+        if not TB.exists():
+            raise SystemExit(f"Requested testbench does not exist: {TB}")
+        return
+
     # Source files to check (matching Makefile)
     source_files = [
         ROOT / 'z386_pkg.sv',

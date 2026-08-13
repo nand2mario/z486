@@ -148,6 +148,12 @@ always_comb begin
                 if (clear_descsw) begin
                     seg_base_pending_c  = seg_base_for(seg_target, 1'b0);
                     addr_size_pending_c = pe ? desc_cache[SEG_SS].D_B : i_addr32_r;
+                end else if (seg_target == SEG_IO) begin
+                    // I/O is not a segmented memory offset. Preserve reserved
+                    // 32-bit coprocessor ports; IN/OUT sources are already
+                    // zero-extended to their architectural port width.
+                    seg_base_pending_c  = 32'h0;
+                    addr_size_pending_c = 1'b1;
                 end else begin
                     seg_base_pending_c  = seg_base_for(seg_target, descsw_mode);
                     addr_size_pending_c = ((i_stack_op_r || stack_push_mode) && pe && seg_target == SEG_SS)

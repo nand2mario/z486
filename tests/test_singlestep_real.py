@@ -20,7 +20,7 @@ import os
 # Paths
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / 'tests'
-TB = TESTS / 'obj_dir' / 'Vtb_z386'
+TB = Path(os.environ.get('Z386_TESTBENCH', TESTS / 'obj_dir' / 'Vtb_z386'))
 TEST_DIR = TESTS / 'singlestep_real' / 'v1_ex_real_mode'
 
 VERBOSE = False
@@ -186,6 +186,10 @@ def decode_cpu_state(mv, offset, length, cpu_name):
 
 def build_if_needed():
     """Build the testbench via make (handles dependency checking)."""
+    if os.environ.get('Z386_TESTBENCH'):
+        if not TB.exists():
+            raise SystemExit(f"Requested testbench does not exist: {TB}")
+        return
     sp.check_call(['make', '-s', 'obj_dir/Vtb_z386'], cwd=str(TESTS))
 
 

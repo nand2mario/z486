@@ -17,7 +17,8 @@ module ucode_rom
     output      [5:0]  q_shift_alu_src,
     output      [6:0]  q_shift_aluop,
     output      [2:0]  q_dly_source,
-    output      [8:0]  q_mem_ctrl
+    output      [8:0]  q_mem_ctrl,
+    output             q_fpu_f8
 );
 
 (* preserve *) reg [5:0] q_shift_source_r;
@@ -26,6 +27,29 @@ module ucode_rom
 (* preserve *) reg [6:0] q_shift_aluop_r;
 reg [2:0] q_dly_source_r;
 (* preserve *) reg [8:0] q_mem_ctrl_r;
+reg q_fpu_f8_r;
+
+// ALU source 1e is the historical 0x800000f8 coprocessor command port. z386x
+// also reuses that encoding for SIGMA in non-FPU words, so keep the distinction
+// as a compact ROM-delay sideband rather than restoring a wide ALU mux input.
+function automatic logic fpu_f8_predecode(input [36:0] w);
+    logic [5:0] alusrc;
+    logic [6:0] dest;
+    logic [5:0] source;
+    logic [6:0] aluop;
+    logic [5:0] buscode;
+    begin
+        alusrc = w[36:31];
+        dest = w[30:24];
+        source = w[23:18];
+        aluop = w[17:11];
+        buscode = w[5:0];
+        fpu_f8_predecode = (alusrc == 6'h1e) &&
+            (((dest == DEST_DES_IO) && (buscode == BUSOP_IND_ALU2)) ||
+             ((dest == DEST_TMPH) && (source == SRC_SIGMA) &&
+              (aluop == ALUJMP_PASS2) && (buscode == 6'h0c)));
+    end
+endfunction
 
 // Source class for architectural GPR writes in an RNI delay slot. The Intel
 // ROM uses only these four sources; zero also covers non-forwarding uops.
@@ -102,9 +126,14 @@ function automatic [13:0] ucode_predecode(input [36:0] w);
     // bit44: JPEREQ with jump offset (coprocessor jump, always taken)
     ucode_predecode[7] = (aluop == ALUJMP_JPEREQ) && (alusrc != 6'h3F);
     // bit45: IO-capable read buscode (issues an IO read when seg_sel == SEG_IO)
-    ucode_predecode[8] = (buscode == BUSOP_RD_BW) || (buscode == BUSOP_RD);
+    ucode_predecode[8] = (buscode == BUSOP_RD_BW) ||
+                         (buscode == BUSOP_RD_WORD) ||
+                         (buscode == BUSOP_RD);
     // bit46: IO-capable write buscode (issues an IO write when seg_sel == SEG_IO)
-    ucode_predecode[9] = (buscode == BUSOP_WR) || (buscode == BUSOP_WR_OPR);
+    ucode_predecode[9] = (buscode == BUSOP_WR_WORD) ||
+                         (buscode == BUSOP_WR) ||
+                         (buscode == BUSOP_WR_OPR_WORD) ||
+                         (buscode == BUSOP_WR_OPR);
     // bit47: IACK bus cycle
     ucode_predecode[10] = (buscode == BUSOP_IACK);
     // bit48: pure DLY — waits for the bus but issues no request itself
@@ -166,6 +195,7 @@ always_ff @(posedge clk) begin
         q_shift_aluop_r <= q_mem[17:11];
         q_dly_source_r <= dly_source_predecode(q_mem[23:18]);
         q_mem_ctrl_r <= mem_ctrl_predecode(q_mem[36:0]);
+        q_fpu_f8_r <= fpu_f8_predecode(q_mem[36:0]);
     end
 end
 
@@ -196,6 +226,7 @@ end
 	        q_shift_aluop_r <= q_mem[17:11];
 	        q_dly_source_r <= dly_source_predecode(q_mem[23:18]);
 	        q_mem_ctrl_r <= mem_ctrl_predecode(q_mem[36:0]);
+	        q_fpu_f8_r <= fpu_f8_predecode(q_mem[36:0]);
 	    end
 	end
 
@@ -210,5 +241,6 @@ assign q_shift_alu_src = q_shift_alu_src_r;
 assign q_shift_aluop = q_shift_aluop_r;
 assign q_dly_source = q_dly_source_r;
 assign q_mem_ctrl = q_mem_ctrl_r;
+assign q_fpu_f8 = q_fpu_f8_r;
 
 endmodule

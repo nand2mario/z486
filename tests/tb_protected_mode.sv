@@ -5,7 +5,9 @@
 
 /* verilator lint_off SYNCASYNCNET */
 
-module tb_protected_mode;
+module tb_protected_mode #(
+    parameter ENABLE_X87 = 0
+);
     // Segment cache array indices (from z386_pkg)
     localparam SEG_ES = 0, SEG_CS = 1, SEG_SS = 2, SEG_DS = 3;
     localparam SEG_FS = 4, SEG_GS = 5, SEG_IDT = 6, SEG_TR = 8, SEG_GDT = 10;
@@ -35,7 +37,9 @@ module tb_protected_mode;
     wire        triple_fault_reset;
 
     // Instantiate the z386 CPU
-    z386 dut (
+    z386 #(
+        .ENABLE_X87(ENABLE_X87)
+    ) dut (
         .clk(clk),
         .reset_n(reset_n),
         .addr(addr),
@@ -117,6 +121,11 @@ module tb_protected_mode;
     // Note: din is held stable (not cleared) to allow paging unit to sample it
     // when pg_mem_ready is asserted (which has 1-cycle delay from bus ready)
     always @(posedge clk) begin
+        if (ENABLE_X87 && reset_n && valid && io &&
+            (dut.i.opcode >= 8'hd8) && (dut.i.opcode <= 8'hdf))
+            $fatal(1, "x87 transaction escaped to external I/O: addr=%08x write=%b",
+                   {addr, 2'b00}, write);
+
         ready <= !rd_busy;
         resp_valid <= 1'b0;
         // Don't clear din - hold it stable for page walker timing
@@ -153,6 +162,18 @@ module tb_protected_mode;
         end
 
         if (valid && ready && !rd_busy) begin
+            // Coprocessor cycles use reserved 32-bit I/O addresses. The normal
+            // I/O trace intentionally truncates to programmed 16-bit ports,
+            // which would alias these transactions with test-control ports.
+            if ($test$plusargs("trace_x87") && io && addr[31]) begin
+                if (write)
+                    $display("X87 REQ eip=%08x uc=%03h addr=%08x WR be=%x data=%08x",
+                             dut.EIP, dut.uc_addr, {addr, 2'b00}, be, dout);
+                else
+                    $display("X87 REQ eip=%08x uc=%03h addr=%08x RD be=%x data=ffffffff",
+                             dut.EIP, dut.uc_addr, {addr, 2'b00}, be);
+            end
+
             if (inta) begin
                 // INTA bus cycle handling
                 ready <= 1'b0;
@@ -654,18 +675,6 @@ module tb_protected_mode;
             // Trace paging
             if ($test$plusargs("trace_paging") && dut.mem_req_upcoming)
                 $display("PAGING: linear=%08X servicing=%0d", dut.ind_linear, dut.mem_servicing);
-        end
-    end
-
-    // Waveform dump
-    string tracefile;
-    initial begin
-        if ($test$plusargs("trace")) begin
-            if (!$value$plusargs("tracefile=%s", tracefile))
-                tracefile = "trace.vcd";
-            $display("[TB] Waveform trace: %s", tracefile);
-            $dumpfile(tracefile);
-            $dumpvars(0, tb_protected_mode);
         end
     end
 

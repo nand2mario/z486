@@ -19,6 +19,7 @@ module z386
     parameter PROTECT_UMA_ROM = 0,
     parameter DCACHE_SET_BITS = 8,   // dcache size: 8 = 16KB, 7 = 8KB
     parameter ICACHE_SET_BITS = 8,   // icache size: 8 = 16KB, 7 = 8KB
+    parameter ENABLE_X87 = 0,
     parameter [6:0] CLOCK_RATE_MHZ = 7'd85
 )
 (
@@ -549,6 +550,7 @@ wire [5:0]  uc_alu_src_shift;
 wire [6:0]  uc_aluop_shift;
 wire [2:0]  uc_dly_source;
 wire [8:0]  uc_mem_ctrl;
+wire        uc_fpu_f8;
 assign uc = uc_rom_q;
 assign uc_next = uc_rom_early;
 
@@ -565,7 +567,8 @@ ucode_rom microcode_rom (
     .q_shift_alu_src(uc_alu_src_shift),
     .q_shift_aluop(uc_aluop_shift),
     .q_dly_source(uc_dly_source),
-    .q_mem_ctrl(uc_mem_ctrl)
+    .q_mem_ctrl(uc_mem_ctrl),
+    .q_fpu_f8(uc_fpu_f8)
 );
 
 wire [2:0] d2_kind = d2_rom_resident ? d2_rom_q_kind_r : uc_kind_early;
@@ -654,6 +657,16 @@ wire        dcache_req_accepted;
 wire        dcache_req_complete;
 wire        dcache_read_complete;
 wire [31:0] dcache_rdata;
+wire        x87_req_selected = ENABLE_X87 && dcache_req_valid && dcache_req_is_io &&
+                               ((dcache_req_phys_addr_raw == 32'h8000_00f8) ||
+                                (dcache_req_phys_addr_raw == 32'h8000_00fc));
+wire        x87_req_accepted;
+wire        x87_req_complete;
+wire        x87_read_complete;
+wire [31:0] x87_rdata;
+wire        x87_busy_n;
+wire        x87_pereq;
+wire        x87_error_n;
 wire        icache_req_valid;
 wire [31:0] icache_req_phys_addr_raw;
 wire        icache_req_accepted;
@@ -699,8 +712,9 @@ reg         direct_rd_pending;
 // VGA aperture accesses are device transactions. Bypass the posted L1 store
 // queue so an ET4000 bank-register write cannot overtake framebuffer writes.
 wire dcache_cpu_req = dcache_req_valid && !dcache_req_is_io &&
-                      !dcache_req_is_inta && !dcache_req_is_vga_mem;
-wire dcache_direct_req = dcache_req_valid &&
+                      !dcache_req_is_inta && !dcache_req_is_vga_mem &&
+                      !x87_req_selected;
+wire dcache_direct_req = dcache_req_valid && !x87_req_selected &&
                          (dcache_req_is_io || dcache_req_is_inta || dcache_req_is_vga_mem);
 wire dcache_read_pending = (dcache_rd_pending != 8'd0);
 wire icache_read_pending = (icache_rd_pending != 8'd0);
@@ -745,16 +759,79 @@ wire [31:0] icache_snoop_data = snoop_valid ? 32'h0 : icache_write_snoop_data_r;
 wire  [3:0] icache_snoop_be = snoop_valid ? 4'h0 : icache_write_snoop_be_r;
 wire        icache_snoop_patch = !snoop_valid && icache_write_snoop_pending;
 
-assign dcache_req_accepted = dcache_cpu_req ? dcache_cpu_ready : ext_direct_accept;
-assign dcache_req_complete = dcache_cpu_resp_valid ||
-                             (dcache_cpu_req && dcache_req_write && dcache_cpu_ready) ||
-                             direct_rd_resp_now ||
-                             (ext_direct_accept && ext_write_r);
-assign dcache_read_complete = dcache_cpu_resp_valid || direct_rd_resp_now;
-assign dcache_rdata = dcache_cpu_resp_valid ? dcache_cpu_dout : din;
+wire normal_req_accepted = dcache_cpu_req ? dcache_cpu_ready : ext_direct_accept;
+wire normal_req_complete = dcache_cpu_resp_valid ||
+                           (dcache_cpu_req && dcache_req_write && dcache_cpu_ready) ||
+                           direct_rd_resp_now ||
+                           (ext_direct_accept && ext_write_r);
+wire normal_read_complete = dcache_cpu_resp_valid || direct_rd_resp_now;
+wire [31:0] normal_rdata = dcache_cpu_resp_valid ? dcache_cpu_dout : din;
+
+assign dcache_req_accepted = x87_req_selected ? x87_req_accepted : normal_req_accepted;
+assign dcache_req_complete = normal_req_complete || x87_req_complete;
+assign dcache_read_complete = normal_read_complete || x87_read_complete;
+assign dcache_rdata = x87_read_complete ? x87_rdata : normal_rdata;
 assign icache_req_accepted = icache_cpu_ready;
 assign icache_req_complete = icache_cpu_resp_valid;
 assign icache_rdata = icache_cpu_line;
+
+generate
+if (ENABLE_X87) begin : gen_x87
+    wire        cmd_valid;
+    wire [10:0] cmd_fop;
+    wire        cmd_ready;
+    wire        word_in_valid;
+    wire  [3:0] word_in_be;
+    wire [31:0] word_in_data;
+    wire        word_in_ready;
+    wire        read_req_valid;
+    wire        read_req_data_port;
+    wire  [3:0] read_req_be;
+    wire        read_req_ready;
+    wire        read_resp_valid;
+    wire [31:0] read_resp_data;
+
+    x87_bridge bridge (
+        .clk(clk), .reset(!reset_n),
+        .req_valid(x87_req_selected),
+        .req_addr(dcache_req_phys_addr_raw),
+        .req_write(dcache_req_write),
+        .req_be(dcache_req_be),
+        .req_wdata(dcache_req_wdata),
+        .req_accepted(x87_req_accepted),
+        .req_complete(x87_req_complete),
+        .req_read_complete(x87_read_complete),
+        .req_rdata(x87_rdata),
+        .cmd_valid(cmd_valid), .cmd_fop(cmd_fop), .cmd_ready(cmd_ready),
+        .word_in_valid(word_in_valid), .word_in_be(word_in_be),
+        .word_in_data(word_in_data), .word_in_ready(word_in_ready),
+        .read_req_valid(read_req_valid),
+        .read_req_data_port(read_req_data_port), .read_req_be(read_req_be),
+        .read_req_ready(read_req_ready), .read_resp_valid(read_resp_valid),
+        .read_resp_data(read_resp_data)
+    );
+
+    x87_core core (
+        .clk(clk), .reset(!reset_n),
+        .cmd_valid(cmd_valid), .cmd_fop(cmd_fop), .cmd_ready(cmd_ready),
+        .word_in_valid(word_in_valid), .word_in_be(word_in_be),
+        .word_in_data(word_in_data), .word_in_ready(word_in_ready),
+        .read_req_valid(read_req_valid),
+        .read_req_data_port(read_req_data_port), .read_req_be(read_req_be),
+        .read_req_ready(read_req_ready), .read_resp_valid(read_resp_valid),
+        .read_resp_data(read_resp_data),
+        .busy_n(x87_busy_n), .pereq(x87_pereq), .error_n(x87_error_n)
+    );
+end else begin : gen_no_x87
+    assign x87_req_accepted = 1'b0;
+    assign x87_req_complete = 1'b0;
+    assign x87_read_complete = 1'b0;
+    assign x87_rdata = 32'h0;
+    assign x87_busy_n = 1'b1;
+    assign x87_pereq = 1'b0;
+    assign x87_error_n = 1'b1;
+end
+endgenerate
 
 assign addr       = ext_addr_r;
 assign be         = ext_be_r;
@@ -2159,6 +2236,7 @@ wire        br_is_rel8     = !i.has_0f && (i.opcode[7:4] == 4'b0111 || i.opcode 
 wire [31:0] br_disp        = br_is_rel8 ? {{24{i.displacement[7]}}, i.displacement[7:0]}
                                         : i.displacement;
 wire [31:0] br_target      = EIP + br_disp;
+`ifdef Z386_DEBUG_BRANCH_TARGET
 // synthesis translate_off
 always @(posedge clk) begin
     // Validate the microcode-PREF flush path
@@ -2168,6 +2246,7 @@ always @(posedge clk) begin
                  $time, CS_base + br_target, pf_flush_ip, i.opcode, CS, EIP);
 end
 // synthesis translate_on
+`endif
 
 // i_first PRECISE early branch redirect (NOT a prediction).
 wire br_jcc_taken = br_is_jcc && check_condition(i.opcode[3:0], eflags_fwd);
@@ -2263,7 +2342,10 @@ function automatic logic is_reljump_taken(input [6:0] aluop);
         ALUJMP_JG:      is_reljump_taken = !uc_flags[6] && (uc_flags[7] == uc_flags[11]);
         ALUJMP_JNC:     is_reljump_taken = !uc_flags[0];
         ALUJMP_JNO:     is_reljump_taken = !uc_flags[11];
-        ALUJMP_JPEREQ:  is_reljump_taken = uc_jpereq_fwd;       // No FPU: pre-computed in ROM bit 44
+        // Despite the extracted name, this branches while PEREQ is inactive:
+        // self-loops wait for a request and forward branches abort a transfer.
+        ALUJMP_JPEREQ:  is_reljump_taken = ENABLE_X87
+                                                ? !x87_pereq : uc_jpereq_fwd;
         ALUJMP_JNFLGB:  is_reljump_taken = !flags_backup_active;
         ALUJMP_JTSSAF:  is_reljump_taken = tss_access_flag;     // Jump if TSS access flag is set
         ALUJMP_JINTSW:  is_reljump_taken = !interrupt_hw;
@@ -2280,8 +2362,10 @@ function automatic logic is_reljump_taken(input [6:0] aluop);
             (cpl <= EFLAGS[13:12] && (!vm || !instr_is_port_io));
         ALUJMP_JMP:     is_reljump_taken = 1'b1;                // Unconditional jump
         ALUJMP_JNOINT:  is_reljump_taken = !interrupt_pending;  // Jump if NO interrupt
-        ALUJMP_JNBUSY:  is_reljump_taken = 1'b1;                // FPU busy — always taken (no FPU)
-        ALUJMP_JBUSY,
+        ALUJMP_JNBUSY:  is_reljump_taken = ENABLE_X87 ? x87_busy_n : 1'b1;
+        // Despite its historical decode name, this condition is used by the
+        // x87 error paths immediately after BUSY# has deasserted.
+        ALUJMP_JBUSY:   is_reljump_taken = ENABLE_X87 ? !x87_error_n : 1'b0;
         ALUJMP_JICEWT:  is_reljump_taken = 1'b0;                // No x87 BUSY# or ICE wait source
         ALUJMP_J16BIT:  is_reljump_taken = !desc_cache[6].seg_type[3];
         default:        is_reljump_taken = 1'b0;
@@ -2446,7 +2530,11 @@ always_comb begin
 
     if (uc_exec) begin
         if (uc_reljump_taken)
-            uaddr_now = uaddr + {{6{uc_alu_src[5]}}, uc_alu_src};
+            // Base the redirect on the executing word. In a branch delay slot,
+            // uaddr already holds the older branch target (WAIT uses this to
+            // test ERROR# immediately after its BUSY# branch).
+            uaddr_now = uc_addr + 12'd1 +
+                        {{6{uc_alu_src[5]}}, uc_alu_src};
 
         casez (uc_aluop)
             ALUJMP_LJMP86: begin
@@ -2971,6 +3059,10 @@ always_ff @(posedge clk) begin
         // LSS/LFS/LGS (0F B2/B4/B5): put opcode in i.immediate for microcode XOR trick
         if (i_bus.has_0f && (i_bus.opcode == 8'hB2 || i_bus.opcode == 8'hB4 || i_bus.opcode == 8'hB5))
             i.immediate <= {24'h0, i_bus.opcode};
+        // ESC commands write the architectural 11-bit FOP value to the x87:
+        // primary opcode low three bits followed by the complete ModR/M byte.
+        if (!i_bus.has_0f && (i_bus.opcode[7:3] == 5'b11011))
+            i.immediate <= {21'h0, i_bus.opcode[2:0], i_bus.modrm};
         instr_is_shxd <= i_bus.has_0f && ((i_bus.opcode == 8'hA4) || (i_bus.opcode == 8'hA5) ||
                                           (i_bus.opcode == 8'hAC) || (i_bus.opcode == 8'hAD));
         instr_cf <= eflags_fwd[0];      // RCL/RCR carry-in: forward the committing CF (eflags_fwd)
@@ -4406,7 +4498,8 @@ always_comb begin
     // Use the ROM-delay-cycle field registers for the hot ALU datapath. They
     // are aligned with uc, but avoid feeding ALU muxes from the wide ucode word.
     alu_dst = read_uc_source(uc_source_shift);        // NOPQRS
-    alu_src = read_uc_alu_source(uc_alu_src_shift);   // ABCDEF
+    alu_src = uc_fpu_f8 ? 32'h8000_00f8 :
+                          read_uc_alu_source(uc_alu_src_shift);   // ABCDEF
     alu_op5 = map_alu_op(uc_aluop_shift);             // TUVWXYZ
 end
 

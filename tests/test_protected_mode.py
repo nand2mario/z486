@@ -23,7 +23,9 @@ from pathlib import Path
 # Paths
 SCRIPT_DIR = Path(__file__).resolve().parent
 TESTS_DIR = SCRIPT_DIR / "programs"
-VERILATOR_EXE = SCRIPT_DIR / "obj_dir/Vtb_protected_mode"
+VERILATOR_EXE = Path(os.environ.get(
+    "Z386_TESTBENCH", SCRIPT_DIR / "obj_dir/Vtb_protected_mode"
+))
 
 # I/O port results
 STATUS_PASS = 0x01
@@ -173,6 +175,13 @@ TESTS = load_tests(TESTS_DIR)
 
 def build_testbench(verbose=False):
     """Build or refresh the protected-mode Verilator testbench."""
+    if os.environ.get("Z386_TESTBENCH"):
+        if VERILATOR_EXE.exists():
+            print(f"Using protected-mode testbench: {VERILATOR_EXE}")
+            return True
+        print(f"Error: requested testbench does not exist: {VERILATOR_EXE}")
+        return False
+
     cmd = ['make', 'obj_dir/Vtb_protected_mode']
     print(f"Building protected-mode testbench: {' '.join(cmd)}")
 
@@ -446,6 +455,9 @@ Examples:
 
     # Determine tests to run
     tests_to_run = args.tests if args.tests else list(TESTS.keys())
+    if os.environ.get("Z386_ENABLE_X87") != "1":
+        tests_to_run = [name for name in tests_to_run
+                        if not TESTS[name].get("requires_x87", False)]
 
     # Run tests
     passed_count = 0

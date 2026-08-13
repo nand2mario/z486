@@ -1,0 +1,17 @@
+{
+  "asm": "x87_protocol.asm",
+  "start_mode": "real",
+  "cr0": "0x00000010",
+  "cr3": 0,
+  "eip": 0,
+  "initial_selectors": {
+    "DS": 0,
+    "SS": 0,
+    "ES": 0,
+    "FS": 0,
+    "GS": 0
+  },
+  "d_init": 0,
+  "cycles": 50000,
+  "page_tables": []
+}
