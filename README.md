@@ -12,3 +12,10 @@ maximum detail, compared with 21.0 FPS on ao486 using the same MiSTer setup.
 The separate [z386](https://github.com/nand2mario/z386) repository remains the
 80386-faithful implementation. This repository contains the faster extended
 core used by [z486_MiSTer](https://github.com/nand2mario/z486_MiSTer).
+
+## License
+
+Copyright 2026 nand2mario. The SystemVerilog, Python, and Markdown files
+(`*.sv`, `*.svh`, `*.py`, and `*.md`) are licensed under the
+[Apache License 2.0](LICENSE). The license does not cover `ucode.hex`; see
+[License Scope](LICENSE-SCOPE.md) for details.
