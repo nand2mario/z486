@@ -47,11 +47,12 @@ localparam integer BYTE_OFFSET_BITS = 2;
 localparam integer LINE_OFFSET_BITS = WORD_OFFSET_BITS + BYTE_OFFSET_BITS;
 localparam integer NUM_SETS = 1 << SET_BITS;
 localparam integer BRAM_ADDR_BITS = SET_BITS + WORD_OFFSET_BITS;
-localparam integer TAG_BITS = 25 - LINE_OFFSET_BITS - SET_BITS;
+localparam integer PHYS_ADDR_BITS = 27; // maximum supported RAM is 128MB
+localparam integer TAG_BITS = PHYS_ADDR_BITS - LINE_OFFSET_BITS - SET_BITS;
 localparam integer SET_LSB = LINE_OFFSET_BITS;
 localparam integer SET_MSB = SET_LSB + SET_BITS - 1;
 localparam integer TAG_LSB = SET_MSB + 1;
-localparam integer TAG_MSB = 24;
+localparam integer TAG_MSB = PHYS_ADDR_BITS - 1;
 localparam integer TAG_RAM_BITS = (TAG_BITS < 16) ? 16 : TAG_BITS;
 localparam integer STOREQ_DEPTH = 3;
 localparam integer STOREQ_IDX_BITS = 2;
@@ -60,7 +61,8 @@ localparam [STOREQ_CNT_BITS-1:0] STOREQ_DEPTH_VALUE = 2'd3;
 localparam [STOREQ_IDX_BITS-1:0] STOREQ_LAST_IDX = 2'd2;
 localparam [SET_BITS-1:0] LAST_SET = SET_BITS'(NUM_SETS - 1);
 
-// Address decomposition.  The cache covers the low 32MB physical window.
+// Address decomposition. Include the complete physical tag so larger SDRAM
+// configurations cannot alias cache lines at 32MB boundaries.
 wire [TAG_BITS-1:0] cpu_tag = cpu_addr[TAG_MSB:TAG_LSB];
 // Set/word array index from the physical address page-offset bits
 // (cpu_addr[11:2], translation-invariant -- available without the TLB result).

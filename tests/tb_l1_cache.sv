@@ -76,8 +76,17 @@ module tb_l1_cache;
     endtask
 
     function automatic [31:0] mem_get32(input [31:0] addr);
-        mem_get32 = {mem[addr[11:0] + 3], mem[addr[11:0] + 2],
-                     mem[addr[11:0] + 1], mem[addr[11:0] + 0]};
+        if (addr[31:25] == 7'b0000001) begin
+            case (addr[3:2])
+                2'd0: mem_get32 = 32'h1357_9BDF;
+                2'd1: mem_get32 = 32'h2468_ACE0;
+                2'd2: mem_get32 = 32'h55AA_00FF;
+                default: mem_get32 = 32'hAA55_FF00;
+            endcase
+        end else begin
+            mem_get32 = {mem[addr[11:0] + 3], mem[addr[11:0] + 2],
+                         mem[addr[11:0] + 1], mem[addr[11:0] + 0]};
+        end
     endfunction
 
     always_ff @(posedge clk) begin
@@ -171,6 +180,9 @@ module tb_l1_cache;
 
         cache_read(32'h40, 4'hF, 32'h4433_2211);       // miss + fill
         cache_read(32'h40, 4'hF, 32'h4433_2211);       // hit
+        // Complete physical tags distinguish lines separated by 32MB.
+        cache_read(32'h0200_0040, 4'hF, 32'h1357_9BDF);
+        cache_read(32'h40, 4'hF, 32'h4433_2211);
         cache_write(32'h40, 4'hC, 32'hAAAA_5555);      // write-hit patch
         cache_read(32'h40, 4'hF, 32'hAAAA_2211);
 

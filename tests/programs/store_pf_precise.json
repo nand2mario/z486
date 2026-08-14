@@ -1,0 +1,30 @@
+{
+  "asm": "store_pf_precise.asm",
+  "start_mode": "protected",
+  "cr0": "0x80000011",
+  "cr3": 0,
+  "eip": "0x200",
+  "initial_selectors": {
+    "CS": "0x0008",
+    "DS": "0x0010",
+    "SS": "0x0018",
+    "ES": "0x0010",
+    "FS": "0x0010",
+    "GS": "0x0010"
+  },
+  "d_init": 1,
+  "cycles": 100000,
+  "seg_cache": {
+    "CS": { "base": "0x00010000", "limit": "0xffffffff", "flags": "0xa9e0" },
+    "DS": { "base": "0x20000000", "limit": "0xffffffff", "flags": "0x29e0" },
+    "SS": { "base": "0x30000000", "limit": "0xffffffff", "flags": "0x29e0" },
+    "ES": { "base": "0x20000000", "limit": "0xffffffff", "flags": "0x29e0" },
+    "FS": { "base": "0x20000000", "limit": "0xffffffff", "flags": "0x29e0" },
+    "GS": { "base": "0x20000000", "limit": "0xffffffff", "flags": "0x29e0" }
+  },
+  "page_tables": [
+    ["0x00010000", "0x00010000", 16, "RW"],
+    ["0x20000000", "0x00020000", 1, "RW"],
+    ["0x30000000", "0x00030000", 16, "RW"]
+  ]
+}

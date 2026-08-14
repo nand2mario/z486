@@ -65,7 +65,16 @@ module tb_l1_icache;
     endtask
 
     function automatic [31:0] mem_get32(input [31:0] addr);
-        mem_get32 = {mem[addr + 3], mem[addr + 2], mem[addr + 1], mem[addr + 0]};
+        if (addr[31:25] == 7'b0000001) begin
+            case (addr[3:2])
+                2'd0: mem_get32 = 32'h1357_9BDF;
+                2'd1: mem_get32 = 32'h2468_ACE0;
+                2'd2: mem_get32 = 32'h55AA_00FF;
+                default: mem_get32 = 32'hAA55_FF00;
+            endcase
+        end else begin
+            mem_get32 = {mem[addr + 3], mem[addr + 2], mem[addr + 1], mem[addr + 0]};
+        end
     endfunction
 
     always_ff @(posedge clk) begin
@@ -125,6 +134,9 @@ module tb_l1_icache;
         repeat (20) @(posedge clk);
 
         cache_read(32'h40, 128'h00FF_EEDD_CCBB_AA99_8877_6655_4433_2211);
+        cache_read(32'h40, 128'h00FF_EEDD_CCBB_AA99_8877_6655_4433_2211);
+        // Complete physical tags distinguish lines separated by 32MB.
+        cache_read(32'h0200_0040, 128'hAA55_FF00_55AA_00FF_2468_ACE0_1357_9BDF);
         cache_read(32'h40, 128'h00FF_EEDD_CCBB_AA99_8877_6655_4433_2211);
 
         // Accept a hit in the same cycle that a store snoops the cached line.

@@ -615,7 +615,8 @@ always_ff @(posedge clk) begin
                                dest_value[23:16], dest_value[31:24]}, 2'd2);
 
                 DEST_USTEP_ALU:
-                    if (recipe_state.hardwired && !hardwired_off && !any_fault)
+                    if (recipe_state.hardwired && !hardwired_off &&
+                        !recipe_commit_cancel)
                         write_gpr(instr.dst_reg_sel, alu_result, op_size);
 
                 DEST_IRF:
@@ -625,12 +626,12 @@ always_ff @(posedge clk) begin
                 default: ;
             endcase
 
-            if (recipe_rni && !any_fault &&
+            if (recipe_rni && !recipe_commit_cancel &&
                 recipe_state.commit_sel == RECIPE_COMMIT_SIGSRC)
                 write_gpr(instr.src_reg_sel, sigma,
                           aluop == ALUJMP_BITS32 ? 2'd2 : 2'd1);
 
-            if (recipe_rni && !any_fault &&
+            if (recipe_rni && !recipe_commit_cancel &&
                 recipe_state.commit_sel == RECIPE_COMMIT_ESP)
                 esp <= sigma;
 
