@@ -17,5 +17,5 @@ core used by [z486_MiSTer](https://github.com/nand2mario/z486_MiSTer).
 
 Copyright 2026 nand2mario. The SystemVerilog, Python, and Markdown files
 (`*.sv`, `*.svh`, `*.py`, and `*.md`) are licensed under the
-[Apache License 2.0](LICENSE). The license does not cover `ucode.hex`; see
+[Apache License 2.0](LICENSE). See
 [License Scope](LICENSE-SCOPE.md) for details.
