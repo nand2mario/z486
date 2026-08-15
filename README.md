@@ -1,14 +1,36 @@
-
 # z486 - an 80486-class pipelined FPGA CPU in SystemVerilog
 
-z486 is an 80486-class pipelined CPU core written in SystemVerilog. A fast
-frontend and hardwired implementations handle common instructions, while a
-microcoded control engine handles complex x86 operations. The core also includes
-experimental, incomplete x87 support sufficient to run TurboQuake.
+z486 is an 80486-class pipelined CPU core written in SystemVerilog. It combines
+a fast frontend and hardwired implementations of common instructions with a
+microcoded control engine for complex x86 behavior. The core also integrates
+experimental, incomplete x87 floating-point support sufficient to run DOS
+Quake.
 
-The separate [z386](https://github.com/nand2mario/z386) repository remains the
-80386-faithful implementation. This repository contains the faster extended
-core used by [z486_MiSTer](https://github.com/nand2mario/z486_MiSTer).
+The design targets useful 486-class performance on mid-sized FPGAs while
+retaining protected mode, paging, segmentation, and the complex architectural
+behavior inherited from z386.
+
+This repository contains the CPU RTL and its verification environment. To run
+z486 as a complete PC on MiSTer, use
+[z486_MiSTer](https://github.com/nand2mario/z486_MiSTer).
+
+## Design
+
+The frontend decodes instruction structure and literals through D1 and D2
+stages. From D2, instructions enter one of two control paths:
+
+* Hardwired control executes common data movement, arithmetic, stack, branch,
+  and memory operations as short sequences of hardware steps.
+* The microsequencer executes complex instructions and architectural corner
+  cases through the existing microcoded datapath.
+
+Both paths share the address, integer data, memory, protection, interrupt, and
+floating-point units. Separate configurable instruction and data caches connect
+the CPU to the external memory interface. The microcode-driven x87 unit shares
+arithmetic hardware across operations to keep its FPGA area manageable.
+
+The top-level module is `z486`. Its main configuration parameters include
+`DCACHE_SET_BITS`, `ICACHE_SET_BITS`, and `ENABLE_X87`.
 
 ## Performance
 
@@ -24,13 +46,16 @@ than z386, as measured by DMIPS/MHz.
 | **z486** | **0.330** | **2.800** | **21,906** |
 
 All cores execute the same i386 binary. z386 and z486 use matched 8 KB
-instruction and 8 KB data caches; ao486 uses its native cache. ALMs are
+instruction and 8 KB data caches; ao486 uses its native cache. Area figures are
 standalone seed-1 fits on the same DE10-Nano Cyclone V with identical Quartus
 settings. z486 includes x87; without it, z486 uses 16,329 ALMs, 5.0% more than
-z386. ao486 counts retirement at a different boundary, so its CPI is less
-directly comparable.
+z386. ao486 counts retirement at a different pipeline boundary, so its CPI is
+less directly comparable.
 
 ### DOOM
+
+At 85 MHz in z486_MiSTer, z486 runs the maximum-detail Doom timedemo at 29.1
+FPS: 39% faster than ao486 at 90 MHz and 27% faster than z386 v0.4 at 85 MHz.
 
 ![Board-measured Doom and 3DBench performance](docs/dos_performance.svg)
 
@@ -42,9 +67,41 @@ comparison above uses matched 8 KB + 8 KB configurations for z386 and z486.
 The complete methodology and analysis are in the
 [z486 technical report](https://nand2mario.github.io/posts/2026/z486/).
 
+## Build and test
+
+The regression tests use Verilator and Python:
+
+```bash
+cd tests
+make test-simple
+make test-protected
+make test-l1-cache
+make test-l1-icache
+make test-x87-core
+make test-x87-integration
+```
+
+Additional targets cover Dhrystone, Berkeley TestFloat, the broader
+`test386.py` suite, and external real- and protected-mode single-step reference
+datasets. Run `make help` in `tests` for the current target list.
+
+## Related projects
+
+The [z386](https://github.com/nand2mario/z386) repository contains the
+80386-faithful predecessor.
+
+## Credits
+
+z486 was written by nand2mario and developed from z386. The underlying 80386
+work builds on Intel microcode disassembly and silicon reverse-engineering by
+[reenigne](https://www.reenigne.org/blog/),
+[gloriouscow](https://github.com/dbalsom),
+[smartest blob](https://github.com/a-mcego), and
+[Ken Shirriff](https://www.righto.com/).
+
 ## License
 
 Copyright 2026 nand2mario. The SystemVerilog, Python, and Markdown files
 (`*.sv`, `*.svh`, `*.py`, and `*.md`) are licensed under the
-[Apache License 2.0](LICENSE). See
-[License Scope](LICENSE-SCOPE.md) for details.
+[Apache License 2.0](LICENSE). See [License Scope](LICENSE-SCOPE.md) for
+details. The recovered microcode image is not covered by this license.
