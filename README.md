@@ -14,10 +14,8 @@ core used by [z486_MiSTer](https://github.com/nand2mario/z486_MiSTer).
 
 ### Dhrystone 2.1
 
-All three x86 cores execute the same i386 binary. z386 and z486 use matched
-8 KB instruction and 8 KB data caches; ao486 retains its native cache
-organization. ALMs are standalone seed-1 fits on the DE10-Nano Cyclone V using
-the same z486_MiSTer production settings.
+z486 delivers 70% more Dhrystone performance per MHz than ao486 and 47% more
+than z386, as measured by DMIPS/MHz.
 
 | Core | DMIPS/MHz | CPI | Cyclone V ALMs |
 | --- | ---: | ---: | ---: |
@@ -25,10 +23,12 @@ the same z486_MiSTer production settings.
 | ao486 | 0.194 | 4.556 | 15,190 |
 | **z486** | **0.330** | **2.800** | **21,906** |
 
-The z486 area includes its experimental x87 unit. With x87 disabled, z486 uses
-16,329 ALMs, only 5.0% more than z386. DMIPS/MHz is the primary performance
-metric; ao486 counts retirement at a different pipeline boundary, so its CPI
-is less directly comparable.
+All cores execute the same i386 binary. z386 and z486 use matched 8 KB
+instruction and 8 KB data caches; ao486 uses its native cache. ALMs are
+standalone seed-1 fits on the same DE10-Nano Cyclone V with identical Quartus
+settings. z486 includes x87; without it, z486 uses 16,329 ALMs, 5.0% more than
+z386. ao486 counts retirement at a different boundary, so its CPI is less
+directly comparable.
 
 ### DOOM
 
