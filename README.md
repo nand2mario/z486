@@ -1,4 +1,4 @@
-# z486 - an 80486-class pipelined FPGA CPU in SystemVerilog
+# z486: A 486-Class Pipelined FPGA CPU with Integrated Floating-Point
 
 z486 is an 80486-class pipelined CPU core written in SystemVerilog. It combines
 a fast frontend and hardwired implementations of common instructions with a
