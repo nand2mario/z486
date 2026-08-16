@@ -66,8 +66,12 @@ These are board measurements using each core's native release configuration:
 release 16 KB instruction and 16 KB data caches, whereas the Dhrystone
 comparison above uses matched 8 KB + 8 KB configurations for z386 and z486.
 
-The complete methodology and analysis are in the
-[z486 technical report](https://nand2mario.github.io/posts/2026/z486/).
+## Technical report
+
+The [z486 technical report](https://nand2mario.github.io/posts/2026/z486/)
+describes the i486 pipeline concepts behind the design, z486's D1/D2 frontend,
+hardwired common instructions, integrated floating-point unit, and performance
+evaluation.
 
 ## Build and test
 
