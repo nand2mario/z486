@@ -29,6 +29,8 @@ floating-point units. Separate configurable instruction and data caches connect
 the CPU to the external memory interface. The microcode-driven x87 unit shares
 arithmetic hardware across operations to keep its FPGA area manageable.
 
+![z486 architecture](docs/architecture.svg)
+
 The top-level module is `z486`. Its main configuration parameters include
 `DCACHE_SET_BITS`, `ICACHE_SET_BITS`, and `ENABLE_X87`.
 
