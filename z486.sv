@@ -888,6 +888,7 @@ prefetch prefetch_inst (
     // Control
     .pf_suspend(page_fault),
     .halt_speculative(decq_has_jmp_call),
+    .fetch_cpl(cpl),
 
     // z486 speculative branch-target line
     .spec_req(pf_spec_req),
@@ -2179,6 +2180,7 @@ paging_unit paging_inst (
     .pf_ack_toggle      (pf_ack_toggle),
     .pf_redirect_queued (pf_redirect_queued),
     .pf_linear_addr     (pf_linear_addr),
+    .fetch_cpl          (cpl),
     .pf_rdata           (pf_rdata),
     .pf_fault           (pf_fault),
     .pf_fault_code      (pf_fault_code),

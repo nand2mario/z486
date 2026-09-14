@@ -43,6 +43,7 @@ module prefetch
     // Control
     input             pf_suspend,    // external suspend (e.g. page fault handler active)
     input             halt_speculative, // decode queue holds a taken JMP/CALL: stop fetching past it
+    input      [1:0]  fetch_cpl,     // architectural instruction-fetch CPL
 
     // z486 speculative branch-target line (doc/z486/old/m4.md). spec_req at a relative branch's i_issue latches the target line address; the...
     // Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-54
@@ -88,6 +89,7 @@ reg         spec_inflight;           // the outstanding paging request is the sp
 reg         spec_valid;              // spec_line holds the line at spec_addr
 reg         spec_adopted_r;          // post-flush fill is an adopted spec line: buffer it too
 reg         spec_poison;             // a store/snoop occurred since the fetch started
+reg  [1:0]  spec_cpl;                // CPL captured when the line request launched
 reg [127:0] spec_line;
 
 // Normal 386 self-modifying code performs a frontend-flushing branch after
@@ -96,6 +98,7 @@ reg [127:0] spec_line;
 wire spec_store_hit = spec_store_valid &&
                       (spec_addr == spec_store_linear[31:4]);
 wire spec_kill = spec_global_kill || spec_store_hit;
+wire spec_context_ok = (spec_cpl == fetch_cpl);
 
 // synthesis translate_off
 bit TRACE_FLUSH_EN;
@@ -165,7 +168,8 @@ assign ifetch_fault_addr = pf_fault_addr_r;
 
 // Spec fetch launch: takes priority over sequential prefetch for the shared port; never launches during a flush or while a request is...
 // Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-165
-wire spec_match_now = spec_req && spec_valid && !spec_poison && !spec_inflight &&
+wire spec_match_now = spec_req && spec_valid && spec_context_ok &&
+                      !spec_poison && !spec_inflight &&
                       (spec_addr == spec_linear[31:4]);
 wire spec_want   = ((spec_req && !spec_match_now) || spec_pend);
 // !pf_redirect_queued/!pf_drop_inflight: the queued-redirect handshake makes pf_inflight look idle (req toggled back to ack) while the...
@@ -174,9 +178,9 @@ wire spec_launch = spec_want && !pf_inflight && !q_flush && !pf_suspend &&
                    !pf_redirect_queued && !pf_drop_inflight;
 // Flush-time spec outcomes (evaluated during q_flush): Hit decision is OWNERSHIP, not an address compare: the flushing branch is the same...
 // Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-185
-wire spec_line_match   = spec_valid && !spec_poison && spec_owner;
-wire spec_adopt        = spec_inflight && !spec_poison && !pf_ack_edge && spec_owner;
-wire spec_data_now     = spec_inflight && !spec_poison && pf_ack_edge && !pf_fault &&
+wire spec_line_match   = spec_valid && spec_context_ok && !spec_poison && spec_owner;
+wire spec_adopt        = spec_inflight && spec_context_ok && !spec_poison && !pf_ack_edge && spec_owner;
+wire spec_data_now     = spec_inflight && spec_context_ok && !spec_poison && pf_ack_edge && !pf_fault &&
                          spec_owner;
 wire spec_flush_hit    = q_flush && (spec_line_match || spec_data_now);
 wire [127:0] spec_hit_line = spec_data_now ? pf_rdata : spec_line;
@@ -442,6 +446,7 @@ always_ff @(posedge clk or negedge reset_n) begin
         spec_pend_addr <= '0;
         spec_addr <= '0;
         spec_off <= '0;
+        spec_cpl <= 2'b00;
     end else begin
         pf_ack_prev <= pf_ack_toggle;
         ifetch_fault <= 1'b0;
@@ -487,7 +492,8 @@ always_ff @(posedge clk or negedge reset_n) begin
                 pf_req_toggle <= pf_ack_toggle;
             end
             spec_pend <= 1'b0;
-            // spec_valid deliberately SURVIVES the flush: the buffered line's data is linear-tagged and stays correct (CR3/CR0 changes and...
+            // A same-CPL flush retains the linear-tagged buffered line; global
+            // kills and CPL-context mismatch invalidate it separately.
             // Details: doc/z486/implementation_notes.md#src-24-z486-prefetch-sv-428
             if (spec_adopt || (spec_inflight && pf_ack_edge))
                 spec_inflight <= 1'b0;
@@ -499,6 +505,8 @@ always_ff @(posedge clk or negedge reset_n) begin
                 spec_line  <= pf_rdata;
                 spec_valid <= 1'b1;
             end
+            if (!spec_context_ok)
+                spec_valid <= 1'b0;
             spec_poison <= 1'b0;
             // A flush that bypasses an in-flight spec fetch invalidates its
             // context (CR3/CS may change before the late response lands).
@@ -518,7 +526,7 @@ always_ff @(posedge clk or negedge reset_n) begin
                 // buffer (never suspends - the fetch may be down a wrong path).
                 spec_inflight <= 1'b0;
                 spec_line <= pf_rdata;
-                spec_valid <= !pf_fault && !spec_poison;
+                spec_valid <= !pf_fault && !spec_poison && spec_context_ok;
             end else if (spec_adopted_r && !pf_drop_inflight && !pf_fault) begin
                 // Adopted post-flush fill arriving: it fills the queue as
                 // usual (fill_commit), AND populates the buffer for the
@@ -574,12 +582,23 @@ always_ff @(posedge clk or negedge reset_n) begin
                 spec_poison <= 1'b1;
         end
 
+        // A retained target line belongs to the CPL that launched its paging
+        // request.  Discard it (and poison an old in-flight response) once
+        // architectural fetch privilege changes.
+        if (!spec_context_ok) begin
+            spec_valid <= 1'b0;
+            spec_adopted_r <= 1'b0;
+            if (spec_inflight)
+                spec_poison <= 1'b1;
+        end
+
         if (spec_launch) begin
             automatic logic [31:0] tgt = (spec_req && !q_flush) ? spec_linear : spec_pend_addr;
             pf_req_toggle <= ~pf_req_toggle;
             pf_linear_addr <= {tgt[31:4], 4'b0000};
             spec_addr      <= tgt[31:4];
             spec_off       <= tgt[3:0];
+            spec_cpl       <= fetch_cpl;
             spec_valid <= 1'b0;
             // A store committing in this very cycle may still race the icache
             // read: keep the poison.
