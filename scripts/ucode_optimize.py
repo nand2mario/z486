@@ -25,6 +25,21 @@ UCODE_BITS = 37
 ROM_BITS = 40
 SRC_TMPC = 0x0C            # Canonical CROM source encoding.
 DEST_SRCREG = 0x3E         # Canonical CROM destination encoding.
+# CMPXCHG (see PATCHES below): canonical CROM src/dst/alusrc/aluop encodings
+# not already named above. Values cross-checked against z486_pkg.sv's
+# SRC_*/DEST_*/ALUSRC_*/ALUJMP_* localparams.
+SRC_DSTREG = 0x3D           # r/m register operand (ModRM.rm), register form.
+SRC_SRCREG = 0x3E           # r register operand (ModRM.reg), the "compare-with" source.
+SRC_eAX_AL = 0x28           # Size-aware accumulator (AL/AX/EAX) as an ALU source.
+SRC_OPR_R = 0x2D            # Fault-checked memory read result.
+SRC_TMPB = 0x0B
+DEST_DSTREG = 0x3D          # Commit to the r/m register operand.
+DEST_TMPB = 0x0B
+DEST_eAX_AL = 0x28          # Size-aware accumulator (AL/AX/EAX) as a commit target.
+ALUSRC_DSTREG = 0x3D        # ALU second-operand (subtrahend) selector for DSTREG.
+ALUSRC_OPR_R = 0x0F         # ALU second-operand (subtrahend) selector for OPR_R.
+ALUJMP_CMP = 0x0F           # Fixed CMP: architectural-flags-updating (see ucode_rom.sv predecode).
+ALUJMP_JNcond = 0x41        # Reljump when the decoded branch_condition is FALSE.
 DEST_USTEP_RPTI_EIP = 0x6D # Optimizer-owned: restart EIP write.
 DEST_USTEP_TASK_CS = 0x6E  # Optimizer-owned: task load establishes CS RPL.
 DEST_USTEP_FAULT_DONE = 0x6F # Optimizer-owned: fault delivery completion.
@@ -178,6 +193,128 @@ PATCHES = [
           copy_from=0x050, fields=dict(op=0)),
     Patch(0x9D0, "unary memory WR_FAST in RNI delay slot",
           copy_from=0x046, fields=dict(bus=0x3F, op=7)),
+
+    # 486 XADD stays on the ordinary sequencer, not a hardwired RMW recipe.
+    # copy_from always refers to the original base word: 04B is a pure DLY,
+    # and 04D uses ALUJMP_ALU so decoded ALU_ADD updates architectural flags.
+    # Fixed ALUJMP_ADD is internal arithmetic and would leave flags stale.
+    # Memory must finish its fault-checked write before changing SRCREG;
+    # retain the ordinary FLGSBA backup/restore path for write faults.
+    Patch(0x9D1, "XADD m,r: FLGSBA plus operand read",
+          copy_from=0x04A),
+    Patch(0x9D2, "XADD m,r: wait for operand read",
+          copy_from=0x04B),
+    Patch(0x9D3, "XADD m,r: save old operand in TMPB and calculate ADD",
+          copy_from=0x04D, fields=dict(src=0x2D, dst=0x0B)),
+    Patch(0x9D4, "XADD m,r: write sum without retiring before source update",
+          copy_from=0x046, fields=dict(op=7)),
+    Patch(0x9D5, "XADD m,r: wait for fault-checked destination write",
+          copy_from=0x047),
+    Patch(0x9D6, "XADD m,r: old operand to source register plus RNI",
+          copy_from=0x030, fields=dict(src=0x0B, dst=DEST_SRCREG, op=0)),
+    Patch(0x9D7, "XADD m,r: blank retirement delay slot",
+          copy_from=0x030),
+
+    # Register writes are source first, destination last. This preserves the
+    # sum for identical selectors and merges AL/AH through normal byte writes.
+    Patch(0x9D8, "XADD r,r: save old destination in TMPB and calculate ADD",
+          copy_from=0x04D, fields=dict(src=0x3D, dst=0x0B)),
+    Patch(0x9D9, "XADD r,r: old destination to source register",
+          copy_from=0x030, fields=dict(src=0x0B, dst=DEST_SRCREG)),
+    Patch(0x9DA, "XADD r,r: sum to destination register plus RNI",
+          copy_from=0x030, fields=dict(src=0x1E, dst=0x3D, op=0)),
+    Patch(0x9DB, "XADD r,r: blank retirement delay slot",
+          copy_from=0x030),
+
+    # 486 CMPXCHG (0F B0/B1) also stays on the ordinary sequencer. Unlike
+    # XADD's unconditional exchange, the write to r/m is conditional on the
+    # compare, so this routine branches with ALUJMP_JNcond -- the same
+    # reljump mechanism architectural Jcc/LOOPnE use -- gated on the fixed
+    # JE (equal) condition code the decoder forces into branch_condition for
+    # this instruction (see decoder.sv). Fixed ALUJMP_CMP (not the fixed
+    # ALUJMP_ADD/SUB family) is used deliberately: ucode_rom.sv's
+    # ucode_predecode() lists ALUJMP_CMP (along with ALUJMP_ALU/INCDEC/
+    # CMPTST/ADC/AAAAAS/DAADAS) as retiring architectural flags, while
+    # ALUJMP_ADD/SUB do not -- exactly the "internal arithmetic... would
+    # leave flags stale" pitfall called out on the XADD patches above.
+    #
+    # Register form: compare accumulator (eAX_AL) against DSTREG (r/m).
+    # ZF=1 (equal, JNcond not taken) falls through to SRCREG -> DSTREG;
+    # ZF=0 (not equal, JNcond taken) jumps to DSTREG -> eAX_AL. A blank
+    # spacer word separates the CMP from the reljump that reads its ZF
+    # (mirrors the REPE/REPNE CMPS/SCAS ALUJMP_LOOPnE routine's own gap
+    # between its CMP and its flags-consuming reljump), and every reljump's
+    # mandatory one-word pipeline delay slot (the word physically after any
+    # jump always executes once, taken or not -- see the 6->4 cycle ALU m,r
+    # patches' 04B/04C and 03A/03B pairs above) is a blank word here since
+    # neither path needs work done there.
+    Patch(0x9DC, "CMPXCHG r,r: compare eAX_AL against DSTREG (r/m)",
+          copy_from=0x030,
+          fields=dict(aluop=ALUJMP_CMP, src=SRC_eAX_AL, alusrc=ALUSRC_DSTREG)),
+    Patch(0x9DD, "CMPXCHG r,r: blank spacer before the flags-consuming reljump",
+          copy_from=0x030),
+    Patch(0x9DE, "CMPXCHG r,r: JNcond -- not-equal jumps to DSTREG->eAX_AL (+3)",
+          copy_from=0x030, fields=dict(aluop=ALUJMP_JNcond, alusrc=3)),
+    Patch(0x9DF, "CMPXCHG r,r: blank mandatory reljump delay slot",
+          copy_from=0x030),
+    Patch(0x9E0, "CMPXCHG r,r: equal -- SRCREG (r) -> DSTREG (r/m) plus RNI",
+          copy_from=0x030, fields=dict(src=SRC_SRCREG, dst=DEST_DSTREG, op=0)),
+    Patch(0x9E1, "CMPXCHG r,r: blank RNI delay slot",
+          copy_from=0x030),
+    Patch(0x9E2, "CMPXCHG r,r: not-equal -- DSTREG (r/m) -> eAX_AL plus RNI",
+          copy_from=0x030, fields=dict(src=SRC_DSTREG, dst=DEST_eAX_AL, op=0)),
+    Patch(0x9E3, "CMPXCHG r,r: blank RNI delay slot",
+          copy_from=0x030),
+
+    # Memory form. FLGSBA+RD/wait mirror XADD m,r's own read (04A/04B) so
+    # LOCK's existing memory-write bus-cycle behavior (already gated
+    # correctly by z486_pkg.sv's lock_valid_0f_cmpxchg, left untouched)
+    # applies the same way here. The read result (OPR_R) is compared
+    # directly, then immediately copied into TMPB -- OPR_R's lifetime past
+    # the write bus op is not guaranteed (XADD's own 9D3 makes the identical
+    # copy for the same reason), and TMPB must survive to feed the
+    # not-equal path's write. That TMPB copy doubles as this routine's
+    # CMP-to-reljump spacer.
+    #
+    # Per the real Intel pseudocode (TEMP := DEST; ...; ELSE DEST := TEMP;
+    # FI), the memory form issues a fault-checked write to r/m on BOTH
+    # outcomes -- SRC on match, the just-read original value (TMPB) on
+    # mismatch -- never a "skip the write because nothing changed"
+    # shortcut. That write-back is what makes a mismatched CMPXCHG on a
+    # write-protected/absent page still fault on the write, matching real
+    # hardware and QEMU's target/i386 CMPXCHG translation. Only the
+    # mismatch path additionally updates the accumulator, strictly after
+    # its write is fault-checked (matching XADD's own restart-precise
+    # write-before-register-update ordering).
+    Patch(0x9E4, "CMPXCHG m,r: FLGSBA plus operand read",
+          copy_from=0x04A),
+    Patch(0x9E5, "CMPXCHG m,r: wait for operand read",
+          copy_from=0x04B),
+    Patch(0x9E6, "CMPXCHG m,r: compare eAX_AL against OPR_R (r/m)",
+          copy_from=0x030,
+          fields=dict(aluop=ALUJMP_CMP, src=SRC_eAX_AL, alusrc=ALUSRC_OPR_R)),
+    Patch(0x9E7, "CMPXCHG m,r: save old r/m in TMPB (also the reljump spacer)",
+          copy_from=0x030, fields=dict(src=SRC_OPR_R, dst=DEST_TMPB)),
+    Patch(0x9E8, "CMPXCHG m,r: JNcond -- not-equal jumps to the mismatch write (+5)",
+          copy_from=0x030, fields=dict(aluop=ALUJMP_JNcond, alusrc=5)),
+    Patch(0x9E9, "CMPXCHG m,r: blank mandatory reljump delay slot",
+          copy_from=0x030),
+    Patch(0x9EA, "CMPXCHG m,r: equal -- write SRCREG (r) to r/m, hold for fault check",
+          copy_from=0x046, fields=dict(src=SRC_SRCREG, op=7)),
+    Patch(0x9EB, "CMPXCHG m,r: equal -- wait for fault-checked destination write",
+          copy_from=0x047),
+    Patch(0x9EC, "CMPXCHG m,r: equal -- RNI (r/m already written, eAX_AL unchanged)",
+          copy_from=0x030, fields=dict(op=0)),
+    Patch(0x9ED, "CMPXCHG m,r: blank RNI delay slot",
+          copy_from=0x030),
+    Patch(0x9EE, "CMPXCHG m,r: not-equal -- write-back TMPB (old r/m) to r/m, hold for fault check",
+          copy_from=0x046, fields=dict(src=SRC_TMPB, op=7)),
+    Patch(0x9EF, "CMPXCHG m,r: not-equal -- wait for fault-checked destination write",
+          copy_from=0x047),
+    Patch(0x9F0, "CMPXCHG m,r: not-equal -- TMPB (old r/m) -> eAX_AL plus RNI",
+          copy_from=0x030, fields=dict(src=SRC_TMPB, dst=DEST_eAX_AL, op=0)),
+    Patch(0x9F1, "CMPXCHG m,r: blank RNI delay slot",
+          copy_from=0x030),
 
     # ---- Original 386 microcode repairs ---------------------------------
     # BSR's loop leaves the final bit index in TMPC. The extracted routine's

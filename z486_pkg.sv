@@ -1057,6 +1057,10 @@ localparam [11:0] UADDR_RPTI_RNI       = 12'h20F;  // REP interrupt restart boun
 localparam [11:0] UADDR_PAGE_FAULT     = 12'h8E9;  // #PF(14) - page fault
 localparam [11:0] UADDR_INVALID_LOCK   = 12'h82B;  // #UD for invalid LOCK usage
 localparam [11:0] UADDR_BSWAP          = 12'h9C4;  // Optimizer-owned 486 BSWAP entry
+localparam [11:0] UADDR_XADD_MEM       = 12'h9D1;  // Serialized 486 XADD memory entry
+localparam [11:0] UADDR_XADD_REG       = 12'h9D8;  // Serialized 486 XADD register entry
+localparam [11:0] UADDR_CMPXCHG_REG    = 12'h9DC;  // Serialized 486 CMPXCHG register entry
+localparam [11:0] UADDR_CMPXCHG_MEM    = 12'h9E4;  // Serialized 486 CMPXCHG memory entry
 localparam [11:0] UADDR_CALL_GATE_386  = 12'h5BE;  // 386 call-gate handler
 localparam [11:0] UADDR_MORE_PRIVILEGE = 12'h5FB;  // Cross-privilege call path
 

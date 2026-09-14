@@ -686,6 +686,8 @@ task automatic build_struct_work(
     logic        imm_sign_extend;
     logic        invalid_lock;
     logic        instr_bswap;
+    logic        instr_xadd;
+    logic        instr_cmpxchg;
     logic        is_setcc;
     logic        is_movzx_movsx;
     logic        is_movzx_word;
@@ -694,7 +696,18 @@ task automatic build_struct_work(
     begin
         w = '0;
         s_len = 3'd1;
+        instr_xadd = prefix_0f && (opcode[7:1] == 7'b1100000);
+        // 486 CMPXCHG (0F B0 = 8-bit, 0F B1 = 16/32-bit, same W-bit split as
+        // XADD's C0/C1) is likewise absent from the extracted 386 structural
+        // PLA and only referenced by the LOCK-legality table.
+        instr_cmpxchg = prefix_0f && (opcode[7:1] == 7'b1011000);
         ctl_bits = pla_control_opcode_lookup(prefix_0f, opcode);
+        // 486 XADD is absent from the extracted 386 structural PLA. Keep
+        // that extraction intact; enable ModRM, W and flags, without an
+        // immediate or direction bit, before deriving layout and EA fields.
+        // CMPXCHG needs the identical ModRM/W/flags shape.
+        if (instr_xadd || instr_cmpxchg)
+            ctl_bits = 12'b100000010110;
 
         w.entry.opcode = opcode;
         w.entry.has_0f = prefix_0f;
@@ -774,9 +787,23 @@ task automatic build_struct_work(
             w.entry.repeat_kind = opcode[0] ? REPEAT_KIND_LOOPE
                                              : REPEAT_KIND_LOOPNE;
         w.entry.entry_point = invalid_lock ? UADDR_INVALID_LOCK :
-                              instr_bswap ? UADDR_BSWAP : entry_final[11:0];
-        w.entry.stack_op = (invalid_lock || instr_bswap) ? 1'b0 : entry_final[13];
-        w.entry.stack_dir = (invalid_lock || instr_bswap) ? 1'b0 : entry_final[12];
+                              instr_bswap ? UADDR_BSWAP :
+                              instr_xadd ? ((modrm[7:6] == 2'b11)
+                                  ? UADDR_XADD_REG : UADDR_XADD_MEM) :
+                              instr_cmpxchg ? ((modrm[7:6] == 2'b11)
+                                  ? UADDR_CMPXCHG_REG : UADDR_CMPXCHG_MEM) :
+                              entry_final[11:0];
+        w.entry.stack_op = (invalid_lock || instr_bswap || instr_xadd ||
+                            instr_cmpxchg) ? 1'b0 : entry_final[13];
+        w.entry.stack_dir = (invalid_lock || instr_bswap || instr_xadd ||
+                             instr_cmpxchg) ? 1'b0 : entry_final[12];
+        // CMPXCHG's write to r/m is conditional on the compare result, unlike
+        // XADD's unconditional exchange. Its fixed microcode branches on the
+        // ALUJMP_JNcond mechanism (the same one architectural Jcc/LOOPnE use)
+        // by forcing the same "equal" (JE) condition code Jcc opcode 0x84/0x74
+        // would decode, regardless of this instruction's real opcode bits.
+        if (instr_cmpxchg)
+            w.entry.branch_condition = 4'h4;
         // BSWAP has a fixed r32 operand even in a 16-bit code segment.
         if (instr_bswap)
             w.entry.data32 = 1'b1;
@@ -1035,7 +1062,10 @@ function automatic logic [4:0] decode_instruction_alu_op(
                                   ? {2'b00, modrm_in[5:3]}
                                   : {2'b00, opcode_in[5:3]};
 
-        if (!has_0f_in && (opcode_in[7:4] == 4'h4))
+        // XADD's ModRM.reg names the source, not an ALU group operation.
+        if (has_0f_in && (opcode_in[7:1] == 7'b1100000))
+            decode_instruction_alu_op = ALU_ADD;
+        else if (!has_0f_in && (opcode_in[7:4] == 4'h4))
             decode_instruction_alu_op = {4'b1100, opcode_in[3]};
         else if (!has_0f_in && has_modrm_in &&
                  (((opcode_in == 8'hF6 || opcode_in == 8'hF7) &&
