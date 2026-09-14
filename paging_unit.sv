@@ -82,6 +82,7 @@ module paging_unit
     input               pf_req_toggle,
     output              pf_ack_toggle,
     input        [31:0] pf_linear_addr,    // LINEAR address (DWORD-aligned)
+    input        [1:0]  fetch_cpl,         // Architectural CPL of the instruction stream
     input               pf_redirect_queued,// Redirect request queued behind current prefetch
     output      [127:0] pf_rdata,          // Cache line returned to prefetch
     output reg          pf_fault,          // Page fault response to prefetch
@@ -362,8 +363,9 @@ wire live_store_posts = !pg_enable ||
      live_tlb_dirty);
 reg  write_will_post; // registered live_store_posts, valid in the PG_MEM_TLB cycle
 
-// Prefetch is always a read at the current CPL, so only the U/S check matters.
-wire pf_tlb_user_ok = (cpl != 2'd3) || tlb_user;
+// Prefetch is always a read at the architectural instruction CPL.  Demand
+// descriptor/TSS accesses may temporarily use supervisor cpl independently.
+wire pf_tlb_user_ok = (fetch_cpl != 2'd3) || tlb_user;
 
 reg [31:0] req_linear;       // Linear address
 reg [1:0]  req_op_size;      // Operand size
@@ -834,12 +836,12 @@ always_ff @(posedge clk or negedge reset_n) begin
                     end else if (pg_enable && pf_tlb_match && tlb_hit) begin
                         // Permission fail: silently fault, ack prefetch.
                         ack_prefetch_fault(pf_linear_addr,
-                                           {(cpl == 2'd3), 1'b0, 1'b1});
+                                           {(fetch_cpl == 2'd3), 1'b0, 1'b1});
                     end else if (pf_tlb_match) begin
                         // TLB miss: start page walk for prefetch
-                        // For prefetch walks, use supervisor read permissions
+                        // Keep the fetch walk at the instruction stream's CPL.
                         req_is_write <= 1'b0;
-                        req_cpl <= cpl;
+                        req_cpl <= fetch_cpl;
                         walk_request <= 1'b1;
                         state <= PG_PF_WALKING;
                     end
