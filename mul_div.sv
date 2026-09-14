@@ -25,6 +25,8 @@ module mul_div
     output logic        counter_early_exit, // DSP completion terminates repeat loop
     output logic        div_overflow,
     output logic        div_quotient_zero,
+    output logic        div_quotient_sign,
+    output logic        div_quotient_parity,
     output logic        mul_flag_overflow
 );
 
@@ -60,9 +62,14 @@ logic       dsp_completed;
 wire        mul_start = exec && mul_is_active_op && !dsp_active &&
                         !dsp_completed && !dsp_done;
 
+wire [31:0] div_quotient_masked = div_op_by_size(DIV_OP_MASK, divtmp, op_size);
+
 assign result = result_r;
 assign counter_early_exit = dsp_done && repeat_active && mul_is_active_op;
-assign div_quotient_zero = div_op_by_size(DIV_OP_MASK, divtmp, op_size) == 32'd0;
+assign div_quotient_zero   = div_quotient_masked == 32'd0;
+assign div_quotient_sign   = op_size == 2'd0 ? divtmp[7] :
+                              op_size == 2'd1 ? divtmp[15] : divtmp[31];
+assign div_quotient_parity = ~^div_quotient_masked[7:0];
 
 dsp_mul dsp_multiplier (
     .clk(clk),
