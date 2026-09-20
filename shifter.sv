@@ -224,17 +224,18 @@ assign result = overflow ? (is_sar ? sar_overflow_result : 32'd0) : shifted[31:0
 // therefore the selected low-word bit; do not route the full 64-bit barrel
 // result back into the architectural flag write path.
 assign bit_test_cf = alu_value[count[4:0]];
-// SHIFT2 writes the barrel result into SIGMA on the same edge that starts the
-// existing one-cycle deferred flag retirement.  Derive Z/S/P from that
-// registered result during the retirement cycle instead of placing the
-// barrel, width selection, and zero reduction in front of the flag flops.
-// shift1_size is the operand size captured by the preceding SHIFT1 setup.
-assign flags_pf = ~^sigma[7:0];
-assign flags_zf = shift1_size == 2'd0 ? sigma[7:0] == 8'd0 :
-                  shift1_size == 2'd1 ? sigma[15:0] == 16'd0 :
-                                             sigma[31:0] == 32'd0;
-assign flags_sf = shift1_size == 2'd0 ? sigma[7] :
-                  shift1_size == 2'd1 ? sigma[15] : sigma[31];
+// Preserve the barrel result for the one-cycle deferred flag retirement.
+// The next instruction's stack setup can claim SIGMA on the SHIFT2 edge,
+// so shared SIGMA is not a reliable source for the preceding shift's flags.
+// Dedicated result/size registers keep the barrel out of the flag-write path.
+logic [31:0] flags_result_r;
+logic [1:0] flags_size_r;
+assign flags_pf = ~^flags_result_r[7:0];
+assign flags_zf = flags_size_r == 2'd0 ? flags_result_r[7:0] == 8'd0 :
+                  flags_size_r == 2'd1 ? flags_result_r[15:0] == 16'd0 :
+                                             flags_result_r == 32'd0;
+assign flags_sf = flags_size_r == 2'd0 ? flags_result_r[7] :
+                  flags_size_r == 2'd1 ? flags_result_r[15] : flags_result_r[31];
 
 always_comb begin
     setup_result = alu_dst;
@@ -333,9 +334,13 @@ end
 always_ff @(posedge clk) begin
     if (!reset_n) begin
         flags_commit <= 1'b0;
+        flags_result_r <= 32'd0;
+        flags_size_r <= 2'd0;
     end else begin
         flags_commit <= exec && is_shift2 && count_nonzero;
         if (exec && is_shift2 && count_nonzero) begin
+            flags_result_r <= result;
+            flags_size_r <= shift1_size;
             flags_we_zsp <= set_zsp;
             flags_we_of <= 1'b0;
             if (instr_is_shxd) begin
