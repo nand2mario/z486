@@ -1,0 +1,92 @@
+{
+  "asm": "bootstudy_store_boundary_first_ro.asm",
+  "cr0": "0x80010001",
+  "eip": "0x400",
+  "initial_selectors": {
+    "CS": 8,
+    "GS": 16,
+    "SS": 16,
+    "ES": 16,
+    "DS": 16,
+    "FS": 16
+  },
+  "page_tables": [
+    [
+      "0x10000",
+      "0x10000",
+      16,
+      "RW"
+    ],
+    [
+      "0x0",
+      "0x0",
+      4,
+      "RW"
+    ],
+    [
+      "0x40000",
+      "0x30000",
+      1,
+      "RW"
+    ],
+    [
+      "0x41000",
+      "0x60000",
+      1,
+      "RW"
+    ],
+    [
+      "0x50000",
+      "0x50000",
+      1,
+      "RW"
+    ],
+    [
+      "0x81b23000",
+      "0x30000",
+      1,
+      "RW"
+    ],
+    [
+      "0x81b24000",
+      "0x60000",
+      1,
+      "RW"
+    ]
+  ],
+  "cr3": 0,
+  "cycles": 100000,
+  "seg_cache": {
+    "DS": {
+      "flags": "0x29e0",
+      "limit": "0xffffffff",
+      "base": 0
+    },
+    "CS": {
+      "flags": "0xa9e0",
+      "limit": "0xffffffff",
+      "base": "0x10000"
+    },
+    "GS": {
+      "flags": "0x29e0",
+      "limit": "0xffffffff",
+      "base": 0
+    },
+    "SS": {
+      "flags": "0x29e0",
+      "limit": "0xffffffff",
+      "base": 0
+    },
+    "FS": {
+      "flags": "0x29e0",
+      "limit": "0xffffffff",
+      "base": 0
+    },
+    "ES": {
+      "flags": "0x29e0",
+      "limit": "0xffffffff",
+      "base": 0
+    }
+  },
+  "start_mode": "protected"
+}

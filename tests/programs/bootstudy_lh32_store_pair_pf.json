@@ -1,0 +1,80 @@
+{
+  "cr3": 0,
+  "start_mode": "protected",
+  "eip": "0x400",
+  "initial_selectors": {
+    "ES": 16,
+    "GS": 16,
+    "FS": 16,
+    "DS": 16,
+    "SS": 16,
+    "CS": 8
+  },
+  "asm": "bootstudy_lh32_store_pair_pf.asm",
+  "seg_cache": {
+    "SS": {
+      "base": 0,
+      "limit": "0xffffffff",
+      "flags": "0x29e0"
+    },
+    "CS": {
+      "base": "0x10000",
+      "limit": "0xffffffff",
+      "flags": "0xa9e0"
+    },
+    "DS": {
+      "base": 0,
+      "limit": "0xffffffff",
+      "flags": "0x29e0"
+    },
+    "GS": {
+      "base": 0,
+      "limit": "0xffffffff",
+      "flags": "0x29e0"
+    },
+    "FS": {
+      "base": 0,
+      "limit": "0xffffffff",
+      "flags": "0x29e0"
+    },
+    "ES": {
+      "base": 0,
+      "limit": "0xffffffff",
+      "flags": "0x29e0"
+    }
+  },
+  "cycles": 100000,
+  "cr0": "0x80000001",
+  "page_tables": [
+    [
+      "0x10000",
+      "0x10000",
+      16,
+      "RW"
+    ],
+    [
+      "0x0",
+      "0x0",
+      4,
+      "RW"
+    ],
+    [
+      "0x40000",
+      "0x30000",
+      1,
+      "RW"
+    ],
+    [
+      "0x50000",
+      "0x50000",
+      1,
+      "RW"
+    ],
+    [
+      "0x81b23000",
+      "0x30000",
+      1,
+      "RW"
+    ]
+  ]
+}
