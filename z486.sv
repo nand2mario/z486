@@ -2807,7 +2807,10 @@ always_ff @(posedge clk) begin
         i <= i_bus;
         i.entry_point <= d2_entry_r;
     end
-    if (interrupt_entry)
+    // Fault delivery also abandons the branch. In particular, the address
+    // unit must stop selecting a Jcc's held ALU operand for handler-table
+    // address calculations after an older, overlapped store faults.
+    if (interrupt_entry || any_fault)
         i.rel_branch_kind <= REL_BRANCH_NONE;
 end
 
