@@ -2479,6 +2479,18 @@ always_ff @(posedge clk) begin
             no_fault_flag  <= 1'b0;
             rep_fault_flag <= 1'b0;
         end
+        // An instruction-fetch #PF belongs to the NEXT (never-issued)
+        // instruction, so it must not inherit the rep_fault_flag of a REP
+        // MOVS/STOS/... that has already completed.  That flag is normally
+        // cleared only by the next i_issue; when the following instruction's
+        // fetch faults in the RNI delay slot no i_issue ever happens, the fault
+        // microcode (JREP) saw the stale flag and rolled ECX/ESI/EDI back one
+        // iteration although EIP (TMPeIP) already pointed AFTER the string op,
+        // silently half-undoing the REP after the handler's IRET.  A data #PF
+        // (the string op's own delayed write fault) keeps the flag: that one
+        // needs the correction.
+        if (ifetch_page_fault && !data_page_fault)
+            rep_fault_flag <= 1'b0;
         if (uc_exec) begin
             if (uc_aluop == ALUJMP_SNOFLT)
                 no_fault_flag <= 1'b1;
