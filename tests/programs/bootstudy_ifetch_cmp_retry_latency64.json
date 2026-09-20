@@ -1,0 +1,87 @@
+{
+  "asm": "bootstudy_ifetch_cmp_retry.asm",
+  "start_mode": "protected",
+  "cr0": "0x80000001",
+  "cr3": 0,
+  "eip": "0x200",
+  "cycles": 100000,
+  "mem_latency": 64,
+  "initial_selectors": {
+    "DS": 16,
+    "FS": 16,
+    "SS": 16,
+    "GS": 16,
+    "ES": 16,
+    "CS": 8
+  },
+  "seg_cache": {
+    "CS": {
+      "base": "0xbff96000",
+      "limit": "0xffffffff",
+      "flags": "0xa9e0"
+    },
+    "DS": {
+      "base": "0x0",
+      "limit": "0xffffffff",
+      "flags": "0x29e0"
+    },
+    "SS": {
+      "base": "0x0",
+      "limit": "0xffffffff",
+      "flags": "0x29e0"
+    },
+    "ES": {
+      "base": "0x0",
+      "limit": "0xffffffff",
+      "flags": "0x29e0"
+    },
+    "FS": {
+      "base": "0x0",
+      "limit": "0xffffffff",
+      "flags": "0x29e0"
+    },
+    "GS": {
+      "base": "0x0",
+      "limit": "0xffffffff",
+      "flags": "0x29e0"
+    }
+  },
+  "page_tables": [
+    [
+      "0x10000",
+      "0x10000",
+      1,
+      "RW"
+    ],
+    [
+      "0xbff96000",
+      "0x10000",
+      1,
+      "RW"
+    ],
+    [
+      "0x1b000",
+      "0x1b000",
+      1,
+      "RW"
+    ],
+    [
+      "0xbffc9000",
+      "0x30000",
+      1,
+      "RW"
+    ],
+    [
+      "0x81b12000",
+      "0x40000",
+      1,
+      "RW"
+    ],
+    [
+      "0x2000",
+      "0x2000",
+      1,
+      "RW"
+    ]
+  ]
+}
