@@ -1,0 +1,31 @@
+{
+  "asm": "bootstudy_ifetch_admission_deadlock.asm",
+  "start_mode": "protected",
+  "cr0": "0x80000001",
+  "cr3": 0,
+  "eip": "0x0",
+  "cycles": 50000,
+  "initial_selectors": {
+    "CS": "0x0008",
+    "DS": "0x0010",
+    "SS": "0x0010",
+    "ES": "0x0010",
+    "FS": "0x0010",
+    "GS": "0x0010"
+  },
+  "seg_cache": {
+    "CS": { "base": "0xbff96000", "limit": "0xfffff", "flags": "0xa9e0" },
+    "DS": { "base": "0x0",       "limit": "0xfffff", "flags": "0x29e0" },
+    "SS": { "base": "0x0",       "limit": "0xfffff", "flags": "0x29e0" },
+    "ES": { "base": "0x0",       "limit": "0xfffff", "flags": "0x29e0" },
+    "FS": { "base": "0x0",       "limit": "0xfffff", "flags": "0x29e0" },
+    "GS": { "base": "0x0",       "limit": "0xfffff", "flags": "0x29e0" }
+  },
+  "page_tables": [
+    ["0x30000",    "0x30000", 1, "RW"],
+    ["0xbff96000", "0x30000", 1, "RW"],
+    ["0xbffc9000", "0x40000", 1, "RW"],
+    ["0x81b12000", "0x50000", 1, "RW"],
+    ["0x1b000",    "0x60000", 1, "RW"]
+  ]
+}

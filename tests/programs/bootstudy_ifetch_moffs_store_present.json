@@ -1,0 +1,92 @@
+{
+  "initial_selectors": {
+    "DS": 16,
+    "ES": 16,
+    "CS": 8,
+    "FS": 16,
+    "SS": 16,
+    "GS": 16
+  },
+  "seg_cache": {
+    "CS": {
+      "limit": "0xffffffff",
+      "base": "0xbff37000",
+      "flags": "0xa9e0"
+    },
+    "SS": {
+      "limit": "0xffffffff",
+      "base": 0,
+      "flags": "0x29e0"
+    },
+    "ES": {
+      "limit": "0xffffffff",
+      "base": 0,
+      "flags": "0x29e0"
+    },
+    "GS": {
+      "limit": "0xffffffff",
+      "base": 0,
+      "flags": "0x29e0"
+    },
+    "DS": {
+      "limit": "0xffffffff",
+      "base": 0,
+      "flags": "0x29e0"
+    },
+    "FS": {
+      "limit": "0xffffffff",
+      "base": 0,
+      "flags": "0x29e0"
+    }
+  },
+  "eip": "0x200",
+  "page_tables": [
+    [
+      "0x10000",
+      "0x10000",
+      1,
+      "RW"
+    ],
+    [
+      "0xbff37000",
+      "0x10000",
+      1,
+      "RW"
+    ],
+    [
+      "0x1b000",
+      "0x1b000",
+      1,
+      "RW"
+    ],
+    [
+      "0xbff40000",
+      "0x30000",
+      1,
+      "RW"
+    ],
+    [
+      "0x40000",
+      "0x30000",
+      1,
+      "RW"
+    ],
+    [
+      "0x2000",
+      "0x2000",
+      1,
+      "RW"
+    ],
+    [
+      "0xbff38000",
+      "0x11000",
+      1,
+      "RW"
+    ]
+  ],
+  "asm": "bootstudy_ifetch_moffs_store_present.asm",
+  "cr3": 0,
+  "cycles": 100000,
+  "cr0": "0x80000001",
+  "start_mode": "protected"
+}
