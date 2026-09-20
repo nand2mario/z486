@@ -2821,7 +2821,12 @@ always_ff @(posedge clk) begin
         error_code_flag <= 1'b0;
         interrupt_hw <= 1'b0;
     end else begin
-        if (i_issue && !halted) begin
+        // Also clear the sequencer predicates when a hardware interrupt is
+        // recognised.  They were cleared only at i_issue, so an INTR taken right
+        // after exception delivery (before the handler's first instruction
+        // issued) saw a stale error_code_flag and pushed a bogus error code
+        // (trap-gate #PF handler, IF=1, INTR pending at entry).
+        if ((i_issue && !halted) || interrupt_entry) begin
             misc1_flag <= 1'b0;
             misc2_flag <= 1'b0;
             error_code_flag <= 1'b0;
