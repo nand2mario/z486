@@ -55,7 +55,7 @@ def generate_page_table_entry(frame_addr, flags='RW'):
     return pte
 
 
-def generate_page_tables(mappings, page_dir_addr=0x0000):
+def generate_page_tables(mappings, page_dir_addr=0x0000, pde_user=False):
     """Generate page directory and page tables for given mappings.
 
     Args:
@@ -96,7 +96,7 @@ def generate_page_tables(mappings, page_dir_addr=0x0000):
                     memory[pt_base + j*4] = struct.pack('<I', 0)
 
                 # Create PDE pointing to this page table
-                pde = generate_page_table_entry(page_tables[pde_idx], 'RW')
+                pde = generate_page_table_entry(page_tables[pde_idx], 'RWU' if pde_user else 'RW')  # opt-in 'pde_user' json key: page-directory entries get the U bit
                 page_dir[pde_idx] = pde
 
             # Create PTE
@@ -233,7 +233,8 @@ def build_memory_image(test_config, code_bin, output_hex, verbose=False):
     pt_mappings = test_config.get('page_tables', [])
     if pt_mappings:
         pt_mem = generate_page_tables(pt_mappings,
-                                      page_dir_addr=test_config['cr3'] & 0xFFFFF000)
+                                      page_dir_addr=test_config['cr3'] & 0xFFFFF000,
+                                      pde_user=bool(test_config.get('pde_user', False)))
         for addr, data in pt_mem.items():
             for i, byte in enumerate(data):
                 memory[addr + i] = byte
