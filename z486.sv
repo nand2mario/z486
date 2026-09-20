@@ -2711,7 +2711,17 @@ always_ff @(posedge clk) begin
             dbg_first_done <= 1'b1;
             if (single_step)
                 halted <= 1'b1;
-            if (!i_issue && !d2_valid)
+            // D2 residency must not keep an already reclaimed EX slot alive:
+            // a later fetch fault otherwise misses this admission boundary.
+            // RNI delay alone is not completion: a cold POP can retain RNI
+            // while its successor waits and still need the load writeback.
+            // An executed non-RNI tail also completes while D2 lacks bytes,
+            // even for recipes with slot_has_work (ordinary stores). Keep
+            // ready-but-unissued successors and cold POP's RNI/RNId overlap
+            // subject to the existing no-work proof.
+            if (!i_issue && !any_fault &&
+                (!d2_valid || recipe_slot_stale ||
+                 (uc_exec && !i_rni && !d2_payload_ready)))
                 uc_active <= 1'b0;
         end
 
