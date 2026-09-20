@@ -604,7 +604,10 @@ always_ff @(posedge clk) begin
 end
 // synthesis translate_on
 
-wire       core_live = !halted && uc_active && !fault_suppress_delay_slot && !interrupt_entry;
+// Paging becomes idle on its registered fault response, before registered
+// squash. Do not execute or submit a younger uop on that response edge.
+wire       core_live = !halted && uc_active && !fault_suppress_delay_slot &&
+                      !interrupt_entry && !page_fault;
 wire       dly_grace_now = mem_dly_grace && uc_p_pure_dly;
 wire       posted_write_release = mem_write_dly_grace && !uc_busreq;    // release non-busop writes after one cycle
 wire       mem_block_busy = (uc_bus_or_dly && !dly_grace_now && !posted_write_release) ||
@@ -880,7 +883,13 @@ prefetch prefetch_inst (
     // Decode may run ahead while an older instruction is still active.  A
     // retained fetch fault becomes precise once EX is empty or the older
     // instruction reaches its non-stalled retirement boundary.
-    .fetch_blocked(decoder_fetch_blocked &&
+    // An older instruction's fault pulse (data #PF / #GP / #DE) that lands on the
+    // very cycle its RNI delay slot becomes non-stalled must win over the younger
+    // fetch fault.  Without !any_fault the prefetch registered the retained ifetch
+    // fault on the same edge, and the next cycle's ifetch pulse overrode the older
+    // fault (CR2 / error code / TMPeIP := ifetch): the older instruction's
+    // faulting store was silently lost and the restart resumed after it.
+    .fetch_blocked(decoder_fetch_blocked && !any_fault &&
                    (!uc_active || (i_rni_delay && !stall))),
     .ifetch_fault(ifetch_page_fault),
     .ifetch_fault_code(ifetch_fault_code),
@@ -2353,6 +2362,7 @@ reg [31:0] TMPeIP;                  // Saved EIP for RPTI (repeat instruction)
 reg [31:0] wr_restart_eip;          // TMPeIP captured at every demand-write issue: a write
                                     // fault (perm/walk/crossing) may surface after the issuing
                                     // instruction chained away and TMPeIP moved on
+reg [31:0] wr_restart_esp;          // Matching instruction-start ESP for a delayed write fault
 reg [31:0] TMPeSP;                  // Saved ESP for fault handling
 wire       flags_backup_active;     // Set at i_issue/FLGSBA, cleared on interrupt_entry - guards FLAGSB writes
 reg        misc1_flag;              // Set by SMISC1 {-33-}, tested by JMISC1 {-53-}
@@ -2479,6 +2489,18 @@ always_ff @(posedge clk) begin
             no_fault_flag  <= 1'b0;
             rep_fault_flag <= 1'b0;
         end
+        // An instruction-fetch #PF belongs to the NEXT (never-issued)
+        // instruction, so it must not inherit the rep_fault_flag of a REP
+        // MOVS/STOS/... that has already completed.  That flag is normally
+        // cleared only by the next i_issue; when the following instruction's
+        // fetch faults in the RNI delay slot no i_issue ever happens, the fault
+        // microcode (JREP) saw the stale flag and rolled ECX/ESI/EDI back one
+        // iteration although EIP (TMPeIP) already pointed AFTER the string op,
+        // silently half-undoing the REP after the handler's IRET.  A data #PF
+        // (the string op's own delayed write fault) keeps the flag: that one
+        // needs the correction.
+        if (ifetch_page_fault && !data_page_fault)
+            rep_fault_flag <= 1'b0;
         if (uc_exec) begin
             if (uc_aluop == ALUJMP_SNOFLT)
                 no_fault_flag <= 1'b1;
@@ -2807,7 +2829,10 @@ always_ff @(posedge clk) begin
         i <= i_bus;
         i.entry_point <= d2_entry_r;
     end
-    if (interrupt_entry)
+    // Fault delivery also abandons the branch. In particular, the address
+    // unit must stop selecting a Jcc's held ALU operand for handler-table
+    // address calculations after an older, overlapped store faults.
+    if (interrupt_entry || any_fault)
         i.rel_branch_kind <= REL_BRANCH_NONE;
 end
 
@@ -3068,11 +3093,17 @@ always_ff @(posedge clk) begin
                         // so it must use the START ESP even if the instruction already
                         // committed a stack push before faulting (e.g. ENTER's PUSH EBP).
 
-    // Chained-store fault attribution: capture the restart IP at every demand WRITE issue
-    if (mem_req_to_paging && mem_write_now && mem_accepted)
+    // Chained-store fault attribution: capture both restart fields at every
+    // demand WRITE issue. On the owner's first uStep, live ESP is the start
+    // value; after that, TMPeSP retains that value while live ESP may be post-push.
+    if (mem_req_to_paging && mem_write_now && mem_accepted) begin
         wr_restart_eip <= TMPeIP;
-    if (page_fault && pg_fault_code[1])
+        wr_restart_esp <= i_first ? ESP : TMPeSP;
+    end
+    if (page_fault && pg_fault_code[1]) begin
         TMPeIP <= wr_restart_eip;
+        TMPeSP <= wr_restart_esp;
+    end
     else if (data_page_fault && vipt_load_slow_wait_r)
         TMPeIP <= vipt_load_slow_r.restart_eip;
     else if (ifetch_page_fault) begin

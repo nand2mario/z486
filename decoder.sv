@@ -487,12 +487,16 @@ wire       d2_late_capture = skel_v && !d2_window_valid && bytes_ok;
 
 // A retained prefetch fault becomes architectural only when one of the decode
 // stages is genuinely blocked on bytes, not while the queue can still run or
-// D1 is merely backpressured by its skid slot.
+// D1 is merely backpressured by its skid slot. D1 is younger than a resident
+// D2 skeleton: its missing bytes must not fault on the same retirement edge
+// that issues that older instruction into EX. Otherwise the registered fetch
+// fault cancels the new EX instruction after EIP has already advanced past it.
+// A resident D2 which itself needs missing literal bytes must still fault.
 wire d1_bytes_blocked = !skid_v &&
                         (d1_sib ? !sib_bytes_ok :
                          (!consume_prefix && !consume_0f && !struct_bytes_ok));
 wire d2_bytes_blocked = skel_v && !d2_window_valid && !bytes_ok;
-assign fetch_blocked = d1_bytes_blocked || d2_bytes_blocked;
+assign fetch_blocked = (!skel_v && d1_bytes_blocked) || d2_bytes_blocked;
 
 decoder_work_t d2_final;
 always_comb begin
