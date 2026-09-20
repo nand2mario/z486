@@ -604,7 +604,10 @@ always_ff @(posedge clk) begin
 end
 // synthesis translate_on
 
-wire       core_live = !halted && uc_active && !fault_suppress_delay_slot && !interrupt_entry;
+// Paging becomes idle on its registered fault response, before registered
+// squash. Do not execute or submit a younger uop on that response edge.
+wire       core_live = !halted && uc_active && !fault_suppress_delay_slot &&
+                      !interrupt_entry && !page_fault;
 wire       dly_grace_now = mem_dly_grace && uc_p_pure_dly;
 wire       posted_write_release = mem_write_dly_grace && !uc_busreq;    // release non-busop writes after one cycle
 wire       mem_block_busy = (uc_bus_or_dly && !dly_grace_now && !posted_write_release) ||
