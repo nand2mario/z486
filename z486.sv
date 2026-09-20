@@ -398,6 +398,7 @@ wire [11:0] d2_entry_r;             // Effective entry resident in D2
 wire        d2_rom_mem_resident;    // D2 entry tag aligned with ROM q_mem
 wire       init_cycle = d2_valid_r; // Temporary waveform alias; not control logic
 reg        uc_active;               // Tracks when instruction execution has begun
+reg [1:0]  fsds_adv_needed;         // Unstalled ROM advances still owed to fault_suppress_delay_slot after a fault
 reg        fault_suppress_delay_slot;   // Fault handling: suppress delay slot after fault triggers
 reg        interrupt_entry;         // Interrupt handler is being entered
 reg        stack_init_pending;      // Cycle after i_issue for a stack operation
@@ -2696,6 +2697,7 @@ always_ff @(posedge clk) begin
         interrupt_entry <= 1'b0;
         tf_active_r <= 1'b0;
         tf_trap_suppress_r <= 1'b0;
+        fsds_adv_needed <= 2'd0;
     end else begin
         if (!stall)
             interrupt_entry <= 1'b0;
@@ -2711,7 +2713,17 @@ always_ff @(posedge clk) begin
             dbg_first_done <= 1'b1;
             if (single_step)
                 halted <= 1'b1;
-            if (!i_issue && !d2_valid)
+            // D2 residency must not keep an already reclaimed EX slot alive:
+            // a later fetch fault otherwise misses this admission boundary.
+            // RNI delay alone is not completion: a cold POP can retain RNI
+            // while its successor waits and still need the load writeback.
+            // An executed non-RNI tail also completes while D2 lacks bytes,
+            // even for recipes with slot_has_work (ordinary stores). Keep
+            // ready-but-unissued successors and cold POP's RNI/RNId overlap
+            // subject to the existing no-work proof.
+            if (!i_issue && !any_fault &&
+                (!d2_valid || recipe_slot_stale ||
+                 (uc_exec && !i_rni && !d2_payload_ready)))
                 uc_active <= 1'b0;
         end
 
@@ -2741,8 +2753,23 @@ always_ff @(posedge clk) begin
         if (direct_wb_retire && uc_active && !instr_eip_written && !any_fault)
             debug_ip <= EIP;
 
+        // A fault pulse can land while the microcode ROM is held
+        // (stall_mem/stall_wio => rom_addr_ce=0, e.g. an ifetch #PF right after
+        // a store that is still in flight).  fault_suppress_delay_slot used to
+        // clear after ONE cycle even though the ROM had not advanced, so the
+        // stale pre-fault micro-op still sitting at uc_addr ran, its RNI set
+        // i_rni_delay, and uc_active was dropped in the middle of the #PF
+        // microcode (uc_active=0, fault_delivery_state stuck at DELIVERING,
+        // INTR never taken).  Count UNSTALLED suppress cycles instead: hold the
+        // suppress until two real ROM advances have happened after the fault,
+        // which is what the unstalled case always got.
+        if (any_fault)
+            fsds_adv_needed <= 2'd2;
+        else if (fault_suppress_delay_slot && !stall && fsds_adv_needed != 2'd0)
+            fsds_adv_needed <= fsds_adv_needed - 2'd1;
         fault_suppress_delay_slot <= any_fault || any_fault_r ||
-                                     (fault_suppress_delay_slot && stall);
+                                     (fault_suppress_delay_slot &&
+                                      (stall || fsds_adv_needed > 2'd1));
 
         if (i_issue) begin
             uc_active <= 1'b1;
@@ -2821,7 +2848,12 @@ always_ff @(posedge clk) begin
         error_code_flag <= 1'b0;
         interrupt_hw <= 1'b0;
     end else begin
-        if (i_issue && !halted) begin
+        // Also clear the sequencer predicates when a hardware interrupt is
+        // recognised.  They were cleared only at i_issue, so an INTR taken right
+        // after exception delivery (before the handler's first instruction
+        // issued) saw a stale error_code_flag and pushed a bogus error code
+        // (trap-gate #PF handler, IF=1, INTR pending at entry).
+        if ((i_issue && !halted) || interrupt_entry) begin
             misc1_flag <= 1'b0;
             misc2_flag <= 1'b0;
             error_code_flag <= 1'b0;

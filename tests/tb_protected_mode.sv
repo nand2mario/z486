@@ -622,7 +622,17 @@ module tb_protected_mode #(
     reg [7:0] rd_remaining = 8'd0;
     reg [7:0] rd_index = 8'd0;
     reg rd_io_pending = 1'b0;
-    wire rd_busy = (rd_wait_count != 0) || (rd_remaining != 0) || inta_resp_pending;
+    // Store back-pressure (+wr_busy=N: after each write, ready low for 0..N cycles)
+    int mem_seed = 1;
+    int wr_busy_max = 0;
+    int wr_wait_count = 0;
+    // Periodic timer-like INTR (+intr_period=P cycles between INTA-completion and next assert,
+    // +intr_jit=J adds random 0..J). Level is held until INTA completes, like a PIC.
+    int intr_period = 0;
+    int intr_jit = 0;
+    int intr_gap_cnt = 0;
+    int intr_gap_next = 0;
+    wire rd_busy = (rd_wait_count != 0) || (rd_remaining != 0) || inta_resp_pending || (wr_wait_count != 0);
 
     // Memory behavior with configurable latency (ready/valid protocol)
     // Note: din is held stable (not cleared) to allow paging unit to sample it
@@ -634,6 +644,17 @@ module tb_protected_mode #(
                    {addr, 2'b00}, write);
 
         ready <= !rd_busy;
+        if (wr_wait_count != 0) wr_wait_count <= wr_wait_count - 1;
+        if (intr_period > 0 && reset_n) begin
+            if (!intr && !inta_resp_pending && !inta_first) begin
+                if (intr_gap_cnt >= intr_gap_next) begin
+                    intr <= 1'b1;
+                    intr_gap_cnt <= 0;
+                    intr_gap_next <= intr_period + ((intr_jit > 0) ? int'($urandom % (intr_jit + 1)) : 0);
+                end else
+                    intr_gap_cnt <= intr_gap_cnt + 1;
+            end
+        end
         resp_valid <= 1'b0;
         // Don't clear din - hold it stable for page walker timing
 
@@ -732,6 +753,11 @@ module tb_protected_mode #(
             end else begin
                 // Write
                 ready <= 1'b1;
+                if (!io && wr_busy_max > 0) begin
+                    automatic int wn = int'($urandom % (wr_busy_max + 1));
+                    wr_wait_count <= wn;
+                    ready <= (wn == 0);
+                end
                 if (io) begin
                 // I/O writes - check result ports
                 reg [15:0] port;
@@ -1073,6 +1099,13 @@ module tb_protected_mode #(
         // Get max cycles
         if ($value$plusargs("cycles=%d", max_cycles))
             $display("[TB] Max cycles: %0d", max_cycles);
+        if ($value$plusargs("mem_seed=%d", mem_seed)) void'($urandom(mem_seed));
+        if ($value$plusargs("wr_busy=%d", wr_busy_max)) $display("[TB] write busy 0..%0d", wr_busy_max);
+        if ($value$plusargs("intr_period=%d", intr_period)) begin
+            $display("[TB] periodic INTR period %0d", intr_period);
+            intr_gap_next = intr_period;
+        end
+        void'($value$plusargs("intr_jit=%d", intr_jit));
         if ($value$plusargs("mem_latency=%d", mem_latency))
             $display("[TB] Memory latency: %0d cycles", mem_latency);
         if ($test$plusargs("continue_on_hlt"))
@@ -1505,6 +1538,13 @@ module tb_protected_mode #(
                 $display("  Test data: 0x%08X", test_data);
                 $display("  Instructions: %0d", instruction_count);
                 $display("  CS:EIP: %04X:%08X", dut.CS, dut.EIP);
+                $display("  HANGDUMP uc_active=%0d uc_addr=%03x stall=%0d stall_mem=%0d fds=%0d fsds=%0d i_rni_delay=%0d intr_pend=%0d intr_pin=%0d IF=%0d q_flush=%0d",
+                         dut.uc_active, dut.uc_addr, dut.stall, dut.stall_mem, dut.fault_delivery_state,
+                         dut.fault_suppress_delay_slot, dut.i_rni_delay, dut.interrupt_pending, intr,
+                         dut.EFLAGS[9], dut.q_flush);
+                $display("  HANGDUMP2 pf_suspended=%0d pf_fault_reported=%0d dec_fetch_blocked=%0d early_redirected=%0d pf_inflight=%0d",
+                         dut.prefetch_inst.pf_suspended, dut.prefetch_inst.pf_fault_reported,
+                         dut.decoder_fetch_blocked, dut.early_redirected, dut.prefetch_inst.pf_inflight);
                 $display("========================================");
                 $finish;
             end
