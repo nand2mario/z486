@@ -1,0 +1,18 @@
+{
+  "asm": "bootstudy_store_branch_pf.asm",
+  "start_mode": "protected",
+  "cr0": "0x80000001",
+  "cr3": 0,
+  "eip": "0x200",
+  "initial_selectors": {"CS": 8,"DS": 16,"SS": 16,"ES": 16,"FS": 16,"GS": 16},
+  "cycles": 50000,
+  "seg_cache": {
+    "CS": {"base":"0x10000","limit":"0xffffffff","flags":"0xa9e0"},
+    "DS": {"base":"0","limit":"0xffffffff","flags":"0x29e0"},
+    "SS": {"base":"0","limit":"0xffffffff","flags":"0x29e0"},
+    "ES": {"base":"0","limit":"0xffffffff","flags":"0x29e0"},
+    "FS": {"base":"0","limit":"0xffffffff","flags":"0x29e0"},
+    "GS": {"base":"0","limit":"0xffffffff","flags":"0x29e0"}
+  },
+  "page_tables": [["0x10000","0x10000",16,"RW"],["0x30000","0x30000",1,"RW"],["0x8164a000","0x40000",1,"RW"]]
+}
