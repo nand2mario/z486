@@ -12,6 +12,8 @@ module paging_unit
     input        [31:0] cr0,
     input        [31:0] cr3,
     input               cr3_write,         // TLB flush on CR3 write
+    input               cr3_req,           // Pending serializing CR3 micro-op
+    output              cr3_ack,           // Older paging/fetch work has drained
 
     // 486 INVLPG. The request is acknowledged only after any older page walk
     // has finished, preventing a stale translation from being reinserted.
@@ -228,7 +230,8 @@ always_ff @(posedge clk) begin
 end
 // P0/P1 prefetch timing: P0 prefetch toggles pf_req_toggle and presents pf_linear_addr. P1 paging translates the registered prefetch...
 // Details: doc/z486/implementation_notes.md#src-24-z486-paging-unit-sv-189
-wire idle_pf_req = s_idle && pf_pending && !fast_path_pending && !pf_fast_pending;
+wire idle_pf_req = s_idle && pf_pending && !fast_path_pending && !pf_fast_pending &&
+                   !cr3_req;
 
 paging_tlb tlb_inst (
     .clk            (clk),
@@ -306,6 +309,11 @@ reg [31:0] icache_req_phys_addr_r;
 // Walker bus read/write tracking: prevents re-emission while op is in flight
 reg walk_biu_pending;
 assign invlpg_ack = s_idle && !walk_biu_pending;
+// Stop admitting prefetches while a CR3 writer waits, but let retained
+// requests complete normally. The caller commits and invalidates only after
+// no older walk or translated fetch can repopulate the old context.
+assign cr3_ack = s_idle && !walk_biu_pending && !pf_fast_pending &&
+                 !icache_req_valid_r && !fast_path_pending && !mem_servicing;
 wire walker_feed_ready = dcache_req_complete && walk_biu_pending;
 // Walker states are mutually exclusive with the PG_IDLE/PG_MEM_TLB
 // combinational request paths. Only a retained registered request can block
