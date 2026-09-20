@@ -65,6 +65,7 @@ reg         dt_target_idt;      // Tracks GDTR vs IDTR for SBAS/SLIM_TABLE
 reg         addr_size;          // 1=32-bit, 0=16-bit effective address
 reg [31:0]  seg_base_r;         // Registered segment base
 reg [31:0]  seg_limit_r;        // Registered segment limit
+reg [1:0]   seg_bounds_r;       // Matching descriptor: {expand-down data, B}
 
 // Full hidden descriptors exist only for the six architectural segment
 // registers, TR, and LDTR. GDTR/IDTR contain only base+limit, and SEG_IO is a
@@ -231,7 +232,18 @@ wire limit_violated = start_out_of_bounds | size_fault;
 wire rm_limit_fault = !pe && (size_fault ||
                       (start_out_of_bounds && !(is_stack_fault && !addr_size)));
 
-wire pm_limit_fault = pe && limit_violated && !is_dtable;
+// Expand-down data uses the descriptor limit as an exclusive lower bound.
+// The upper bound is FFFF or FFFFFFFF according to B, not address size.
+// Reuse the existing subtraction for the lower-bound test. The upper bound
+// is all ones, so checking its remaining bytes needs no second subtractor.
+wire down_upper_fault = !seg_bounds_r[0] && (eff_offset[31:16] != 16'd0);
+wire down_end_near = seg_bounds_r[0] ? (&eff_offset[31:3])
+                                    : (&eff_offset[15:3]);
+wire down_size_fault = down_end_near &&
+                       ((~eff_offset[2:0]) < {1'b0, access_size});
+wire down_limit_fault = !start_out_of_bounds || down_upper_fault || down_size_fault;
+wire pm_limit_fault = pe && !is_dtable &&
+                      ((seg_bounds_r[1] && !vm) ? down_limit_fault : limit_violated);
 
 wire seg_writable = (seg_sel == SEG_ES) ? (!desc_cache[SEG_ES].seg_type[3] && desc_cache[SEG_ES].seg_type[1]) :
                     (seg_sel == SEG_CS) ? vm :
@@ -293,6 +305,19 @@ function automatic [31:0] seg_limit_for(input [3:0] sel, input dsw);
             seg_limit_for = expand_raw_limit(raw_limit_for(sel, dsw));
         default: seg_limit_for = 32'hFFFFFFFF;
     endcase
+endfunction
+
+// Capture these attributes alongside seg_limit_r, including the temporary
+// CS-cache stack descriptor used during privilege transitions. Code's type[2]
+// is conforming, not expand-down; system descriptors also use ordinary limits.
+function automatic [1:0] seg_bounds_for(input [3:0] sel, input dsw);
+    seg_desc_t d;
+    begin
+        d = '0;
+        if (sel <= SEG_GS)
+            d = desc_for((sel == SEG_SS && dsw) ? SEG_CS : sel);
+        seg_bounds_for = {d.S && !d.seg_type[3] && d.seg_type[2], d.D_B};
+    end
 endfunction
 
 function automatic [3:0] effective_target(input [3:0] target);
@@ -507,6 +532,7 @@ always_ff @(posedge clk) begin
         addr_size <= 1'b0;
         seg_base_r <= 32'h0;  // DS_base at reset
         seg_limit_r <= 32'hFFFF;
+        seg_bounds_r <= 2'b00;
         stack_push_mode <= 1'b0;
         descsw_mode <= 1'b0;
         tss_access_flag <= 1'b0;
@@ -526,8 +552,10 @@ always_ff @(posedge clk) begin
             stack_push_mode <= 1'b0;
             descsw_mode <= 1'b0;
             tss_access_flag <= 1'b1;
-            if (seg_sel == SEG_SS)
+            if (seg_sel == SEG_SS) begin
                 seg_limit_r <= seg_limit_for(SEG_SS, 1'b0);
+                seg_bounds_r <= seg_bounds_for(SEG_SS, 1'b0);
+            end
         end
         if (ctssaf_pulse)
             tss_access_flag <= 1'b0;
@@ -536,6 +564,7 @@ always_ff @(posedge clk) begin
                 seg_sel <= seg_target;
                 seg_is_io <= (seg_target == SEG_IO);
                 seg_limit_r <= seg_limit_for(seg_target, 1'b0);
+                seg_bounds_r <= seg_bounds_for(seg_target, 1'b0);
                 i_addr32_r <= init_addr32;
                 i_stack_op_r <= init_stack_op;
                 stack_push_mode <= 1'b0;
@@ -548,8 +577,10 @@ always_ff @(posedge clk) begin
                 if (clear_descsw) begin
                     descsw_mode <= 1'b0;
                     seg_limit_r <= seg_limit_for(seg_target, 1'b0);
+                    seg_bounds_r <= seg_bounds_for(seg_target, 1'b0);
                 end else begin
                     seg_limit_r <= seg_limit_for(seg_target, descsw_mode);
+                    seg_bounds_r <= seg_bounds_for(seg_target, descsw_mode);
                 end
             end
 
@@ -563,6 +594,7 @@ always_ff @(posedge clk) begin
                 seg_is_io <= 1'b0;
                 descsw_mode <= 1'b1;
                 seg_limit_r <= seg_limit_for(SEG_CS, 1'b0);
+                seg_bounds_r <= seg_bounds_for(SEG_CS, 1'b0);
             end
 
             default: ;
