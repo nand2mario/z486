@@ -2356,6 +2356,7 @@ reg [31:0] TMPeIP;                  // Saved EIP for RPTI (repeat instruction)
 reg [31:0] wr_restart_eip;          // TMPeIP captured at every demand-write issue: a write
                                     // fault (perm/walk/crossing) may surface after the issuing
                                     // instruction chained away and TMPeIP moved on
+reg [31:0] wr_restart_esp;          // Matching instruction-start ESP for a delayed write fault
 reg [31:0] TMPeSP;                  // Saved ESP for fault handling
 wire       flags_backup_active;     // Set at i_issue/FLGSBA, cleared on interrupt_entry - guards FLAGSB writes
 reg        misc1_flag;              // Set by SMISC1 {-33-}, tested by JMISC1 {-53-}
@@ -3071,11 +3072,17 @@ always_ff @(posedge clk) begin
                         // so it must use the START ESP even if the instruction already
                         // committed a stack push before faulting (e.g. ENTER's PUSH EBP).
 
-    // Chained-store fault attribution: capture the restart IP at every demand WRITE issue
-    if (mem_req_to_paging && mem_write_now && mem_accepted)
+    // Chained-store fault attribution: capture both restart fields at every
+    // demand WRITE issue. On the owner's first uStep, live ESP is the start
+    // value; after that, TMPeSP retains that value while live ESP may be post-push.
+    if (mem_req_to_paging && mem_write_now && mem_accepted) begin
         wr_restart_eip <= TMPeIP;
-    if (page_fault && pg_fault_code[1])
+        wr_restart_esp <= i_first ? ESP : TMPeSP;
+    end
+    if (page_fault && pg_fault_code[1]) begin
         TMPeIP <= wr_restart_eip;
+        TMPeSP <= wr_restart_esp;
+    end
     else if (data_page_fault && vipt_load_slow_wait_r)
         TMPeIP <= vipt_load_slow_r.restart_eip;
     else if (ifetch_page_fault) begin
