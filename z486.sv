@@ -615,13 +615,14 @@ wire       stall_wio = uc_active && uc_is_wio &&
                        !interrupt_pending && !single_step;
 wire       stall_x87_direct;
 wire       stall_invlpg;
+wire       stall_cr3;
 // An entry may reach the ROM before its D2 literals arrive. Let the ending
 // instruction execute its architectural RNI and delay slot, then hold the ROM
 // word until D2 can transfer it to EX. The RNI cycle can also prepare a split
 // EA; stalling it would suppress the current instruction's delay-slot writeback.
 wire       stall_d2 = d2_valid && !d2_payload_ready && !i_rni && !i_rni_delay;
 assign stall = stall_mem || stall_wio || stall_d2 || stall_x87_direct ||
-               stall_invlpg || stall_fast_store;
+               stall_invlpg || stall_cr3 || stall_fast_store;
 
 // Repeat
 wire       prot_result_now;
@@ -638,7 +639,7 @@ wire       vipt_load_overlap_wb = vipt_load_overlap_r &&
 wire       vipt_load_exec_block = vipt_load_busy && !vipt_load_overlap_wb;
 assign uc_exec = core_live && !(mem_servicing ? mem_block_busy : mem_block_idle) &&
                  !stall_wio && !stall_d2 && !stall_x87_direct && !stall_invlpg &&
-                 !stall_fast_store &&
+                 !stall_cr3 && !stall_fast_store &&
                  !d2_release_hold && !throttle_parked_r && !recipe_slot_stale &&
                  !vipt_load_exec_block && !rmw_fallback_delay_r &&
                  !(vipt_load_rom_shadow_r && recipe_state.jcc);
@@ -719,7 +720,7 @@ assign d2_start_entry = d2_start_entry_arch;
 // q is EX-owned. A completed ROM lookup may wait in q_mem, but it advances
 // into q only on the D2->EX transfer edge.
 wire        d2_rom_cancel = interrupt_at_boundary || any_fault || any_fault_issue;
-wire        microcode_rom_base_ce = !stall_mem && !stall_wio && !repeat_active;
+wire        microcode_rom_base_ce = !stall_mem && !stall_wio && !stall_cr3 && !repeat_active;
 `Z486_NO_PRUNE reg [2:0] early_kind_probe_r;
 wire [5:0]  uc_source_shift;
 wire [3:0]  uc_shift_source_class;
@@ -1981,6 +1982,11 @@ wire [31:0] pg_cr2_out = data_page_fault ? data_cr2_out : ifetch_fault_addr;
 assign page_fault = data_page_fault || ifetch_page_fault;
 
 // CR3 write detection for TLB flush
+// Drain older translations before changing their context. Otherwise an old
+// prefetch walk can refill the TLB after this instruction invalidates it.
+wire cr3_request = uc_active && uc_buscode == BUSOP_SPCR && uc_dest == DEST_PDBR;
+wire cr3_ack;
+assign stall_cr3 = cr3_request && !cr3_ack;
 assign cr3_write = uc_exec && uc_buscode == BUSOP_SPCR && uc_dest == DEST_PDBR;
 
 // IO request detection
@@ -2130,6 +2136,8 @@ paging_unit paging_inst (
     .cr0                (CR0),
     .cr3                (CR3),
     .cr3_write          (cr3_write),
+    .cr3_req            (cr3_request),
+    .cr3_ack            (cr3_ack),
     .invlpg_req         (invlpg_request),
     .invlpg_linear      (ind_linear),
     .invlpg_ack         (invlpg_ack),
