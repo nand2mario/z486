@@ -883,7 +883,13 @@ prefetch prefetch_inst (
     // Decode may run ahead while an older instruction is still active.  A
     // retained fetch fault becomes precise once EX is empty or the older
     // instruction reaches its non-stalled retirement boundary.
-    .fetch_blocked(decoder_fetch_blocked &&
+    // An older instruction's fault pulse (data #PF / #GP / #DE) that lands on the
+    // very cycle its RNI delay slot becomes non-stalled must win over the younger
+    // fetch fault.  Without !any_fault the prefetch registered the retained ifetch
+    // fault on the same edge, and the next cycle's ifetch pulse overrode the older
+    // fault (CR2 / error code / TMPeIP := ifetch): the older instruction's
+    // faulting store was silently lost and the restart resumed after it.
+    .fetch_blocked(decoder_fetch_blocked && !any_fault &&
                    (!uc_active || (i_rni_delay && !stall))),
     .ifetch_fault(ifetch_page_fault),
     .ifetch_fault_code(ifetch_fault_code),
