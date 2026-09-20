@@ -1,0 +1,111 @@
+{
+ "asm": "ifetch_pf_after_store_a_exact_intr_pending.asm",
+ "start_mode": "protected",
+ "cr0": "0x80000001",
+ "cr3": 0,
+ "eip": "0x400",
+ "cycles": 400000,
+ "initial_selectors": {
+  "CS": 8,
+  "DS": 16,
+  "SS": 16,
+  "ES": 16,
+  "FS": 16,
+  "GS": 16
+ },
+ "seg_cache": {
+  "CS": {
+   "base": "0x10000",
+   "limit": "0xffffffff",
+   "flags": "0xa9e0"
+  },
+  "DS": {
+   "base": 0,
+   "limit": "0xffffffff",
+   "flags": "0x29e0"
+  },
+  "SS": {
+   "base": 0,
+   "limit": "0xffffffff",
+   "flags": "0x29e0"
+  },
+  "ES": {
+   "base": 0,
+   "limit": "0xffffffff",
+   "flags": "0x29e0"
+  },
+  "FS": {
+   "base": 0,
+   "limit": "0xffffffff",
+   "flags": "0x29e0"
+  },
+  "GS": {
+   "base": 0,
+   "limit": "0xffffffff",
+   "flags": "0x29e0"
+  }
+ },
+ "page_tables": [
+  [
+   "0x0",
+   "0x0",
+   128,
+   "RW"
+  ],
+  [
+   "0x56e000",
+   "0x40000",
+   1,
+   "RWU"
+  ],
+  [
+   "0x56f000",
+   "0x44000",
+   1,
+   "RWU"
+  ],
+  [
+   "0x70be1000",
+   "0x12000",
+   1,
+   "RWU"
+  ],
+  [
+   "0x70be2000",
+   "0x13000",
+   1,
+   "RWU"
+  ],
+  [
+   "0x70be3000",
+   "0x18000",
+   1,
+   "RWU"
+  ],
+  [
+   "0x70be4000",
+   "0x19000",
+   1,
+   "RWU"
+  ],
+  [
+   "0x70bd1000",
+   "0x16000",
+   1,
+   "RWU"
+  ],
+  [
+   "0x70bd2000",
+   "0x17000",
+   1,
+   "RWU"
+  ]
+ ],
+ "sim_plusargs": [
+  "wr_busy=2",
+  "mem_seed=2",
+  "intr_period=1237",
+  "intr_jit=40"
+ ],
+ "mem_latency": 1
+}
