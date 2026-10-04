@@ -200,6 +200,8 @@ logic        muldiv_tmpb_write;
 logic [31:0] muldiv_tmpb_value;
 logic        muldiv_counter_early_exit;
 logic        muldiv_quotient_zero;
+logic        muldiv_quotient_sign;
+logic        muldiv_quotient_parity;
 logic        muldiv_flag_overflow;
 
 logic sh_flags_commit;
@@ -1216,8 +1218,20 @@ always_ff @(posedge clk) begin
                 ALUJMP_BITTST: eflags[0] <= shift_bit_test_cf;
                 ALUJMP_DIV5: begin
                     eflags[0] <= 1'b0;
-                    if (instr.div_quotient_zf)
+                    if (instr.div_quotient_zf) begin
+                        // Real 486/AMD silicon perturbs SF/ZF/PF/AF as an
+                        // undocumented side effect of unsigned DIV; Cyrix
+                        // 486 leaves them unchanged. Pre-CPUID software
+                        // (CHKCPU, Memtest86+, Win9x/NT Setup) probes this
+                        // to distinguish "real" 486/AMD from Cyrix -- see
+                        // nand2mario/z486#82. AF's forced-1 value is an
+                        // unverified best guess (no real-silicon reference
+                        // found); SF/ZF/PF follow the quotient.
                         eflags[6] <= muldiv_quotient_zero;
+                        eflags[7] <= muldiv_quotient_sign;
+                        eflags[2] <= muldiv_quotient_parity;
+                        eflags[4] <= 1'b1;
+                    end
                 end
                 ALUJMP_CLZF: eflags[6] <= 1'b0;
                 ALUJMP_SEZF: eflags[6] <= 1'b1;
@@ -1518,6 +1532,8 @@ mul_div mul_div_inst (
     .counter_early_exit(muldiv_counter_early_exit),
     .div_overflow(div_overflow),
     .div_quotient_zero(muldiv_quotient_zero),
+    .div_quotient_sign(muldiv_quotient_sign),
+    .div_quotient_parity(muldiv_quotient_parity),
     .mul_flag_overflow(muldiv_flag_overflow)
 );
 
