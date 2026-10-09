@@ -123,20 +123,20 @@ build: obj_dir/Vtb_z486 obj_dir/Vtb_protected_mode
 obj_dir/Vtb_z486: $(RTL_SRCS) $(RTL_DEPS) $(TB_SRCS) $(CPP_SRCS)
 	@echo "Building z486 testbench with Verilator..."
 	cp -f ../*.hex .
-	$(VERILATOR) $(VFLAGS) --top-module tb_z486 $(TB_SRCS) $(RTL_SRCS) $(CPP_SRCS)
+	$(VERILATOR) $(VFLAGS) --top-module tb_z486 $(RTL_SRCS) $(TB_SRCS) $(CPP_SRCS)
 	@echo "Build complete: obj_dir/Vtb_z486"
 
 obj_dir/Vtb_protected_mode: $(RTL_SRCS) $(RTL_DEPS) $(TB_PROT_SRCS) $(TB_PROT_DEPS) $(CPP_PROT_SRCS)
 	@echo "Building protected mode testbench with Verilator..."
 	cp -f ../*.hex .
-	$(VERILATOR) $(VFLAGS) --top-module tb_protected_mode $(TB_PROT_SRCS) $(RTL_SRCS) $(CPP_PROT_SRCS)
+	$(VERILATOR) $(VFLAGS) --top-module tb_protected_mode $(RTL_SRCS) $(TB_PROT_SRCS) $(CPP_PROT_SRCS)
 	@echo "Build complete: obj_dir/Vtb_protected_mode"
 
 obj_dir_x87/Vtb_protected_mode: $(RTL_SRCS) $(RTL_DEPS) $(TB_PROT_SRCS) $(TB_PROT_DEPS) $(CPP_PROT_SRCS)
 	@echo "Building x87-enabled protected mode testbench with Verilator..."
 	cp -f ../*.hex .
 	$(VERILATOR) $(VFLAGS) --Mdir obj_dir_x87 -GENABLE_X87=1 --top-module tb_protected_mode \
-		$(TB_PROT_SRCS) $(RTL_SRCS) $(CPP_PROT_SRCS)
+		$(RTL_SRCS) $(TB_PROT_SRCS) $(CPP_PROT_SRCS)
 	@echo "Build complete: obj_dir_x87/Vtb_protected_mode"
 
 obj_dir_quake/Vtb_protected_mode: $(RTL_SRCS) $(RTL_DEPS) $(TB_PROT_SRCS) $(TB_PROT_DEPS) $(CPP_QUAKE_SNAPSHOT_SRCS)
@@ -159,7 +159,7 @@ obj_dir_x87_int/Vtb_z486: $(RTL_SRCS) $(RTL_DEPS) $(TB_SRCS) $(CPP_SRCS)
 	@echo "Building x87-enabled integer testbench with Verilator..."
 	cp -f ../*.hex .
 	$(VERILATOR) $(VFLAGS) --Mdir obj_dir_x87_int -GENABLE_X87=1 --top-module tb_z486 \
-		$(TB_SRCS) $(RTL_SRCS) $(CPP_SRCS)
+		$(RTL_SRCS) $(TB_SRCS) $(CPP_SRCS)
 	@echo "Build complete: obj_dir_x87_int/Vtb_z486"
 
 obj_dir/Vtb_test386: $(RTL_SRCS) $(RTL_DEPS) $(TB386_SRCS) $(CPP386_SRCS)

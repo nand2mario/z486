@@ -7,8 +7,15 @@ int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     Vtb_protected_mode* top = new Vtb_protected_mode;
 
+    // commandArgsPlusMatch returns a non-null empty string on no match.
+    // Require the exact opt-in: trace_instr/tracefile alone are not VCD requests.
+    bool trace_requested = false;
+    for (int index = 1; index < argc; index++) {
+        if (std::strcmp(argv[index], "+trace") == 0)
+            trace_requested = true;
+    }
     VerilatedVcdC* tfp = nullptr;
-    if (Verilated::commandArgsPlusMatch("trace")) {
+    if (trace_requested) {
         const char* tracefile = "trace.vcd";
         for (int index = 1; index < argc; index++) {
             static constexpr const char prefix[] = "+tracefile=";
