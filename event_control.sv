@@ -82,6 +82,10 @@ module event_control
     input  logic inhibit_interrupts,
     input  logic tf_trap_pending,
     input  logic single_step,
+    input  logic boundary_point,     // an instruction boundary decides traps and interrupts now
+    input  logic dbg_data_trap,      // an enabled data breakpoint matched in the last instruction
+    input  logic dbg_data_trap_now,  // the same, counting this cycle's compare (JNOINT)
+    input  logic dbg_exec_fault,     // an enabled instruction breakpoint at the next one, RF clear
 
     // FPU handshake
     input  logic x87_pereq,
@@ -194,7 +198,9 @@ always_comb begin
     seq_conditions.nested_task = EFLAGS[14];
     seq_conditions.io_ok = !pe ||
         (cpl <= EFLAGS[13:12] && (!vm || !i.port_io));
-    seq_conditions.no_interrupt = !interrupt_pending;
+    // A data breakpoint stops a REP string after its iteration, as an
+    // interrupt does (RPTI), and is taken at the following boundary.
+    seq_conditions.no_interrupt = !interrupt_pending && !dbg_data_trap_now;
     // The 386 microcode takes ERROR# as #MF (FPU_ERRORn). A 486 does that only
     // with CR0.NE; with NE=0 (DOS-compatible) the error goes out as FERR# to
     // IRQ13 and a waiting FP instruction freezes, taking interrupts, until
@@ -277,10 +283,13 @@ end
 // into demand-memory control.
 always_comb begin
     seq_boundary_redirect = '0;
-    if (i_rni_delay && !stall && !page_fault) begin
-        if (tf_trap_pending && !single_step) begin
+    if (boundary_point) begin
+        // Debug traps of the last instruction, then the next instruction's
+        // breakpoint fault, then NMI, then INTR (486 PRM 9.8).
+        if ((tf_trap_pending || dbg_data_trap || dbg_exec_fault) && !single_step) begin
             seq_boundary_redirect.valid = 1'b1;
-            seq_boundary_redirect.target = UADDR_SINGLE_STEP;
+            seq_boundary_redirect.target = tf_trap_pending ? UADDR_SINGLE_STEP
+                                                           : UADDR_BREAKPOINT;
         end else if (nmi_request_active && !single_step) begin
             seq_boundary_redirect.valid = 1'b1;
             seq_boundary_redirect.target = UADDR_NMI;
@@ -453,8 +462,8 @@ always_ff @(posedge clk) begin
         end
 
         // Interrupt recognition is last so it overrides speculative successor state.
-        if (i_rni_delay && !stall && !page_fault) begin
-            if (tf_trap_pending && !single_step) begin
+        if (boundary_point) begin
+            if ((tf_trap_pending || dbg_data_trap || dbg_exec_fault) && !single_step) begin
                 uc_active <= 1'b1;
                 interrupt_entry <= 1'b1;
                 tf_active_r <= 1'b0;

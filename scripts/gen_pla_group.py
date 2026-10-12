@@ -99,7 +99,53 @@ def build_group_entry_rom(group_map, group_entry_pats, row_source):
     return entries, valid
 
 
+# 486 patches to the extracted 80386 entry PLA (pla_entry_lookup). Each is a
+# 13-bit casez row written ahead of the 386 rows, so it takes priority (the
+# first matching row wins); the 386 rows themselves are never edited.
+# Address fields: first-level rows {data32, opcode[7:0], rep, pe, 1, has_0f};
+# group rows {data32, group[5:4], modrm.reg, group[3:0], memory, 0, has_0f}.
+# After a change: run this script (group rows and pla_group_base.hex), rebuild
+# pla_entry_base.hex (verilator --binary -I.. gen_pla_entry_rom.sv --top-module
+# gen_pla_entry_rom, run it in 24.z486), then gen_recipe_rom.py and
+# gen_pb_b1_class.py.
+UADDR_UD = 0x082B                     # #UD: FAULT 6
+UADDR_MOV_TR_R = 0x0391               # MOV TRn,rd
+UADDR_MOV_R_TR = 0x03B6               # MOV rd,TRn
+ENTRY_PATCHES = [
+    # 0F 07: the 386's LOADALL is #UD on the 486.
+    ("?00000111??11", UADDR_UD, "0F 07 LOADALL386 -> #UD"),
+    # 0F 26 /3 and 0F 24 /3: the 486's cache test registers TR3-5 join the
+    # 386's TR6-7. The 386 rows already take modrm.reg 4-7 (TR4-7); TR3 is
+    # reg 3. Like TR6-7, the values are not kept (TLB/cache tests are not
+    # modelled): writes are dropped, reads return the page-cache register.
+    ("?010110010?01", UADDR_MOV_TR_R, "0F 26 /3 MOV TR3,rd"),
+    ("?010110111?01", UADDR_MOV_R_TR, "0F 24 /3 MOV rd,TR3"),
+]
+PATCH_BEGIN = "        // ---- 486 patches (scripts/gen_pla_group.py ENTRY_PATCHES) ----"
+PATCH_END = "        // ---- end 486 patches ----"
+
+
+def apply_entry_patches(path: Path) -> None:
+    """Write ENTRY_PATCHES at the top of pla_entry_lookup's casez."""
+    text = path.read_text()
+    if PATCH_BEGIN in text:
+        pre = text[:text.index(PATCH_BEGIN)]
+        post = text[text.index(PATCH_END) + len(PATCH_END):].lstrip("\n")
+    else:
+        head = "function automatic logic [15:0] pla_entry_lookup("
+        i = text.index("    casez (addr_in)\n", text.index(head))
+        i += len("    casez (addr_in)\n")
+        pre, post = text[:i], text[i:]
+    rows = [PATCH_BEGIN]
+    for pat, value, note in ENTRY_PATCHES:
+        assert len(pat) == 13 and set(pat) <= set("01?"), pat
+        rows.append(f"        13'b{pat}: pla_entry_lookup = 16'b{value:016b}; // {note}")
+    rows.append(PATCH_END)
+    path.write_text(pre + "\n".join(rows) + "\n" + post)
+
+
 def main():
+    apply_entry_patches(CORE / "pla_entry.svh")
     entry_pats = parse_casez(CORE / "pla_entry.svh", "pla_entry_lookup", 13)
     ctl_pats = parse_casez(CORE / "pla_control.svh",
                            "pla_control_opcode_lookup", 9)

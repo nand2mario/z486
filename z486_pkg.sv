@@ -1079,6 +1079,7 @@ localparam [11:0] UADDR_DOUBLE_FAULT   = 12'h83F;  // #DF - vector 8, zero error
 localparam [11:0] UADDR_HARDWARE_IRQ   = 12'h82D;  // INTR handler entry point
 localparam [11:0] UADDR_NMI            = 12'h836;  // NMI handler entry point
 localparam [11:0] UADDR_SINGLE_STEP    = 12'h93F;  // #DB(1) - TF single-step trap
+localparam [11:0] UADDR_BREAKPOINT     = 12'h941;  // #DB(1) - debug-register breakpoint (DR6 B0-3 already set)
 localparam [11:0] UADDR_TSS_PROBLEM    = 12'h85D;  // #TS path used by protected-mode descriptor checks
 localparam [11:0] UADDR_FPU_STORE_TAIL = 12'h57B;  // Final 16-bit word of an m80 store
 localparam [11:0] UADDR_RPTI_RNI       = 12'h20F;  // REP interrupt restart boundary

@@ -339,8 +339,21 @@ wire       early_redirect;
 wire cr0_wr_bit0 = (uc_source == SRC_MDTMP) ? muldiv_result[0] :
                    (uc_source == SRC_SIGMA) ? SIGMA[0]  : 1'b0;
 assign pe_mode_toggle_now = uc_exec && (uc_dest == DEST_CR0) && (cr0_wr_bit0 != CR0[0]);
+// Hardware breakpoints (DR0-3, DR7; 486 PRM chapter 11). Any Ln/Gn arms them:
+// as on a 486, execution then slows so data breakpoints are exact. The fast
+// paths are off (every data access goes through the paging submit) and
+// boundaries are decided at an idle point (dbg_boundary_point, below). The
+// arming follows DR7 at a pipeline flush, which a change of it requests: the
+// cycle after the DR7 write restarts the frontend at EIP (from registers only,
+// off q_flush's uop-execution cone).
+reg        dbg_armed_mode;                 // arming in effect since the last flush
+reg        dbg_dr7_written_r;              // DR7 was written last cycle
+wire       dbg_armed_now = |DR7[7:0];
+wire       dbg_mode_flush = dbg_dr7_written_r && (dbg_armed_now != dbg_armed_mode);
+always_ff @(posedge clk)
+    dbg_dr7_written_r <= reset_n && uc_exec && (uc_dest == DEST_DR7);
 assign q_flush = (uc_exec && uc_ctl_pref && !uc_pref_suppress_prev && !early_redirected)
-               || early_redirect || pe_mode_toggle_now;
+               || early_redirect || pe_mode_toggle_now || dbg_mode_flush;
 // synthesis translate_off
 always @(posedge clk)
     if (reset_n && uc_exec && (uc_dest == DEST_CR0) && (dest_value[0] !== cr0_wr_bit0))
@@ -537,8 +550,10 @@ always_ff @(posedge clk)
         x87_off <= x87_off_req || x87_off_sim || !ENABLE_X87;
 reg        hardwired_off;
 always_ff @(posedge clk)
-    if (!reset_n || q_flush)
-        hardwired_off <= fast_off_req || fast_off_sim;
+    if (!reset_n || q_flush) begin
+        hardwired_off <= fast_off_req || fast_off_sim || dbg_armed_now;
+        dbg_armed_mode <= reset_n && dbg_armed_now;
+    end
 
 // synthesis translate_off
 // +z486_fast_off starts with the fast paths off; +z486_fast_toggle=N flips the
@@ -594,9 +609,22 @@ wire       pb_issue_b23 = pb_valid && (i_rni_delay || ~uc_active) &&
 
 // D2 -> EX readiness.
 wire       tf_trap_pending = tf_active_r && !tf_trap_suppress_r;
-wire       interrupt_deliverable = tf_trap_pending || nmi_request_active ||
+// Armed breakpoints move the boundary to an idle point three cycles after the
+// last word (dbg_idle_r), when EIP is final and every data access of the
+// instruction has been compared; nothing issues before it.
+reg  [1:0] dbg_idle_r;                       // idle cycles since the last word (saturating)
+wire       dbg_data_trap;                    // enabled data breakpoint hit by the last instruction
+wire       dbg_exec_fault;                   // enabled instruction breakpoint at EIP, RF clear
+wire       dbg_boundary_point = dbg_armed_mode && !uc_active && (dbg_idle_r == 2'd3) &&
+                                !stall && !page_fault;
+wire       boundary_point = dbg_armed_mode ? dbg_boundary_point
+                                           : (i_rni_delay && !stall && !page_fault);
+wire       interrupt_deliverable = tf_trap_pending || dbg_data_trap || dbg_exec_fault ||
+                                   nmi_request_active ||
                                    (intr_pending && EFLAGS[9] && !inhibit_interrupts);
 wire       interrupt_at_boundary = i_rni_delay && interrupt_deliverable && !single_step;
+wire       dbg_issue_ok = !dbg_armed_mode ||
+                          (!uc_active && (dbg_idle_r == 2'd3) && !interrupt_deliverable);
 
 // Fixed-clock CPU throttle.
 wire        throttle_hold;
@@ -612,8 +640,8 @@ wire        throttle_release_cycle = throttle_parked_r && throttle_release_ready
 // An instruction occupies D2 exactly when ROM port B holds its first word.
 wire       d2_resident = pb_valid;
 // A trap, NMI or interrupt taken at this boundary cancels the D2 issue.
-wire       boundary_take = i_rni_delay && !stall && !page_fault &&
-    ((tf_trap_pending && !single_step) ||
+wire       boundary_take = boundary_point &&
+    (((tf_trap_pending || dbg_data_trap || dbg_exec_fault) && !single_step) ||
      (nmi_request_active && !single_step) ||
      (intr_pending && EFLAGS[9] && !single_step && !inhibit_interrupts));
 wire       d2_payload_ready = d2_push && !d2_ea_split_wait;
@@ -621,7 +649,7 @@ wire       d2_ready_base = d2_payload_ready && !stall &&
                       (!throttle_hold || throttle_atomic_chain ||
                        throttle_release_cycle) && !any_fault_issue &&
                       !(i_rni && tf_trap_pending && !single_step) &&
-                      !interrupt_at_boundary && !q_flush &&
+                      !interrupt_at_boundary && !q_flush && dbg_issue_ok &&
                       !d2_vipt_ea_hazard;
 assign     d2_ready = d2_ready_base &&
                       !vipt_load_replay_r.valid && !vipt_load_slow_busy &&
@@ -1849,6 +1877,90 @@ wire        paging_mem_rd_ind = !x87_direct_mem_req && !paging_owned_submit &&
 wire        paging_is_write_access = !x87_direct_mem_req && !paging_owned_submit &&
                                       (uc_is_write || uc_is_check_write);
 
+// Breakpoint comparison (486 PRM 11.2). DRn with LENn covers 1, 2 or 4
+// aligned bytes (LEN 10, undefined, as 4); R/Wn 00 is instruction execution,
+// 01 data writes, 11 data reads or writes, 10 undefined (never matches). A
+// data breakpoint matches when any byte of an access is in its range; the
+// armed core sends every data access through the paging submit, registered
+// here before the compare. An instruction breakpoint matches the first byte
+// (the first prefix) of the instruction at EIP.
+function automatic logic [3:0] dbg_range_be(input logic [1:0] len, input logic [1:0] low);
+    case (len)
+        2'b00:   return 4'b0001 << low;
+        2'b01:   return low[1] ? 4'b1100 : 4'b0011;
+        default: return 4'b1111;
+    endcase
+endfunction
+reg  [31:0] dbg_lin_r;                       // CS.base + EIP: the next instruction
+reg  [3:0]  dbg_exec_match_r;                // breakpoints whose condition EIP meets
+reg         dbg_acc_valid_r;                 // a data access was submitted
+reg  [31:0] dbg_acc_addr_r;
+reg  [3:0]  dbg_acc_be_r;
+reg         dbg_acc_write_r;
+reg  [3:0]  dbg_data_match_r;                // data matches since the instruction issued
+logic [3:0] dbg_data_match_now;
+logic [3:0] dbg_exec_match_next;
+wire  [3:0] dbg_enabled = {DR7[7] | DR7[6], DR7[5] | DR7[4], DR7[3] | DR7[2], DR7[1] | DR7[0]};
+always_comb begin
+    for (int n = 0; n < 4; n++) begin
+        logic [1:0] rw, len;
+        rw = DR7[16 + 4*n +: 2];
+        len = DR7[18 + 4*n +: 2];
+        dbg_data_match_now[n] = dbg_acc_valid_r &&
+            ((rw == 2'b11) || ((rw == 2'b01) && dbg_acc_write_r)) &&
+            (dbg_acc_addr_r[31:2] == DR03[n][31:2]) &&
+            |(dbg_acc_be_r & dbg_range_be(len, DR03[n][1:0]));
+        dbg_exec_match_next[n] = (rw == 2'b00) &&
+            (dbg_lin_r[31:2] == DR03[n][31:2]) &&
+            |(dbg_range_be(2'b00, dbg_lin_r[1:0]) & dbg_range_be(len, DR03[n][1:0]));
+    end
+end
+// Boundaries (three idle cycles on) see every compare in dbg_data_match_r.
+// A REP string's JNOINT, in the word after its write, also counts the
+// compare of the access submitted last cycle, so the string stops there.
+assign dbg_data_trap = |(dbg_data_match_r & dbg_enabled);
+wire        dbg_data_trap_now = |((dbg_data_match_r | dbg_data_match_now) & dbg_enabled);
+assign dbg_exec_fault = dbg_armed_mode && |(dbg_exec_match_r & dbg_enabled) && !EFLAGS[16];
+// A #DB taken at a boundary loads DR6 B0-3 with every breakpoint whose
+// condition holds, enabled or not (PRM 11.2.3): the data matches of the last
+// instruction for a trap (with BS from the single-step microcode), the
+// matches at EIP for an instruction-breakpoint fault, which also sets RF so
+// the pushed EFLAGS resumes the instruction without a second fault.
+wire        dbg_db_take = boundary_point && !single_step &&
+                          (tf_trap_pending || dbg_data_trap || dbg_exec_fault);
+wire        dbg_fault_take = dbg_db_take && !tf_trap_pending && !dbg_data_trap;
+wire  [3:0] dbg_dr6_set = !dbg_db_take ? 4'h0 :
+                          dbg_fault_take ? dbg_exec_match_r : dbg_data_match_r;
+wire        dbg_set_rf = dbg_fault_take;
+always_ff @(posedge clk) begin
+    if (!reset_n) begin
+        dbg_idle_r <= 2'd0;
+        dbg_lin_r <= 32'h0;
+        dbg_exec_match_r <= 4'h0;
+        dbg_acc_valid_r <= 1'b0;
+        dbg_acc_addr_r <= 32'h0;
+        dbg_acc_be_r <= 4'h0;
+        dbg_acc_write_r <= 1'b0;
+        dbg_data_match_r <= 4'h0;
+    end else begin
+        if (uc_active)
+            dbg_idle_r <= 2'd0;
+        else if (dbg_idle_r != 2'd3)
+            dbg_idle_r <= dbg_idle_r + 2'd1;
+        dbg_lin_r <= CS_base + EIP;
+        dbg_exec_match_r <= dbg_exec_match_next;
+        dbg_acc_valid_r <= dbg_armed_mode && mem_req_to_paging && mem_accepted &&
+                           !mem_is_io && (mem_write_now || !uc_is_check_write);
+        dbg_acc_addr_r <= paging_linear_addr;
+        dbg_acc_be_r <= mem_be_now;
+        dbg_acc_write_r <= mem_write_now;
+        if (i_issue || dbg_db_take)
+            dbg_data_match_r <= 4'h0;
+        else
+            dbg_data_match_r <= dbg_data_match_r | dbg_data_match_now;
+    end
+end
+
 
 data_access data_access_inst (
     // Clock and reset
@@ -2272,6 +2384,10 @@ event_control #(.ENABLE_X87(ENABLE_X87)) event_control_inst (
     .inhibit_interrupts(inhibit_interrupts),
     .tf_trap_pending(tf_trap_pending),
     .single_step(single_step),
+    .boundary_point(boundary_point),
+    .dbg_data_trap(dbg_data_trap),
+    .dbg_data_trap_now(dbg_data_trap_now),
+    .dbg_exec_fault(dbg_exec_fault),
     // FPU handshake
     .x87_pereq(x87_pereq),
     .x87_busy_n(x87_busy_n),
@@ -2353,7 +2469,7 @@ wire        early_call_redirect = i_first && is_dword && br_is_call_rel && !earl
 wire [31:0] pf_branch_addr = CS_base + ea_reg;
 wire [31:0] pf_other_addr  = ret_redirect        ? (CS_base + vipt_load_wb_target_r) :
                              early_call_redirect ? (CS_base + br_target) :
-                             pe_mode_toggle_now  ? (CS_base + EIP) :
+                             (pe_mode_toggle_now || dbg_mode_flush) ? (CS_base + EIP) :
                                                    (CS_base + pf_flush_ip);
 assign pf_flush_addr = branch_ustep_redirect ? pf_branch_addr : pf_other_addr;
 `ifdef Z486_DEBUG_BRANCH_TARGET
@@ -2714,6 +2830,10 @@ always_ff @(posedge clk) begin
             SLCTR[1:0] <= desc_raw_hi[14:13];
 
         end
+
+        // Breakpoint status at a #DB boundary (no uop runs then).
+        if (dbg_dr6_set != 4'h0)
+            DR6[3:0] <= DR6[3:0] | dbg_dr6_set;
     end
 
     // TMPeIP/TMPeSP: save EIP/ESP at instruction start and fault entry
@@ -2850,6 +2970,7 @@ data_unit data_unit_inst (
     .interrupt_entry(interrupt_entry),
     .any_fault(any_fault_r),
     .clear_rf(clear_rf),
+    .set_rf(dbg_set_rf),
     .gate_detect(gate_detect_now),
     .flags_backup_active(flags_backup_active),
     // Decoder: EX and D2 instruction, operand sizes, stack-operation class (ispval)

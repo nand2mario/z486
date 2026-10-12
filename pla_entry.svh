@@ -6,6 +6,11 @@ function automatic logic [15:0] pla_entry_lookup(
     input [12:0] addr_in
 );
     casez (addr_in)
+        // ---- 486 patches (scripts/gen_pla_group.py ENTRY_PATCHES) ----
+        13'b?00000111??11: pla_entry_lookup = 16'b0000100000101011; // 0F 07 LOADALL386 -> #UD
+        13'b?010110010?01: pla_entry_lookup = 16'b0000001110010001; // 0F 26 /3 MOV TR3,rd
+        13'b?010110111?01: pla_entry_lookup = 16'b0000001110110110; // 0F 24 /3 MOV rd,TR3
+        // ---- end 486 patches ----
         // Entries with zero output
         13'b?000000001?01: pla_entry_lookup = 16'b0000000000000000;
         13'b?0001?0001?01: pla_entry_lookup = 16'b0000000000000000;
@@ -713,6 +718,8 @@ function automatic logic [15:0] pla_group_entry_lookup(
 );
     casez (addr_in)
         13'b?101110001101: pla_group_entry_lookup = 16'b0000100111000111;
+        13'b?010110010?01: pla_group_entry_lookup = 16'b0000001110010001;
+        13'b?010110111?01: pla_group_entry_lookup = 16'b0000001110110110;
         13'b?000000001?01: pla_group_entry_lookup = 16'b0000000000000000;
         13'b?0001?0001?01: pla_group_entry_lookup = 16'b0000000000000000;
         13'b?001?00001?01: pla_group_entry_lookup = 16'b0000000000000000;
