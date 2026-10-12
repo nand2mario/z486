@@ -50,7 +50,8 @@ typedef enum logic [3:0] {
     RX_I32,
     RX_I64,
     RX_ENV,
-    RX_STATE
+    RX_STATE,
+    RX_BCD
 } rx_kind_t;
 
 typedef enum logic [1:0] {
@@ -156,6 +157,8 @@ logic         store_bcd;
 logic         bcd_convert_pending;
 logic  [6:0]  bcd_shift_count;
 logic         bcd_sign;
+logic         bcd_load_pending;          // FBLD: BCD-to-binary steps in tx_state_shift.
+logic         bcd_load_negate;           // FBLD: the loaded value takes the BCD sign.
 logic         pop_pending;
 logic         result_write_pending;    // Serialized architectural stack replacement.
 logic [2:0]   result_write_index;
@@ -745,7 +748,8 @@ wire core_cmd_ready = ((rx_kind == RX_NONE) || restartable_rx_command) &&
                    !command_pending && !stack_write_a && !stack_write_b &&
                    !push_pending &&
                    (!memory_math_pending || restartable_rx_command) &&
-                   !store_pending && !bcd_convert_pending && !pop_pending &&
+                   !store_pending && !bcd_convert_pending && !bcd_load_pending &&
+                   !pop_pending &&
                    !result_write_pending &&
                    !v2_exec_pending &&
                    !v2_exec_busy && !v2_exec_done &&
@@ -800,12 +804,23 @@ always_comb begin
             bcd_adjusted[bcd_digit*4 +: 4] =
                 bcd_digits[bcd_digit*4 +: 4] + 4'd3;
 end
+// FBLD runs the reverse in the same register: shift the digits right into
+// the binary half, then take 3 from each digit of 8 or more.
+logic [71:0] bcd_load_adjusted;
+wire [71:0] bcd_load_digits = {1'b0, tx_state_shift[135:65]};
+always_comb begin
+    bcd_load_adjusted = bcd_load_digits;
+    for (bcd_digit = 0; bcd_digit < 18; bcd_digit = bcd_digit + 1)
+        if (bcd_load_digits[bcd_digit*4 +: 4] >= 4'd8)
+            bcd_load_adjusted[bcd_digit*4 +: 4] =
+                bcd_load_digits[bcd_digit*4 +: 4] - 4'd3;
+end
 wire signed [32:0] fscale_scaled_exp =
     $signed({18'b0, fscale_value.exp}) + fscale_delta;
 assign busy_n = !(((v2_exec_owner == EXEC_MATH) &&
                    (v2_exec_pending || v2_exec_busy)) ||
                   poly_active ||
-                  bcd_convert_pending ||
+                  bcd_convert_pending || bcd_load_pending ||
                   (fscale_phase != FSCALE_IDLE) ||
                   (command_pending && command_is_arithmetic));
 // PEREQ releases the 80386 coprocessor-wait microcode as well as requesting
@@ -816,7 +831,7 @@ assign pereq = (rx_kind != RX_NONE) || poly_active ||
                direct_m32_pending || command_pending ||
                stack_write_a || stack_write_b ||
                push_pending || memory_math_pending ||
-               store_pending || bcd_convert_pending ||
+               store_pending || bcd_convert_pending || bcd_load_pending ||
                pop_pending || result_write_pending ||
                v2_exec_pending || v2_exec_busy || v2_exec_done ||
                fptan_trans_pending || fptan_div_pending ||
@@ -1116,6 +1131,8 @@ always_ff @(posedge clk) begin
         bcd_convert_pending <= 1'b0;
         bcd_shift_count <= 7'd0;
         bcd_sign <= 1'b0;
+        bcd_load_pending <= 1'b0;
+        bcd_load_negate <= 1'b0;
         pop_pending <= 1'b0;
         result_write_pending <= 1'b0;
         result_write_index <= 3'd0;
@@ -1300,8 +1317,14 @@ always_ff @(posedge clk) begin
                         result_write_pending <= 1'b1;
                         command_complete_pulse <= 1'b1;
                     end else begin
-                        push_pending_raw <= x87_to_m80(v2_exec_result);
-                        push_pending_tag <= x87_tag(v2_exec_result);
+                        x87_reg_t loaded;
+                        loaded = v2_exec_result;
+                        if (bcd_load_negate) begin
+                            loaded.sign = 1'b1;   // FBLD of -0 loads -0
+                            bcd_load_negate <= 1'b0;
+                        end
+                        push_pending_raw <= x87_to_m80(loaded);
+                        push_pending_tag <= x87_tag(loaded);
                         push_pending <= 1'b1;
                     end
                     if (v2_exec_invalid)
@@ -1394,6 +1417,20 @@ always_ff @(posedge clk) begin
                 store_bcd <= 1'b0;
                 if (store_pop && (!store_source_empty || control_word[0]))
                     pop_pending <= 1'b1;
+            end
+        end
+
+        if (bcd_load_pending) begin
+            tx_state_shift[135:0] <= {bcd_load_adjusted, tx_state_shift[64:1]};
+            bcd_shift_count <= bcd_shift_count - 7'd1;
+            if (bcd_shift_count == 7'd1) begin
+                // 18 digits fit in 60 bits: FILD m64 of the magnitude.
+                v2_exec_op <= X87_CONVERT_FILD;
+                v2_exec_owner <= EXEC_LOAD;
+                v2_exec_size <= 2'd2;
+                v2_exec_transfer <= tx_state_shift[64:1];
+                v2_exec_pending <= 1'b1;
+                bcd_load_pending <= 1'b0;
             end
         end
 
@@ -2440,18 +2477,26 @@ always_ff @(posedge clk) begin
                         set_tag_b(cmd_st_index, tag_word[st0_index*2 +: 2]);
                     end
                 end
-                X87_CMD_FFREE:
-                    set_tag_a(cmd_st_index, 2'b11);
+                // FFREEP (argument 1) also pops.
+                X87_CMD_FFREE: begin
+                    if (cmd_st_index != st0_index || !command_decode.argument[0])
+                        set_tag_a(cmd_st_index, 2'b11);
+                    if (command_decode.argument[0])
+                        pop_value();
+                end
+                // FST ST(i) (argument 1) does not pop.
                 X87_CMD_FSTP_ST: begin
                     if (stack_empty(st0_index)) begin
                         raise_stack_fault(1'b0);
                         if (control_word[0]) begin
                             write_stack(cmd_st_index, x87_indefinite());
-                            pop_value();
+                            if (!command_decode.argument[0])
+                                pop_value();
                         end
                     end else begin
                         write_stack_raw(cmd_st_index, stack_read_raw_a);
-                        pop_value();
+                        if (!command_decode.argument[0])
+                            pop_value();
                     end
                 end
 
@@ -2513,6 +2558,15 @@ always_ff @(posedge clk) begin
                         v2_exec_size <= 2'd0;
                         v2_exec_transfer <= rx_payload_next[63:0];
                         v2_exec_pending <= 1'b1;
+                        rx_kind <= RX_NONE;
+                    end
+                end
+                RX_BCD: begin
+                    if (rx_byte_count_next >= 4'd10) begin
+                        tx_state_shift <= {rx_payload_next[71:0], 64'h0};
+                        bcd_shift_count <= 7'd64;
+                        bcd_load_negate <= rx_payload_next[79];
+                        bcd_load_pending <= 1'b1;
                         rx_kind <= RX_NONE;
                     end
                 end

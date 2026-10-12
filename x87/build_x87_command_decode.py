@@ -26,7 +26,17 @@ EXEC = {
 
 RX = {
     "NONE": 0, "CONTROL": 1, "M32": 2, "M64": 3, "M80": 4,
-    "I16": 5, "I32": 6, "I64": 7, "ENV": 8, "STATE": 9,
+    "I16": 5, "I32": 6, "I64": 7, "ENV": 8, "STATE": 9, "BCD": 10,
+}
+
+# Undocumented register-form aliases a 387/486 executes as the named
+# operation (ST(i) from the low three bits): FSTP1, FSTP8, FSTP9 = FSTP ST(i);
+# FXCH4, FXCH7 = FXCH; FCOM2 = FCOM; FCOMP3, FCOMP5 = FCOMP.
+ALIASES = {
+    0x1D8: 0x5D8, 0x7D0: 0x5D8, 0x7D8: 0x5D8,
+    0x5C8: 0x1C8, 0x7C8: 0x1C8,
+    0x4D0: 0x0D0,
+    0x4D8: 0x0D8, 0x6D0: 0x0D8,
 }
 
 
@@ -85,6 +95,8 @@ def reads_status(fop: int) -> bool:
 
 
 def fields(fop: int) -> dict[str, int]:
+    if register_form(fop) and (fop & 0x7F8) in ALIASES:
+        fop = ALIASES[fop & 0x7F8] | (fop & 0x7)
     key = decode_key(fop)
     result = {
         "action": ACTIONS["NONE"], "exec": 0, "compare": 0, "quiet": 0,
@@ -159,8 +171,14 @@ def fields(fop: int) -> dict[str, int]:
         result["action"] = ACTIONS["FXCH"]
     elif (fop & 0x7F8) == 0x5C0:
         result["action"] = ACTIONS["FFREE"]
+    elif (fop & 0x7F8) == 0x7C0:
+        # FFREEP (undocumented on the 486): FFREE ST(i), then pop.
+        result.update(action=ACTIONS["FFREE"], parameter=1)
     elif (fop & 0x7F8) == 0x5D8:
         result["action"] = ACTIONS["FSTP_ST"]
+    elif (fop & 0x7F8) == 0x5D0:
+        # FST ST(i): FSTP ST(i) without the pop.
+        result.update(action=ACTIONS["FSTP_ST"], parameter=1)
     elif is_memory_math(fop):
         op = operation(fop)
         result.update(
@@ -185,6 +203,8 @@ def fields(fop: int) -> dict[str, int]:
         result.update(action=ACTIONS["LOAD"], parameter=RX["I32"])
     elif not register_form(fop) and group(fop) == 7 and operation(fop) == 5:
         result.update(action=ACTIONS["LOAD"], parameter=RX["I64"])
+    elif not register_form(fop) and group(fop) == 7 and operation(fop) == 4:
+        result.update(action=ACTIONS["LOAD"], parameter=RX["BCD"])
     elif not register_form(fop) and group(fop) == 1 and operation(fop) == 5:
         result.update(action=ACTIONS["LOAD"], parameter=RX["CONTROL"])
     elif (not register_form(fop) and group(fop) in (1, 5) and
