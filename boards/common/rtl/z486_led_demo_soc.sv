@@ -133,6 +133,8 @@ z486 #(
     .intr(1'b0),
     .nmi(1'b0),
     .inta(cpu_inta),
+    .x87_ferr(),
+    .x87_ignne(1'b0),
     .snoop_addr(32'd0),
     .snoop_valid(1'b0),
     .a20_enable(1'b1),

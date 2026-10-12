@@ -83,7 +83,8 @@ typedef enum logic [4:0] {
     X87_CMD_F2XM1,
     X87_CMD_FSCALE,
     X87_CMD_FPREM,
-    X87_CMD_STORE_BCD
+    X87_CMD_STORE_BCD,
+    X87_CMD_FXTRACT
 } x87_command_action_t;
 
 typedef struct packed {

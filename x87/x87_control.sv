@@ -196,6 +196,8 @@ logic         trans_atan2;
 logic         fptan_trans_pending;       // CORDIC tangent pair has not returned.
 logic         fptan_div_pending;         // Shared divide is producing tan = sin/cos.
 logic         fptan_push_after_result;   // Tangent write precedes architectural push 1.0.
+logic         fptan_sincos;              // FSINCOS: push cos(x) instead of 1.0, no divide.
+x87_reg_t     fptan_push_value;          // Value pushed after the ST0 write (1.0 or cos).
 typedef enum logic [2:0] {
     FPREM_IDLE,
     FPREM_DIVIDE,
@@ -207,6 +209,9 @@ fprem_phase_t fprem_phase;
 x87_reg_t     fprem_dividend;
 x87_reg_t     fprem_divisor;
 logic [2:0]   fprem_quotient_bits;
+logic         fprem_nearest;             // FPREM1: round the quotient to nearest.
+logic         fyl2xp1_add_pending;       // FYL2XP1: ST0 + 1.0 precedes the FYL2X path.
+x87_reg_t     fyl2xp1_y;                 // FYL2XP1's ST(1), held across the add.
 typedef enum logic [1:0] {
     FSCALE_IDLE,
     FSCALE_SHIFT,
@@ -269,7 +274,7 @@ wire v2_exec_math_done = v2_exec_done &&
 wire trans_done = v2_exec_math_done &&
                   (v2_exec_op == X87_ARITH_TRANS);
 wire math_done = v2_exec_math_done && (fprem_phase == FPREM_IDLE) &&
-                 !(trans_done && fptan_trans_pending);
+                 !(trans_done && fptan_trans_pending) && !fyl2xp1_add_pending;
 wire math_invalid = v2_exec_invalid;
 wire math_inexact = v2_exec_inexact;
 wire [74:0] math_result = v2_exec_result;
@@ -634,13 +639,19 @@ task automatic start_bcd_store;
     end
 endtask
 
+// A loaded control word keeps the reserved bits as a 387/486 does: 15:13
+// and 7 read as 0, bit 6 as 1 (FNINIT's 037Fh).
+function automatic logic [15:0] x87_load_control_word(input logic [15:0] value);
+    return (value & ~16'he0c0) | 16'h0040;
+endfunction
+
 task automatic accept_environment_word(
     input logic [2:0] word_index,
     input logic [15:0] value
 );
     begin
         case (word_index)
-            3'd0: control_word <= value;
+            3'd0: control_word <= x87_load_control_word(value);
             3'd1: begin
                 status_flags <= value;
                 top <= value[13:11];
@@ -887,10 +898,12 @@ always_comb begin
     if (core_cmd_valid && core_cmd_ready) begin
         stack_port_addr_a = top;
         stack_port_addr_b = ((fop_decode_key(core_cmd_fop) == 11'h530) ||
-                             (core_cmd_fop == 11'h1f1) ||
-                             (core_cmd_fop == 11'h1f3) ||
-                             (core_cmd_fop == 11'h1f8) ||
-                             (core_cmd_fop == 11'h1fd))
+                             (core_cmd_fop == 11'h1f1) ||   // FYL2X
+                             (core_cmd_fop == 11'h1f3) ||   // FPATAN
+                             (core_cmd_fop == 11'h1f5) ||   // FPREM1
+                             (core_cmd_fop == 11'h1f8) ||   // FPREM
+                             (core_cmd_fop == 11'h1f9) ||   // FYL2XP1
+                             (core_cmd_fop == 11'h1fd))     // FSCALE
                           ? top + 3'd1 : top + core_cmd_fop[2:0];
     end
 end
@@ -914,7 +927,8 @@ x87_logexp_rom logexp_rom (
 );
 
 wire [1:0] executor_rounding_mode =
-    (fprem_phase == FPREM_ROUND) ? 2'b11 : control_word[11:10];
+    (fprem_phase == FPREM_ROUND) ? (fprem_nearest ? 2'b00 : 2'b11)
+                                 : control_word[11:10];
 
 x87_executor executor (
     .clk(clk),
@@ -1035,7 +1049,12 @@ always_ff @(posedge clk) begin
         fptan_trans_pending <= 1'b0;
         fptan_div_pending <= 1'b0;
         fptan_push_after_result <= 1'b0;
+        fptan_sincos <= 1'b0;
+        fptan_push_value <= x87_one();
         fprem_phase <= FPREM_IDLE;
+        fprem_nearest <= 1'b0;
+        fyl2xp1_add_pending <= 1'b0;
+        fyl2xp1_y <= x87_empty();
         fprem_dividend <= x87_empty();
         fprem_divisor <= x87_empty();
         fprem_quotient_bits <= 3'b000;
@@ -1280,7 +1299,7 @@ always_ff @(posedge clk) begin
         // second write-port dependency on the normal result path.
         if (fptan_push_after_result && !result_write_pending &&
             !push_pending) begin
-            schedule_push(x87_one());
+            schedule_push(fptan_push_value);
             fptan_push_after_result <= 1'b0;
         end
 
@@ -1305,11 +1324,22 @@ always_ff @(posedge clk) begin
                     result_write_index <= arith_dest_index;
                     result_write_raw <= x87_to_m80(v2_exec_result);
                     result_write_pending <= 1'b1;
+                    fptan_push_value <= fptan_sincos ? v2_exec_result : x87_one();
                     fptan_push_after_result <= 1'b1;
                     command_complete_pulse <= 1'b0;
                 end
             end else if (v2_exec_denormal_operand && !control_word[1]) begin
                 command_complete_pulse <= 1'b1;
+            end else if (fptan_sincos) begin
+                // FSINCOS: sin(x) replaces ST0, then cos(x) is pushed.
+                if (v2_exec_inexact)
+                    status_flags[5] <= 1'b1;
+                result_write_index <= arith_dest_index;
+                result_write_raw <= x87_to_m80(v2_exec_result);
+                result_write_pending <= 1'b1;
+                fptan_push_value <= v2_exec_auxiliary_result;
+                fptan_push_after_result <= 1'b1;
+                command_complete_pulse <= 1'b0;
             end else begin
                 arith_operand_a <= v2_exec_result;
                 arith_operand_b <= v2_exec_auxiliary_result;
@@ -1505,6 +1535,26 @@ always_ff @(posedge clk) begin
             endcase
         end
 
+        // FYL2XP1: the sum ST0 + 1.0 enters the FYL2X log/multiply path.
+        if (v2_exec_math_done && fyl2xp1_add_pending) begin
+            fyl2xp1_add_pending <= 1'b0;
+            if (v2_exec_result.sign ||
+                (v2_exec_result.class_id == X87_ZERO)) begin
+                raise_invalid();
+                if (control_word[0]) begin
+                    write_stack(top + 3'd1, x87_indefinite());
+                    pop_value();
+                end
+                command_complete_pulse <= 1'b1;
+            end else begin
+                logexp_fyl2x <= 1'b1;
+                logexp_input <= v2_exec_result;
+                logexp_multiplier <= fyl2xp1_y;
+                logexp_address <= {2'b00, v2_exec_result.sig[51:44]};
+                logexp_phase <= LOGEXP_LOOKUP;
+            end
+        end
+
         if (math_done) begin
             command_complete_pulse <= 1'b1;
             status_flags[9] <= v2_exec_math_done &&
@@ -1589,10 +1639,12 @@ always_ff @(posedge clk) begin
             command_pending <= 1'b1;
             stack_addr_a <= top;
             stack_addr_b <= ((fop_decode_key(core_cmd_fop) == 11'h530) ||
-                             (core_cmd_fop == 11'h1f1) ||
-                             (core_cmd_fop == 11'h1f3) ||
-                             (core_cmd_fop == 11'h1f8) ||
-                             (core_cmd_fop == 11'h1fd))
+                             (core_cmd_fop == 11'h1f1) ||   // FYL2X
+                             (core_cmd_fop == 11'h1f3) ||   // FPATAN
+                             (core_cmd_fop == 11'h1f5) ||   // FPREM1
+                             (core_cmd_fop == 11'h1f8) ||   // FPREM
+                             (core_cmd_fop == 11'h1f9) ||   // FYL2XP1
+                             (core_cmd_fop == 11'h1fd))     // FSCALE
                           ? top + 3'd1 : top + core_cmd_fop[2:0];
             if (core_cmd_direct)
                 direct_m32_pending <= 1'b0;
@@ -1752,7 +1804,10 @@ always_ff @(posedge clk) begin
                         v2_exec_pending <= 1'b1;
                     end
                 end
-                X87_CMD_FPTAN: begin
+                X87_CMD_FPTAN: begin                   // FPTAN / FSINCOS
+                    fptan_sincos <= command_decode.argument[0];
+                    fptan_push_value <= command_decode.argument[0]
+                                      ? x87_indefinite() : x87_one();
                     if (stack_empty(st0_index)) begin
                         raise_stack_fault(1'b0);
                         if (control_word[0]) begin
@@ -1824,7 +1879,7 @@ always_ff @(posedge clk) begin
                         v2_exec_pending <= 1'b1;
                     end
                 end
-                X87_CMD_FYL2X: begin
+                X87_CMD_FYL2X: begin                   // FYL2X / FYL2XP1
                     if (stack_empty(st0_index) ||
                         stack_empty(top + 3'd1)) begin
                         raise_stack_fault(1'b0);
@@ -1832,6 +1887,21 @@ always_ff @(posedge clk) begin
                             write_stack(top + 3'd1, x87_indefinite());
                             pop_value();
                         end
+                    end else if (command_decode.argument[0]) begin
+                        // FYL2XP1: ST0 + 1.0 first, then the FYL2X path.
+                        command_complete_pulse <= 1'b0;
+                        arith_compare <= 1'b0;
+                        arith_write_result <= 1'b0;
+                        arith_pop_count <= 2'd0;
+                        arith_operand_a <= stack_read_data_a;
+                        arith_operand_b <= x87_one();
+                        v2_exec_op <= X87_ARITH_ADD;
+                        v2_exec_owner <= EXEC_MATH;
+                        v2_exec_size <= 2'd0;
+                        v2_exec_transfer <= 64'h0;
+                        v2_exec_pending <= 1'b1;
+                        fyl2xp1_y <= stack_read_data_b;
+                        fyl2xp1_add_pending <= 1'b1;
                     end else if (stack_read_data_a.sign ||
                                  (stack_read_data_a.class_id == X87_ZERO)) begin
                         raise_invalid();
@@ -1926,6 +1996,7 @@ always_ff @(posedge clk) begin
                         arith_pop_count <= 2'd0;
                         fprem_dividend <= stack_read_data_a;
                         fprem_divisor <= stack_read_data_b;
+                        fprem_nearest <= command_decode.argument[0]; // FPREM1
                         arith_operand_a <= stack_read_data_a;
                         arith_operand_b <= stack_read_data_b;
                         v2_exec_op <= X87_ARITH_DIV;
@@ -1984,6 +2055,67 @@ always_ff @(posedge clk) begin
                         arith_operand_a <= stack_read_data_a;
                         v2_exec_transfer <= 64'h0;
                         v2_exec_pending <= 1'b1;
+                    end
+                end
+                X87_CMD_FXTRACT: begin
+                    // ST0 = exponent (as a real) and push the significand
+                    // with exponent 3FFFh. Zero: -inf and ZE; inf: +inf.
+                    logic [2:0] new_top;
+                    x87_reg_t fx_exp;
+                    x87_reg_t fx_sig;
+                    logic fx_write;
+
+                    new_top = top - 3'd1;
+                    fx_write = control_word[0];
+                    fx_exp = x87_indefinite();
+                    fx_sig = x87_indefinite();
+                    if (stack_empty(st0_index)) begin
+                        raise_stack_fault(1'b0);
+                    end else if (!stack_empty(new_top)) begin
+                        raise_stack_fault(1'b1);
+                    end else begin
+                        fx_write = 1'b1;
+                        fx_sig = stack_read_data_a;
+                        case (stack_read_data_a.class_id)
+                            X87_ZERO: begin
+                                status_flags[2] <= 1'b1;        // ZE
+                                if (!control_word[2]) begin
+                                    status_flags[7] <= 1'b1;
+                                    status_flags[15] <= 1'b1;
+                                    fx_write = 1'b0;
+                                end
+                                fx_exp = x87_infinity(1'b1);
+                            end
+                            X87_INFINITY: fx_exp = x87_infinity(1'b0);
+                            X87_NAN: begin
+                                fx_sig.sig[51] = 1'b1;          // quiet
+                                fx_exp = fx_sig;
+                            end
+                            X87_DENORMAL: begin
+                                status_flags[1] <= 1'b1;        // DE
+                                fx_exp = x87_from_exponent(
+                                    17'sd1 - 17'sd16383 -
+                                    17'(x87_leading_zeros(stack_read_data_a.sig)));
+                                fx_sig.sig = stack_read_data_a.sig <<
+                                    x87_leading_zeros(stack_read_data_a.sig);
+                                fx_sig.exp = 15'h3fff;
+                                fx_sig.class_id = X87_NORMAL;
+                            end
+                            default: begin
+                                fx_exp = x87_from_exponent(
+                                    $signed({2'b00, stack_read_data_a.exp}) -
+                                    17'sd16383);
+                                fx_sig.exp = 15'h3fff;
+                            end
+                        endcase
+                    end
+                    if (fx_write) begin
+                        write_stack(top, fx_exp);
+                        stack_addr_b <= new_top;
+                        stack_write_data_b <= x87_to_m80(fx_sig);
+                        stack_write_b <= 1'b1;
+                        set_tag_b(new_top, x87_tag(fx_sig));
+                        top <= new_top;
                     end
                 end
                 X87_CMD_FDECSTP: top <= top - 3'd1;
@@ -2136,7 +2268,7 @@ always_ff @(posedge clk) begin
             case (rx_kind)
                 RX_CONTROL: begin
                     if (rx_byte_count_next >= 4'd2) begin
-                        control_word <= rx_payload_next[15:0];
+                        control_word <= x87_load_control_word(rx_payload_next[15:0]);
                         rx_kind <= RX_NONE;
                     end
                 end
@@ -2348,5 +2480,40 @@ always_ff @(posedge clk) begin
         tag_word <= tag_next;
     end
 end
+
+`ifdef Z486_COSIM
+`ifndef Z486_USE_ALTERA_MEMORY
+// Co-simulation snapshot restore: the architectural x87 state of the 86Box
+// reference. Rows are physical, as the stack RAM and tag word hold them.
+export "DPI-C" task cosim_load_x87;
+task cosim_load_x87(input int cw, input int sw, input int tw, input int row,
+                    input int lo, input int hi, input int se);
+    if (row < 0) begin
+        control_word = cw[15:0];
+        status_flags = sw[15:0];
+        top = sw[13:11];
+        tag_word = tw[15:0];
+    end else begin
+        stack_mem.mem[row[2:0]] = {se[15:0], hi, lo};
+    end
+endtask
+
+// The same state for the co-simulation's checks: 0 control, 1 status (TOP in
+// 13:11), 2 tag, then each physical row's significand low, high, sign/exponent.
+export "DPI-C" function cosim_x87_word;
+function int cosim_x87_word(input int idx);
+    logic [79:0] r;
+    if (idx == 0) return int'(control_word);
+    if (idx == 1) return int'(status_word);
+    if (idx == 2) return int'(architectural_tag_word());
+    r = stack_mem.mem[3'((idx - 3) / 3)];
+    case ((idx - 3) % 3)
+        0: return int'(r[31:0]);
+        1: return int'(r[63:32]);
+        default: return int'(r[79:64]);
+    endcase
+endfunction
+`endif
+`endif
 
 endmodule

@@ -456,10 +456,14 @@ function automatic logic [22:0] x87_command_decode_word(
         11'h1f1: return 23'h00001a;
         11'h1f2: return 23'h2001a8;
         11'h1f3: return 23'h2001a9;
+        11'h1f4: return 23'h00001f;
+        11'h1f5: return 23'h02001d;
         11'h1f6: return 23'h00000c;
         11'h1f7: return 23'h00000d;
         11'h1f8: return 23'h00001d;
+        11'h1f9: return 23'h02001a;
         11'h1fa: return 23'h200187;
+        11'h1fb: return 23'h2201a8;
         11'h1fc: return 23'h20000b;
         11'h1fd: return 23'h00001c;
         11'h1fe: return 23'h2001aa;

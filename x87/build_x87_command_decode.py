@@ -13,7 +13,7 @@ ACTIONS = {
             "FRNDINT", "FDECSTP", "FINCSTP", "TX_ENV", "TX_STATE",
             "RX_ENV", "RX_STATE", "ARITH", "FLD_ST", "FXCH", "FFREE",
             "FSTP_ST", "MEMORY_MATH", "LOAD", "STORE", "FYL2X",
-            "F2XM1", "FSCALE", "FPREM", "STORE_BCD",
+            "F2XM1", "FSCALE", "FPREM", "STORE_BCD", "FXTRACT",
         )
     )
 }
@@ -92,7 +92,8 @@ def fields(fop: int) -> dict[str, int]:
         "pop": 0, "parameter": 0,
         "arithmetic": int(is_addsub(fop) or is_compare(fop) or is_mul(fop) or
                           is_div(fop) or is_memory_math(fop) or
-                          fop in (0x1FA, 0x1F2, 0x1F3, 0x1FE, 0x1FF, 0x1FC)),
+                          fop in (0x1FA, 0x1F2, 0x1F3, 0x1FE, 0x1FF, 0x1FC,
+                                  0x1FB)),
         "status": int(reads_status(fop) or key == 0x138),
     }
 
@@ -103,13 +104,19 @@ def fields(fop: int) -> dict[str, int]:
         0x1F6: "FDECSTP", 0x1F7: "FINCSTP", 0x130: "TX_ENV",
         0x530: "TX_STATE", 0x120: "RX_ENV", 0x520: "RX_STATE",
         0x1F1: "FYL2X", 0x1F0: "F2XM1", 0x1FD: "FSCALE",
-        0x1F8: "FPREM",
+        0x1F8: "FPREM", 0x1F4: "FXTRACT",
+        # 387 variants of 8087 operations, told apart by the parameter:
+        # FSINCOS = FPTAN's sine/cosine pair without the divide, FPREM1 =
+        # FPREM with a round-to-nearest quotient, FYL2XP1 = FYL2X of ST0 + 1.
+        0x1FB: "FPTAN", 0x1F5: "FPREM", 0x1F9: "FYL2X",
     }
     if key in exact:
         result["action"] = ACTIONS[exact[key]]
+        if key in (0x1FB, 0x1F5, 0x1F9):
+            result["parameter"] = 1
         if key == 0x1FA:
             result["exec"] = EXEC["SQRT"]
-        elif key in (0x1F2, 0x1F3):
+        elif key in (0x1F2, 0x1F3, 0x1FB):
             result["exec"] = EXEC["TRANS"]
         elif key == 0x1FC:
             result["exec"] = EXEC["FRNDINT"]

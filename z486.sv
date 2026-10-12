@@ -43,6 +43,8 @@ module z486
     input              intr,        // Maskable interrupt request
     input              nmi,         // Non-maskable interrupt
     output             inta,        // Interrupt acknowledge
+    output             x87_ferr,    // FERR#: an unmasked x87 error is pending (AT: IRQ13)
+    input              x87_ignne,   // IGNNE#: proceed past it with CR0.NE=0 (AT: port F0h)
 
     // External memory writers can invalidate matching L1 lines.
     input      [31:0]  snoop_addr,
@@ -529,6 +531,7 @@ logic      cache_off_sim = 1'b0;
 // switch does (a 486SX: ESC instructions do nothing, FNSTSW stores nothing).
 logic      x87_off_sim = 1'b0;
 reg        x87_off;
+assign x87_ferr = !x87_off && !x87_error_n;
 always_ff @(posedge clk)
     if (!reset_n)
         x87_off <= x87_off_req || x87_off_sim || !ENABLE_X87;
@@ -2273,6 +2276,8 @@ event_control #(.ENABLE_X87(ENABLE_X87)) event_control_inst (
     .x87_pereq(x87_pereq),
     .x87_busy_n(x87_busy_n),
     .x87_error_n(x87_error_n),
+    .x87_ne(CR0[5]),
+    .x87_ignne(x87_ignne),
     // To the microsequencer: conditions and redirect commands
     .seq_advance(seq_advance),
     .seq_conditions(seq_conditions),

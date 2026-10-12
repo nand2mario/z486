@@ -251,4 +251,13 @@ always_ff @(posedge clk) begin
     end
 end
 
+`ifdef Z486_COSIM
+// Co-simulation: the x87 has no command, transfer or result in flight, so its
+// architectural state covers every ESC instruction the CPU has issued.
+export "DPI-C" function cosim_x87_idle;
+function int cosim_x87_idle();
+    return int'(busy_n && !pereq && !dcmd_pending_r && (st_state == ST_IDLE));
+endfunction
+`endif
+
 endmodule

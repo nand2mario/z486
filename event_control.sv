@@ -87,6 +87,8 @@ module event_control
     input  logic x87_pereq,
     input  logic x87_busy_n,
     input  logic x87_error_n,
+    input  logic x87_ne,             // CR0.NE: an x87 error raises #MF (vector 16)
+    input  logic x87_ignne,          // IGNNE#: with NE=0, proceed past a pending error
 
     // To the microsequencer: conditions and redirect commands
     output logic seq_advance,
@@ -117,6 +119,18 @@ module event_control
 );
 
 wire x87_on = ENABLE_X87 && !x87_off;
+// A 486 with CR0.NE=0 freezes only at a waiting FP instruction: WAIT and
+// every ESC but the no-wait control forms (FNSTENV, FNSTCW, FNSAVE, FNSTSW,
+// FNENI, FNDISI, FNCLEX, FNINIT, FNSETPM), which read the pending error.
+wire [2:0] esc_group = i.opcode[2:0];
+wire x87_no_wait =
+    !i.has_0f && (i.opcode[7:3] == 5'b11011) &&
+    ((((esc_group == 3'd1) || (esc_group == 3'd5)) && (i.modrm[7:6] != 2'b11) &&
+      i.modrm[5]) ||                                   // /6, /7 memory forms
+     ((esc_group == 3'd7) && (i.modrm == 8'hE0)) ||    // FNSTSW AX
+     ((esc_group == 3'd3) && (i.modrm[7:3] == 5'b11100) &&
+      (i.modrm[2:0] <= 3'd4)));                        // FNENI..FNSETPM
+wire x87_frozen = !x87_error_n && !x87_ne && !x87_ignne && !x87_no_wait;
 
 
 // Fault delivery is sequencer control state. Address and data units contribute
@@ -181,8 +195,12 @@ always_comb begin
     seq_conditions.io_ok = !pe ||
         (cpl <= EFLAGS[13:12] && (!vm || !i.port_io));
     seq_conditions.no_interrupt = !interrupt_pending;
-    seq_conditions.x87_not_busy = x87_on ? x87_busy_n : 1'b1;
-    seq_conditions.x87_error = x87_on ? !x87_error_n : 1'b0;
+    // The 386 microcode takes ERROR# as #MF (FPU_ERRORn). A 486 does that only
+    // with CR0.NE; with NE=0 (DOS-compatible) the error goes out as FERR# to
+    // IRQ13 and a waiting FP instruction freezes, taking interrupts, until
+    // IGNNE# (the IRQ13 handler's write to port F0h) lets it proceed.
+    seq_conditions.x87_not_busy = x87_on ? x87_busy_n && !x87_frozen : 1'b1;
+    seq_conditions.x87_error = x87_on && !x87_error_n && x87_ne;
     seq_conditions.task_16bit = !desc_cache[6].seg_type[3];
     seq_conditions.desc_accessed = desc_raw_hi[8];
 end
