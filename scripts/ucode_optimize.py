@@ -140,6 +140,17 @@ PATCHES = [
     # interrupt and fault delivery.
     Patch(0x7F3, "486 PUSHFD: keep AC, store VM and RF as 0, before architectural mask",
           fields=dict(alusrc=0x11)),
+    # Interrupt and exception entry: the 386 clears the whole high word of
+    # EFLAGS (MASK16) at 632 (more-privilege, including from V86) and 8D5
+    # (trap/interrupt gate), where it holds only VM and RF. The i486 PRM's INT
+    # pseudocode clears VM and TF (and IF/NT on the paths that do), not AC, so
+    # the handler keeps AC. A DOS extender's 386/486 test toggles AC with
+    # POPFD in V86 mode; a V86 interrupt then cleared it and the extender saw
+    # a 386 (Fistfight: ".INI file corrupt"). Mask with 0xFFFCFFFF instead.
+    Patch(0x632, "486 interrupt entry (more privilege): clear VM and RF, keep AC",
+          fields=dict(alusrc=0x11)),
+    Patch(0x8D5, "486 interrupt entry (trap/interrupt gate): clear VM and RF, keep AC",
+          fields=dict(alusrc=0x11)),
 
     # 0F C8-CF has no 80386 PLA entry. The decoder redirects it to this
     # otherwise unused word and selects the register through opcode[2:0].

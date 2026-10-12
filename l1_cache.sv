@@ -412,7 +412,10 @@ assign vipt_resolve_data = vipt_lookup_store_match
                          ? merge32(vipt_way_data, req_din_r, req_be_r)
                          : vipt_way_data;
 assign vipt_resolve_hit = vipt_resolve_valid && cache_enable &&
+                          // Device pages (z486_pkg::is_device_page): VGA window
+                          // A0000-BFFFF and the SVGA linear framebuffer 0F800000.
                           (vipt_resolve_phys_addr[31:17] != 15'h5) &&
+                          (vipt_resolve_phys_addr[31:22] != 10'h03E) &&
                           (|vipt_hit_vec);
 // Fill straight from a direct-load probe miss: the probe's preread holds the
 // set's tags and PLRU and its translation is final, so the line is requested

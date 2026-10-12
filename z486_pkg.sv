@@ -907,7 +907,7 @@ localparam ALUSRC_EFLAGS_PUSH = 6'h11; // 0xFFFCFFFF: PUSHFD's EFLAGS image with
 localparam ALUSRC_TMPG = 6'h12;
 localparam ALUSRC_TMPH = 6'h13;
 localparam ALUSRC_PROTUN = 6'h15;
-localparam ALUSRC_FLAGS_MASK = 6'h16;  // 0x37fd7 FLAGS mask for INT stack push
+localparam ALUSRC_FLAGS_MASK = 6'h16;  // 0x77fd7: the 386's 0x37fd7 FLAGS mask plus the 486 AC bit
 localparam ALUSRC_CONST_4000 = 6'h17;  // 0x4000
 localparam ALUSRC_CONST_N200 = 6'h18;  // ~0x200 = 0xFFFFFDFF
 localparam ALUSRC_CONST_8 = 6'h19;     // 8
@@ -1547,6 +1547,13 @@ function automatic [3:0] resolve_seg_target(input [6:0] dest, input [2:0] seg_se
         end
         default: resolve_seg_target = SEG_NONE;
     endcase
+endfunction
+
+// Device (uncached, direct) physical pages: the VGA window A0000-BFFFF and
+// the 4 MB SVGA linear framebuffer at 0F800000 (248 MB, where ao486 exposes
+// its DDR3 framebuffer and UniVBE finds the ET4000/W32 linear aperture).
+function automatic logic is_device_page(input logic [19:0] pfn);
+    is_device_page = (pfn[19:5] == 15'h5) || (pfn[19:10] == 10'h03E);
 endfunction
 
 endpackage

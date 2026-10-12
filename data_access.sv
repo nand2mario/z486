@@ -800,7 +800,7 @@ wire        st_user = (pg_cpl == 2'd3);
 wire        st_postable = vipt_page_enabled
     ? (vipt_tlb_hit && !vipt_tlb_is_vga_mem && (!st_user || vipt_tlb_user) &&
        vipt_tlb_dirty && (vipt_tlb_writable || (!st_user && !CR0[16])))
-    : (ind_linear[31:17] != 15'h5);
+    : !is_device_page(ind_linear[31:12]);
 assign st_route = st_route_pre && st_postable;
 assign st_take = st_route && !gp_fault_trigger &&
                  !(stall_wio || stall_x87_direct || stall_invlpg || stall_rmw_probe || stall_ucrd);

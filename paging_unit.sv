@@ -464,7 +464,7 @@ wire        early_idx_drive    = early_wr_idx_drive;
 // address; a pretranslated read carries its own registered physical address.
 wire [31:0] early_phys         = linear_addr;
 wire        req_is_vga_mem     = pg_enable ? tlb_is_vga_mem
-                                           : (req_linear[31:17] == 15'h5);
+                                           : is_device_page(req_linear[31:12]);
 wire        early_wr_accept    = early_wr_present && dcache_req_accepted;
 // A read whose probe-path resolve found a TLB hit but no line presents its
 // registered physical address directly: no translation cycle.
@@ -522,11 +522,11 @@ assign x87_req_wdata = dcache_io_wdata_r;
 assign dcache_req_is_io = (early_present || req_mem_present) ? 1'b0 : dcache_req_is_io_r;
 assign dcache_req_is_inta = (early_present || req_mem_present) ? 1'b0 : dcache_req_is_inta_r;
 assign dcache_req_is_x87 = (early_present || req_mem_present) ? 1'b0 : dcache_req_is_x87_r;
-wire        early_is_vga_mem   = pretrans_present ? (pretrans_phys[31:17] == 15'h5)
-                                                  : (linear_addr[31:17] == 15'h5);
+wire        early_is_vga_mem   = pretrans_present ? is_device_page(pretrans_phys[31:12])
+                                                  : is_device_page(linear_addr[31:12]);
 assign dcache_req_is_vga_mem = early_present ? early_is_vga_mem :
                                req_mem_present ? req_is_vga_mem :
-                               (dcache_req_phys_addr_r[31:17] == 15'h5);
+                               is_device_page(dcache_req_phys_addr_r[31:12]);
 assign icache_req_valid = icache_req_valid_r || fast_pf_candidate;
 assign icache_req_phys_addr = icache_req_valid_r ? icache_req_phys_addr_r : fast_pf_phys;
 

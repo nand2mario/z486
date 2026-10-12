@@ -84,6 +84,10 @@ wire [31:0] debug_ip;  // Debug: IP at instruction completion
 
 reg [31:0] CR0, CR2, CR3;
 reg [31:0] DR6, DR7;
+// DR0-3 live in the 386's descriptor cache as base fields: SELECT_DR_TR puts
+// 0x70+n in COUNTR, MOV DRn,r stores through IRF with SBAS (38E) and MOV r,DRn
+// reads them back with LBAS (3B2). TR6/TR7 (0x76/0x77) are not kept.
+reg [31:0] DR03 [0:3];
 wire [31:0] EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI;
 reg [31:0] EIP = 32'h0000FFF0;      // Architectural IP (next instruction) - reset vector
 
@@ -503,6 +507,8 @@ wire interrupt_entry;  // Interrupt handler is being entered
 reg        stack_init_pending;      // Cycle after i_issue for a stack operation
 wire       prot_test_inflight;      // Protection test is waiting for a result
 wire [31:0] COUNTR;                 // Data Unit counter register
+// IRF index 0x70-0x77 (SELECT_DR_TR): DR0-3/TR6-7, never a GPR.
+wire        irf_is_dr = COUNTR[6:3] == 4'b1110;
 
 // Hardwired common-instruction control: recipes of one to three uSteps.
 recipe_state_t recipe_state;               // Current hardwired recipe state
@@ -1315,7 +1321,8 @@ function automatic [5:0] decode_dly_gpr(input [6:0] dest);
             DEST_eCX: begin we = 1'b1; sel = 3'd1; mode = i.addr32 ? FWD_D : FWD_W; end
             DEST_eSI: begin we = 1'b1; sel = 3'd6; mode = i.addr32 ? FWD_D : FWD_W; end
             DEST_eDI: begin we = 1'b1; sel = 3'd7; mode = i.addr32 ? FWD_D : FWD_W; end
-            DEST_IRF: if (COUNTR[5:3] != 3'b100 && !(COUNTR[2:0] == 3'd4 && !i.has_0f && i.opcode == 8'h61))
+            DEST_IRF: if (COUNTR[5:3] != 3'b100 && !irf_is_dr &&
+                          !(COUNTR[2:0] == 3'd4 && !i.has_0f && i.opcode == 8'h61))
                 begin we = 1'b1; sel = COUNTR[2:0]; mode = is_dword ? FWD_D : FWD_W; end
             default: ;
         endcase
@@ -1433,7 +1440,8 @@ function automatic [7:0] gpr_dest_mask(input [6:0] dst);
         DEST_USTEP_ALU:
             gpr_dest_mask = gpr_wr_expand(i.dst_reg_sel);
         DEST_IRF:
-            if (COUNTR[5:3] != 3'b100 && !(COUNTR[2:0] == 3'd4 && !i.has_0f && i.opcode == 8'h61))
+            if (COUNTR[5:3] != 3'b100 && !irf_is_dr &&
+                !(COUNTR[2:0] == 3'd4 && !i.has_0f && i.opcode == 8'h61))
                 gpr_dest_mask = 8'h01 << COUNTR[2:0];
         default: ;
     endcase
@@ -1536,6 +1544,7 @@ segmentation_unit seg_unit (
     .seg_cmd_valid    (seg_cmd_valid),
     .stssaf_pulse     (uc_exec && uc_aluop == ALUJMP_STSSAF),
     .ctssaf_pulse     (uc_exec && uc_aluop == ALUJMP_CTSSAF),
+    .instr_done       (i_rni_delay || (recipe_rni && uc_exec)),
     .seg_cmd          (seg_cmd),
     .seg_target       (seg_cmd_target),
     .exec_seg_cmd     (uc_seg_cmd),
@@ -1556,6 +1565,10 @@ segmentation_unit seg_unit (
     .lar_result       (seg_lar_result),
     .llim_result      (seg_llim_result),
     .lbas_result      (seg_lbas_result),
+    // MOV r,DRn reads "-1 -> IRF" with LBAS; SGDT/SIDT's LBAS names its
+    // descriptor in the destination and leaves COUNTR stale.
+    .lbas_dr_sel      (irf_is_dr && uc_dest == DEST_IRF),
+    .lbas_dr_value    (COUNTR[2] ? 32'h0 : DR03[COUNTR[1:0]]),
     // Segment state
     .seg_sel          (mem_seg_sel),
     .seg_is_io        (mem_seg_is_io),
@@ -2602,6 +2615,7 @@ always_ff @(posedge clk) begin
         CR2 <= 32'h0;
         DR6 <= 32'h0;
         DR7 <= 32'h0;
+        for (int n = 0; n < 4; n++) DR03[n] <= 32'h0;
 
     end else begin
         if (uc_exec) begin
@@ -2657,6 +2671,8 @@ always_ff @(posedge clk) begin
             end
 
             DEST_IRF: begin
+                if (irf_is_dr && !COUNTR[2] && uc_buscode == BUSOP_SBAS)
+                    DR03[COUNTR[1:0]] <= external_dest_value;
                 if (COUNTR[5:3] == 3'b100)
                 case (COUNTR[5:0])
                     6'h20: if (uc_buscode != BUSOP_SAR && uc_buscode != BUSOP_SLIM) ES <= external_dest_value[15:0];

@@ -165,8 +165,19 @@ end
 
 wire [31:0] high_word = swap ? alu_value : source_value;
 wire [31:0] low_word  = swap ? source_value : alu_value;
+// A 16-bit SHLD/SHRD count of 17..31 shifts the 48-bit pattern dest:src:src
+// (SHLD) or src:src:dest (SHRD) on the 386/486, so bits shifted past the
+// source come from the source again (checked against 386 SingleStepTests).
+// SHRD gets the second source copy above the destination; SHLD puts src:src
+// in the upper half and selects it with count 64-c, leaving the dest:src
+// window and all count <= 16 taps where they were.
+wire [63:0] shift_input_w = !instr_is_shxd ? {high_word, low_word[15:0]} :
+                            swap ? {low_word[15:0], low_word[15:0],
+                                    high_word[15:0], low_word[15:0]} :
+                                   {16'd0, high_word[15:0], high_word[15:0],
+                                    low_word[15:0]};
 wire [63:0] shift_input = data_size == 2'd0 ? {high_word, low_word[7:0]} :
-                          data_size == 2'd1 ? {high_word, low_word[15:0]} :
+                          data_size == 2'd1 ? shift_input_w :
                                                 {high_word, low_word};
 wire [63:0] shifted = shift_input >> count;
 wire        is_sar = (shift_operation == SAR) && !instr_is_shxd;
@@ -276,7 +287,11 @@ always_ff @(posedge clk) begin
                 if (instr_is_shxd) begin
                     swap <= !shift_right;
                     overflow <= 1'b0;
-                    count <= shift_right ? raw_count : width - raw_count;
+                    // A left count past a 16-bit width selects src:src in
+                    // the upper half of shift_input: 64-c.
+                    count <= shift_right ? raw_count :
+                             raw_count > width ? 6'd0 - raw_count :
+                                                 width - raw_count;
                     operation <= shift_right ? ROR : ROL;
                     set_zsp <= 1'b1;
                 end else begin

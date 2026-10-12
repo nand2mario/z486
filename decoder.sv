@@ -850,6 +850,11 @@ task automatic build_struct_work(
 
             w.entry.has_modrm = 1'b1;
             w.entry.modrm = modrm;
+            // MOV CR/DR/TR (0F 20-26) has no immediate: its microcode reads the
+            // register number from IMM (SELECT_DR_TR: (IMM >> 3) & 7), which
+            // the 386 loads with the ModRM byte.
+            if (prefix_0f && opcode[7:3] == 5'b00100)
+                w.entry.immediate = {24'h0, modrm};
             w.entry.has_sib = has_sib;
             w.entry.sib = 8'h00;
             w.entry.imm_size = imm_total_size;

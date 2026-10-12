@@ -12,6 +12,7 @@ module segmentation_unit
     input              seg_cmd_valid,       // 1 when command should actually execute
     input              stssaf_pulse,        // STSSAF aluop: sideband so it coexists with a busop
     input              ctssaf_pulse,        // CTSSAF aluop: 608 pairs CTSSAF with SDEL, 74B STSSAF with IN=+
+    input              instr_done,          // Instruction completed (RNI delay slot): clears the TSS access flag
     input      [3:0]   seg_cmd,            // SEG_CMD_* command (computed stall-independently)
     input      [3:0]   seg_target,         // Target segment (SEG_ES..SEG_GDT, SEG_NONE)
     input      [3:0]   exec_seg_cmd,       // Microcode command, independent of issue INIT_SEG
@@ -33,6 +34,8 @@ module segmentation_unit
     output     [31:0]  lar_result,         // LAR combinational readback (keyed by seg_target)
     output logic [31:0] llim_result,       // LLIM combinational readback (keyed by seg_target)
     output     [31:0]  lbas_result,        // LBAS combinational readback (keyed by seg_target)
+    input              lbas_dr_sel,        // COUNTR selects DR0-3/TR6-7: LBAS reads lbas_dr_value
+    input      [31:0]  lbas_dr_value,
 
     // Segment state (set by commands, used by address translation and z486)
     output reg [3:0]   seg_sel,            // Active segment for memory ops
@@ -401,7 +404,7 @@ always_comb begin
         default: llim_result = 32'h0;
     endcase
 end
-assign lbas_result = lar_desc.base;
+assign lbas_result = lbas_dr_sel ? lbas_dr_value : lar_desc.base;
 
 // Testbench can't force unpacked array struct elements, so use individual regs
 `ifdef VERILATOR
@@ -601,65 +604,73 @@ always_ff @(posedge clk) begin
         tss_access_flag <= 1'b0;
         i_addr32_r <= 1'b0;
         i_stack_op_r <= 1'b0;
-    end else if (seg_cmd_valid) begin
-        seg_base_r <= seg_base_pending_c;
-        addr_size  <= addr_size_pending_c;
-        is_dtable  <= is_dtable_pending_c;
-        // STSSAF/CTSSAF arrive as aluop sidebands so the same uop's busop
-        // seg_cmd still executes (608: CTSSAF+SDEL dropped the new-stack
-        // limit, leaving a stale CS limit for the gate frame pushes).
-        // Applied before the case so a same-cycle command wins conflicts.
-        if (stssaf_pulse) begin
-            stack_push_mode <= 1'b0;
-            descsw_mode <= 1'b0;
-            tss_access_flag <= 1'b1;
-            if (seg_sel == SEG_SS) begin
-                seg_limit_r <= seg_limit_for(SEG_SS, 1'b0);
-                {seg_expdown_r, seg_big_r} <= seg_expdown_for(SEG_SS, 1'b0);
-            end
-        end
-        if (ctssaf_pulse)
+    end else begin
+        // The TSS access flag marks a fault taken while the microcode reads or
+        // writes a TSS (FAULT then skips setting RF, 893). Nothing in the
+        // microcode clears it after a completed task switch, so it ends with
+        // the instruction, like RF; a same-cycle STSSAF/CTSSAF below wins.
+        if (instr_done)
             tss_access_flag <= 1'b0;
-        case (seg_cmd)
-            SEG_CMD_INIT_SEG: begin
-                seg_sel <= seg_target;
-                seg_is_io <= (seg_target == SEG_IO);
-                seg_limit_r <= seg_limit_for(seg_target, 1'b0);
-                {seg_expdown_r, seg_big_r} <= seg_expdown_for(seg_target, 1'b0);
-                i_addr32_r <= init_addr32;
-                i_stack_op_r <= init_stack_op;
+        if (seg_cmd_valid) begin
+            seg_base_r <= seg_base_pending_c;
+            addr_size  <= addr_size_pending_c;
+            is_dtable  <= is_dtable_pending_c;
+            // STSSAF/CTSSAF arrive as aluop sidebands so the same uop's busop
+            // seg_cmd still executes (608: CTSSAF+SDEL dropped the new-stack
+            // limit, leaving a stale CS limit for the gate frame pushes).
+            // Applied before the case so a same-cycle command wins conflicts.
+            if (stssaf_pulse) begin
                 stack_push_mode <= 1'b0;
                 descsw_mode <= 1'b0;
-            end
-
-            SEG_CMD_UPDATE_SEG: begin
-                seg_sel <= seg_target;
-                seg_is_io <= (seg_target == SEG_IO);
-                if (clear_descsw) begin
-                    descsw_mode <= 1'b0;
-                    seg_limit_r <= seg_limit_for(seg_target, 1'b0);
-                    {seg_expdown_r, seg_big_r} <= seg_expdown_for(seg_target, 1'b0);
-                end else begin
-                    seg_limit_r <= seg_limit_for(seg_target, descsw_mode);
-                    {seg_expdown_r, seg_big_r} <= seg_expdown_for(seg_target, descsw_mode);
+                tss_access_flag <= 1'b1;
+                if (seg_sel == SEG_SS) begin
+                    seg_limit_r <= seg_limit_for(SEG_SS, 1'b0);
+                    {seg_expdown_r, seg_big_r} <= seg_expdown_for(SEG_SS, 1'b0);
                 end
             end
+            if (ctssaf_pulse)
+                tss_access_flag <= 1'b0;
+            case (seg_cmd)
+                SEG_CMD_INIT_SEG: begin
+                    seg_sel <= seg_target;
+                    seg_is_io <= (seg_target == SEG_IO);
+                    seg_limit_r <= seg_limit_for(seg_target, 1'b0);
+                    {seg_expdown_r, seg_big_r} <= seg_expdown_for(seg_target, 1'b0);
+                    i_addr32_r <= init_addr32;
+                    i_stack_op_r <= init_stack_op;
+                    stack_push_mode <= 1'b0;
+                    descsw_mode <= 1'b0;
+                end
 
-            SEG_CMD_SPCR: begin
-                stack_push_mode <= 1'b1;
-            end
+                SEG_CMD_UPDATE_SEG: begin
+                    seg_sel <= seg_target;
+                    seg_is_io <= (seg_target == SEG_IO);
+                    if (clear_descsw) begin
+                        descsw_mode <= 1'b0;
+                        seg_limit_r <= seg_limit_for(seg_target, 1'b0);
+                        {seg_expdown_r, seg_big_r} <= seg_expdown_for(seg_target, 1'b0);
+                    end else begin
+                        seg_limit_r <= seg_limit_for(seg_target, descsw_mode);
+                        {seg_expdown_r, seg_big_r} <= seg_expdown_for(seg_target, descsw_mode);
+                    end
+                end
 
-            SEG_CMD_DESCSW: begin
-                stack_push_mode <= 1'b1;
-                seg_sel <= SEG_SS;
-                seg_is_io <= 1'b0;
-                descsw_mode <= 1'b1;
-                seg_limit_r <= seg_limit_for(SEG_CS, 1'b0);
-                {seg_expdown_r, seg_big_r} <= seg_expdown_for(SEG_SS, 1'b1);
-            end
+                SEG_CMD_SPCR: begin
+                    stack_push_mode <= 1'b1;
+                end
 
-            default: ;
-        endcase
+                SEG_CMD_DESCSW: begin
+                    stack_push_mode <= 1'b1;
+                    seg_sel <= SEG_SS;
+                    seg_is_io <= 1'b0;
+                    descsw_mode <= 1'b1;
+                    seg_limit_r <= seg_limit_for(SEG_CS, 1'b0);
+                    {seg_expdown_r, seg_big_r} <= seg_expdown_for(SEG_SS, 1'b1);
+                end
+
+                default: ;
+            endcase
+        end
     end
 end
 

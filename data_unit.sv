@@ -1036,9 +1036,10 @@ always_ff @(posedge clk) begin
                         write_gpr(dst_reg_sel_r, alu_result, op_size);
 
                 // POPA/POPAD discard the popped ESP slot (their eSP words set
-                // the pointer); a task switch's IRF loads do write ESP.
+                // the pointer); a task switch's IRF loads do write ESP. Index
+                // 0x70-0x77 is DR0-3/TR6-7 (MOV DRn), not a GPR.
                 DEST_IRF:
-                    if (countr[5:3] != 3'b100 &&
+                    if (countr[5:3] != 3'b100 && countr[6:3] != 4'b1110 &&
                         !(countr[2:0] == 3'd4 && !instr.has_0f && instr.opcode == 8'h61))
                         write_gpr(countr[2:0], dest_value,
                                   is_dword ? 2'd2 : 2'd1);
