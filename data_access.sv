@@ -16,12 +16,16 @@ module data_access
     input  logic                    dcache_vipt_probe_ready,
     input  logic [31:0]             dcache_vipt_resolve_data,
     input  logic                    dcache_vipt_resolve_hit,
+    input  logic                    dcache_vipt_fill_start,      // the miss's fill started
+    input  logic                    dcache_vipt_fill_resp_valid, // its missing dword
+    input  logic [31:0]             dcache_vipt_fill_resp_data,
     input  logic                    dcache_wr_ready,
     input  logic                    fast_store_accepted,
     output logic [11:0]             dcache_vipt_probe_offset,
     output logic                    dcache_vipt_probe_valid,
     output logic [31:0]             dcache_vipt_resolve_phys_addr,
     output logic                    dcache_vipt_resolve_valid,
+    output logic                    dcache_vipt_resolve_fill,    // a miss may fill at once
     output logic [3:0]              fast_store_be,
     output logic                    fast_store_valid,
     output logic [31:0]             fast_store_wdata,
@@ -132,6 +136,7 @@ module data_access
     input  logic [11:0]             uc_addr_mem_r,
     input  logic [5:0]              uc_buscode,
     input  logic                    uc_busreq,
+    input  logic                    uc_bus_or_dly,
     input  logic                    uc_data_busreq,
     input  logic                    uc_exec,
     input  logic                    uc_is_check_write,
@@ -167,10 +172,15 @@ wire [1:0] d2_vipt_mem_size;
 wire [1:0] d2_vipt_write_size;
 hardwired_load_result_t d2_vipt_result_kind;
 reg        vipt_load_slow_req_r;
+// A direct-load miss whose line fill the L1 started from the probe itself
+// waits for the missing dword there instead of entering paging.
+reg        vipt_load_fill_wait_r;
+wire       vipt_load_fill_done = vipt_load_fill_wait_r && dcache_vipt_fill_resp_valid;
 assign     ret_redirect = vipt_load_wb_valid_r && vipt_load_wb_ret_r;
 reg [31:0] vipt_load_wb_data_r;
 reg        vipt_load_overlap_r;        // Plain-load successor owns EX while load completes
-assign vipt_load_slow_busy = vipt_load_slow_req_r || vipt_load_slow_wait_r;
+assign vipt_load_slow_busy = vipt_load_slow_req_r || vipt_load_slow_wait_r ||
+                             vipt_load_fill_wait_r;
 wire       vipt_load_busy = vipt_load_ex_r.valid || vipt_load_replay_r.valid ||
                             vipt_load_slow_busy || vipt_load_wb_valid_r;
 wire       vipt_load_retire;
@@ -180,6 +190,24 @@ wire       vipt_load_retire;
 // live TLB lookup sits in the RD cycle. A miss goes to paging's registered
 // path.
 reg        ucrd_valid_r;               // probed last cycle; resolves now
+// A bus read updates OPR_R no earlier than the routine's next bus or DLY
+// uop, and the microcode relies on it: LD_DESCRIPTOR reads the second
+// descriptor dword while the uops before its DLY still use the first. A hit
+// resolving under any other uop holds its data and commits at that next bus
+// or DLY uop (or at the end of the instruction); a bus uop that finds it held
+// waits one cycle, as it would wait for the slow path's read.
+reg        ucrd_held_r;
+reg [31:0] ucrd_held_data_r;
+// A first-uStep or x87 read stops every uop after a miss (its DLY may fold
+// the RNI), as does a read whose DLY passed the resolve cycle. Otherwise a
+// missed read in a routine is a bus read in flight: only bus and DLY uops,
+// and the instruction's delay slot, wait for OPR_R.
+reg        ucrd_strict_r;
+// A microcode-read miss whose line fill the L1 started from the probe waits
+// for the missing dword there instead of entering paging.
+reg        ucrd_fill_wait_r;
+wire       ucrd_fill_done = ucrd_fill_wait_r && dcache_vipt_fill_resp_valid;
+wire       ucrd_miss_busy = ucrd_slow_req_r || ucrd_slow_wait_r || ucrd_fill_wait_r;
 // In the resolve cycle a uop with side effects runs only when the read's
 // translation was already known good in the RD cycle (the sidecar held its
 // page), so no fault can follow; a bus operation always waits, keeping
@@ -191,8 +219,9 @@ reg        ucrd_tlbok_r;               // the read's translation was known good
 // uop, or a DLY that folds its instruction's RNI (MOV r,m) retires and the
 // delay slot copies a stale OPR_R before the slow path returns or faults.
 assign stall_ucrd = (ucrd_valid_r && (!ucrd_tlbok_r || (!uc_p_pure_dly && uc_busreq))) ||
-                        ucrd_slow_req_r || ucrd_slow_wait_r;
-wire       ucrd_busy = ucrd_valid_r || ucrd_slow_req_r || ucrd_slow_wait_r;
+                        (ucrd_held_r && uc_bus_or_dly && !uc_p_pure_dly) ||
+                        (ucrd_miss_busy && (ucrd_strict_r || uc_bus_or_dly || i_rni_delay));
+wire       ucrd_busy = ucrd_valid_r || ucrd_held_r || ucrd_miss_busy;
 reg        rd_fast_probed_r;            // D2 preread was accepted
 reg [31:0] rd_fast_linear_r;
 reg [1:0]  rd_fast_size_r;
@@ -318,7 +347,8 @@ wire vipt_load_alu_dst_capture_fast = vipt_load_ex_r.valid &&
 wire vipt_load_alu_dst_capture_slow = vipt_load_slow_wait_r &&
                                       !mem_servicing;
 assign vipt_load_alu_dst_capture = vipt_load_alu_dst_capture_fast ||
-                                 vipt_load_alu_dst_capture_slow;
+                                 vipt_load_alu_dst_capture_slow ||
+                                 vipt_load_fill_done;
 assign vipt_load_alu_dst_capture_dst =
     vipt_load_alu_dst_capture_fast ? vipt_load_ex_r.dst
                                    : vipt_load_slow_r.dst;
@@ -331,6 +361,11 @@ assign vipt_load_alu_dst_capture_data =
                                vipt_load_ex_r.lane,
                                vipt_load_ex_r.mem_size,
                                vipt_load_ex_r.result_kind)
+        : vipt_load_fill_done
+        ? format_hardwired_load(dcache_vipt_fill_resp_data,
+                               vipt_load_slow_r.lane,
+                               vipt_load_slow_r.mem_size,
+                               vipt_load_slow_r.result_kind)
         : format_hardwired_load(OPR_R, 2'd0,
                                vipt_load_slow_r.mem_size,
                                vipt_load_slow_r.result_kind);
@@ -415,6 +450,13 @@ assign dcache_vipt_resolve_valid = (((vipt_load_ex_r.valid &&
 assign ucrd_hit = ucrd_valid_r && ucrd_translation_ok && !vipt_tlb_is_vga_mem &&
                 dcache_vipt_resolve_hit;
 assign dcache_vipt_resolve_phys_addr = vipt_resolve_phys;
+// A plain or ALU direct load, or a microcode read, may fill straight from its
+// probe on a miss; RET, RMW and x87 reads keep the paging path.
+assign dcache_vipt_resolve_fill = !vipt_load_slow_busy &&
+    ((vipt_load_ex_r.valid && vipt_load_ex_probed_r &&
+      vipt_load_ex_contained && !vipt_load_ex_r.is_ret &&
+      !rd_fast_valid_r && !ucrd_valid_r) ||
+     (ucrd_valid_r && !ucrd_x87_r));
 
 // A synthetic RNI is required only when the direct pipeline drains. Interior
 // load boundaries are represented by their D2 issue and WB commit tokens.
@@ -430,6 +472,7 @@ always_ff @(posedge clk) begin
         vipt_load_slow_r <= '0;
         vipt_load_slow_req_r <= 1'b0;
         vipt_load_slow_wait_r <= 1'b0;
+        vipt_load_fill_wait_r <= 1'b0;
         vipt_slow_phys_ok_r <= 1'b0;
         vipt_slow_phys_r <= 32'd0;
         vipt_load_wb_valid_r <= 1'b0;
@@ -514,7 +557,10 @@ always_ff @(posedge clk) begin
                 vipt_load_wb_is_alu_r <= vipt_load_ex_r.is_alu;
                 vipt_load_wb_alu_op_r <= vipt_load_ex_r.alu_op;
             end else if (!any_fault) begin
-                vipt_load_slow_req_r <= 1'b1;
+                if (dcache_vipt_fill_start && !ucrd_valid_r)
+                    vipt_load_fill_wait_r <= 1'b1;
+                else
+                    vipt_load_slow_req_r <= 1'b1;
             end
         end
 
@@ -561,6 +607,23 @@ always_ff @(posedge clk) begin
             vipt_load_slow_req_r <= 1'b0;
             vipt_load_slow_wait_r <= 1'b1;
         end
+        // A fill started from the probe returns its missing dword raw, as a
+        // hit does.
+        if (vipt_load_fill_done) begin
+            vipt_load_fill_wait_r <= 1'b0;
+            vipt_load_wb_valid_r <= 1'b1;
+            vipt_load_wb_data_r <= format_hardwired_load(
+                dcache_vipt_fill_resp_data, vipt_load_slow_r.lane,
+                vipt_load_slow_r.mem_size, vipt_load_slow_r.result_kind);
+            vipt_load_wb_ret_r <= 1'b0;
+            vipt_load_wb_target_r <= dcache_vipt_fill_resp_data;
+            vipt_load_wb_dst_r <= vipt_load_slow_r.dst;
+            vipt_load_wb_dst_onehot_r <= vipt_load_slow_r.dst_onehot;
+            vipt_load_wb_fwd_mask_r <= vipt_load_slow_r.is_alu ? 8'd0 : vipt_load_slow_r.dst_onehot;
+            vipt_load_wb_size_r <= vipt_load_slow_r.write_size;
+            vipt_load_wb_is_alu_r <= vipt_load_slow_r.is_alu;
+            vipt_load_wb_alu_op_r <= vipt_load_slow_r.alu_op;
+        end
         // Paging assembles crossing reads in OPR_R.  Wait until its ownership
         // drops rather than treating the first fragment as a completed load.
         if (vipt_load_slow_wait_r && !mem_servicing) begin
@@ -585,6 +648,7 @@ always_ff @(posedge clk) begin
             vipt_load_replay_r.valid <= 1'b0;
             vipt_load_slow_req_r <= 1'b0;
             vipt_load_slow_wait_r <= 1'b0;
+            vipt_load_fill_wait_r <= 1'b0;
             vipt_load_wb_valid_r <= 1'b0;
             vipt_load_wb_fwd_mask_r <= 8'd0;
             vipt_load_ex_probed_r <= 1'b0;
@@ -626,12 +690,21 @@ wire rd_fast_hit = rd_fast_valid_r && rd_fast_probed_r &&
 assign rd_fast_finish = rd_fast_valid_r && i_first && uc_exec;
 // A microcode read hit writes OPR_R as paging does for a single access: the
 // operand shifted down from its byte lane and zero-extended from its size.
-assign fast_opr_commit = (rd_fast_finish && rd_fast_hit) || ucrd_hit;
-assign fast_opr_data = ucrd_valid_r
-    ? format_hardwired_load(dcache_vipt_resolve_data, ucrd_linear_r[1:0],
-                            ucrd_size_r, LOAD_RESULT_COPY)
-    : format_hardwired_load(dcache_vipt_resolve_data, rd_fast_lane_r,
-                            rd_fast_size_r, LOAD_RESULT_COPY);
+wire [31:0] ucrd_hit_data = format_hardwired_load(
+    ucrd_fill_wait_r ? dcache_vipt_fill_resp_data : dcache_vipt_resolve_data,
+    ucrd_linear_r[1:0], ucrd_size_r, LOAD_RESULT_COPY);
+// The missing dword of a fill arrives like a hit, unless every uop waits.
+wire        ucrd_data_now = ucrd_hit || ucrd_fill_done;
+wire        ucrd_hit_hold = ucrd_data_now && !ucrd_x87_r && !uc_bus_or_dly && !i_rni_delay &&
+                            !(ucrd_fill_wait_r && ucrd_strict_r);
+wire        ucrd_held_commit = ucrd_held_r &&
+    (uc_bus_or_dly || i_rni_delay || !uc_active || q_flush || any_fault || interrupt_entry);
+assign fast_opr_commit = (rd_fast_finish && rd_fast_hit) || (ucrd_data_now && !ucrd_hit_hold) ||
+                         ucrd_held_commit;
+assign fast_opr_data = ucrd_held_r ? ucrd_held_data_r
+                     : (ucrd_valid_r || ucrd_fill_wait_r) ? ucrd_hit_data
+                     : format_hardwired_load(dcache_vipt_resolve_data, rd_fast_lane_r,
+                                             rd_fast_size_r, LOAD_RESULT_COPY);
 always_ff @(posedge clk) begin
     if (!reset_n) begin
         rd_fast_valid_r <= 1'b0;
@@ -698,16 +771,16 @@ assign      vipt_slow_submit = vipt_load_slow_req_r && !mem_servicing && !ucrd_s
 // submission remains idle-gated above.  This keeps mem_servicing out of the
 // live-TLB/cache-address cone without changing request ordering.
 assign vipt_slow_addr_owned = vipt_load_slow_req_r;
-// A cacheable, non-crossing first-uStep EA read (or x87 direct operand read)
-// with paging idle probes the cache instead of entering paging; a missed one
-// enters paging from its token.
+// A cacheable, non-crossing microcode read (or x87 direct operand read) with
+// paging idle probes the cache instead of entering paging; a missed one enters
+// paging from its token. Paging would read the same registered ind_linear.
 wire        ucrd_uc_read = uc_data_busreq && uc_is_mem_busop &&
     !uc_is_write && !uc_is_check_write && !mem_is_io &&
-    (uc_buscode != BUSOP_RD_IND) && i_first && i_ex.ind_is_ea && !x87_direct_mem_req;
+    (uc_buscode != BUSOP_RD_IND) && !x87_direct_mem_req;
 wire [1:0]  ucrd_size_now = x87_direct_mem_req ? 2'd2 : mem_eff_size;
 assign ucrd_route_pre = !hardwired_off && mem_op_eligible && (ucrd_uc_read || x87_direct_mem_req) &&
-    ind_linear_valid && !vipt_load_slow_req_r && !ucrd_valid_r &&
-    !ucrd_slow_req_r && !ucrd_slow_wait_r && paging_demand_idle &&
+    ind_linear_valid && !vipt_load_slow_req_r && !ucrd_valid_r && !ucrd_held_r &&
+    !ucrd_miss_busy && paging_demand_idle &&
     !access_crosses_dword(ucrd_size_now, ind_linear[1:0]) &&
     dcache_vipt_probe_ready && !ex_reprobe;
 // A held microcode uop must not probe twice; an x87 direct read is issued
@@ -752,8 +825,18 @@ always_ff @(posedge clk) begin
         ucrd_phys_r <= 32'd0;
         ucrd_slow_req_r <= 1'b0;
         ucrd_slow_wait_r <= 1'b0;
+        ucrd_held_r <= 1'b0;
+        ucrd_held_data_r <= 32'd0;
+        ucrd_strict_r <= 1'b0;
+        ucrd_fill_wait_r <= 1'b0;
     end else begin
         ucrd_valid_r <= ucrd_take;
+        if (ucrd_held_commit)
+            ucrd_held_r <= 1'b0;
+        if (ucrd_hit_hold) begin
+            ucrd_held_r <= 1'b1;
+            ucrd_held_data_r <= ucrd_hit_data;
+        end
         ucrd_tlbok_r <= ucrd_take && sidecar_valid_r &&
                         (sidecar_page_r == ind_linear[31:12]) && !vipt_tlb_is_vga_mem &&
                         (!vipt_page_enabled ||
@@ -763,9 +846,17 @@ always_ff @(posedge clk) begin
             ucrd_size_r <= ucrd_size_now;
             ucrd_cpl_r <= pg_cpl;
             ucrd_x87_r <= x87_direct_mem_req;
+            ucrd_strict_r <= i_first || x87_direct_mem_req;
         end
         if (ucrd_valid_r && !ucrd_hit) begin
-            ucrd_slow_req_r <= 1'b1;
+            if (dcache_vipt_fill_start)
+                ucrd_fill_wait_r <= 1'b1;
+            else
+                ucrd_slow_req_r <= 1'b1;
+            // A DLY that passed the resolve cycle leaves its wait to the
+            // uops after it.
+            if (uc_bus_or_dly)
+                ucrd_strict_r <= 1'b1;
             ucrd_phys_ok_r <= ucrd_translation_ok && !vipt_tlb_is_vga_mem;
             ucrd_phys_r <= vipt_resolve_phys;
         end
@@ -775,10 +866,13 @@ always_ff @(posedge clk) begin
         end
         if (ucrd_slow_wait_r && !mem_servicing)
             ucrd_slow_wait_r <= 1'b0;
+        if (ucrd_fill_done)
+            ucrd_fill_wait_r <= 1'b0;
         if (q_flush || any_fault || interrupt_entry) begin
             ucrd_valid_r <= 1'b0;
             ucrd_slow_req_r <= 1'b0;
             ucrd_slow_wait_r <= 1'b0;
+            ucrd_fill_wait_r <= 1'b0;
         end
     end
 end

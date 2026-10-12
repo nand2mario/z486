@@ -7,7 +7,10 @@ module l1_cache #(
     // Four ways, 16 bytes per line. SET_BITS=7 gives the default 8KB data
     // cache (128 sets x 4 ways x 16 B); use 8 for 16KB.
     parameter integer SET_BITS = 7,
-    parameter PROTECT_UMA_ROM = 0
+    parameter PROTECT_UMA_ROM = 0,
+    // 1: a line fill requests the missing dword first and memory returns the
+    // line's dwords in wrapping order from it (critical word first).
+    parameter LINE_WRAP = 0
 ) (
     input         clk,
     input         reset,
@@ -52,6 +55,13 @@ module l1_cache #(
     input         vipt_resolve_valid,
     output [31:0] vipt_resolve_data,
     output        vipt_resolve_hit,
+    // A missing resolve that may fill at once (a cacheable direct load): the
+    // cache starts the line fill in the resolve cycle (vipt_fill_start) and
+    // returns the missing dword on vipt_fill_resp_* instead of the CPU port.
+    input         vipt_resolve_fill,
+    output        vipt_fill_start,
+    output        vipt_fill_resp_valid,
+    output [31:0] vipt_fill_resp_data,
 
     // Memory side.
     output [31:0] mem_addr,
@@ -223,6 +233,9 @@ reg fill_requested;
 reg fill_target_returned;
 reg [127:0] wide_fill_line;
 reg wide_fill_install;
+reg fill_direct_r;          // the fill answers vipt_fill_resp, not the CPU port
+reg fill_resp_valid_r;
+reg probe_in_fill_r;        // the resolving probe preread during a fill
 
 reg [31:0] dout_r;
 reg resp_valid_r;
@@ -370,7 +383,11 @@ wire patch_fwd_hit = patch_fwd_valid_r && (patch_fwd_way_r == lookup_way) &&
 wire [31:0] lookup_way_data = patch_fwd_hit ? patch_fwd_data_r : lookup_way_ram_data;
 wire [TAG_BITS-1:0] vipt_resolve_tag =
     vipt_resolve_phys_addr[TAG_MSB:TAG_LSB];
-wire [3:0] vipt_hit_vec = {
+// A probe that preread during a fill must not hit the way being refilled in
+// that set: its old tag stays valid until the last dword while the data RAM
+// already holds part of the new line (fill_probe_mask_r, set at the preread).
+reg  [3:0] fill_probe_mask_r;
+wire [3:0] vipt_hit_vec = ~fill_probe_mask_r & {
     rd_valid3_r && (rd_tag3_r == vipt_resolve_tag),
     rd_valid2_r && (rd_tag2_r == vipt_resolve_tag),
     rd_valid1_r && (rd_tag1_r == vipt_resolve_tag),
@@ -397,6 +414,18 @@ assign vipt_resolve_data = vipt_lookup_store_match
 assign vipt_resolve_hit = vipt_resolve_valid && cache_enable &&
                           (vipt_resolve_phys_addr[31:17] != 15'h5) &&
                           (|vipt_hit_vec);
+// Fill straight from a direct-load probe miss: the probe's preread holds the
+// set's tags and PLRU and its translation is final, so the line is requested
+// without a CPU-port request and its second lookup. A probe that preread
+// during a fill may miss a line that fill has just installed, so it takes
+// the CPU port, whose lookup sees the installed tag.
+wire vipt_fill_start_now = vipt_resolve_valid && vipt_resolve_fill && cache_enable &&
+                           (vipt_resolve_phys_addr[31:17] != 15'h5) &&
+                           !(|vipt_hit_vec) && !probe_in_fill_r &&
+                           (state == S_IDLE) && ready_r && !cpu_valid;
+assign vipt_fill_start = vipt_fill_start_now;
+assign vipt_fill_resp_valid = fill_resp_valid_r;
+assign vipt_fill_resp_data = dout_r;
 wire [BRAM_ADDR_BITS-1:0] req_bram_addr = {req_set_r, req_word_r};
 wire can_accept_cpu = (state == S_IDLE) && !reset && (!cpu_write || cpu_protect_write || storeq_can_accept);
 wire ready_when_idle = !reset && storeq_can_accept;
@@ -415,6 +444,9 @@ wire lookup_wr_accept = cpu_valid && cpu_write && lookup_wr_open;
 wire accept_cpu = (cpu_valid && ready_r && can_accept_cpu) || lookup_wr_accept;
 wire [29:0] req_addr_dw = req_addr_r[31:2];
 wire [29:0] fill_addr_dw = {req_addr_r[31:4], fill_count};
+// The fill's last dword: the one before its first (word 0 unless wrapping).
+wire fill_last_word = LINE_WRAP ? ((fill_count + 1'b1) == fill_target_word)
+                                : (fill_count == {WORD_OFFSET_BITS{1'b1}});
 logic [31:0] lookup_forward_data;
 logic [31:0] fill_word_data;
 logic [31:0] bypass_forward_data;
@@ -429,7 +461,12 @@ assign cpu_resp_valid = lookup_read_hit_now || resp_valid_r;
 // memory ordering, VGA reads depend on all earlier planar writes being visible.
 // Keep draining while such a read waits, then reserve the memory port once the
 // queue is empty.
+// A probe resolving this cycle may start a line fill (vipt_fill_start): keep
+// the memory port free for it rather than posting a store ahead of the read,
+// unless the store queue is full.
+reg  probe_resolving_r;
 wire drain_block_state = (state == S_RESET_INIT) || (state == S_FILL) ||
+                         (probe_resolving_r && vipt_resolve_fill && !storeq_full) ||
                          (state == S_BYPASS_WAIT) ||
                          ((state == S_LOOKUP) && !req_protect_write_r && !req_write_r &&
                           (req_uncacheable_r ? storeq_empty : !lookup_hit));
@@ -490,9 +527,14 @@ wire store_lookup_preread = (state == S_LOOKUP) && req_valid_r &&
 // have no matching line, and later fills are patched before the tag is valid.
 // Capacity is a registered-state fact. Demand arbitration must not feed back
 // through D2 issue; a denied speculative probe is replayed by the CPU.
-assign vipt_probe_ready = idle_preread || store_lookup_preread;
+// Hit-under-fill: once a fill has returned the missing dword to its
+// requester, VIPT probes may read the other lines while the rest of the line
+// streams in on the write port. A probe miss retries through the CPU
+// interface, which waits for the fill; demand requests and stores still do.
+wire fill_probe_open = (state == S_FILL) && fill_target_returned;
+assign vipt_probe_ready = idle_preread || store_lookup_preread || fill_probe_open;
 wire vipt_probe_fire = vipt_probe_valid &&
-                       (idle_preread || store_lookup_preread) &&
+                       (idle_preread || store_lookup_preread || fill_probe_open) &&
                        !cpu_preread_priority;
 // When an accepted demand store owns the preread RAM at the same page offset,
 // its RAM address is also the exact VIPT lookup address. Share that read
@@ -519,6 +561,20 @@ wire data_store_write = (state == S_LOOKUP) && req_valid_r && req_write_r &&
 wire data_fill_write = (state == S_FILL) &&
                        (mem_resp_valid || wide_fill_install);
 wire [1:0] data_write_way = data_store_write ? lookup_way : fill_way;
+
+always_ff @(posedge clk) begin
+    if (reset) begin
+        fill_probe_mask_r <= 4'h0;
+        probe_in_fill_r <= 1'b0;
+    end else if (vipt_probe_fire) begin
+        fill_probe_mask_r <= (fill_probe_open && (vipt_probe_set == fill_set))
+                           ? (4'h1 << fill_way) : 4'h0;
+        probe_in_fill_r <= fill_probe_open;
+    end
+end
+
+always_ff @(posedge clk)
+    probe_resolving_r <= !reset && vipt_probe_fire;
 
 always_ff @(posedge clk) begin
     if (reset)
@@ -551,7 +607,7 @@ wire [31:0] data_write_value = data_store_write ?
 // written from the snoop, reset-init, and fill branches of the cache FSM.
 wire tag_fill_write = (state == S_FILL) &&
                       (mem_resp_valid || wide_fill_install) &&
-                      (fill_count == {WORD_OFFSET_BITS{1'b1}});
+                      fill_last_word;
 wire tag_clear_all = (state == S_RESET_INIT) || snoop_valid_r;
 wire [SET_BITS-1:0] tag_clear_set = (state == S_RESET_INIT) ?
                                     init_set : snoop_set_r;
@@ -624,6 +680,8 @@ always_ff @(posedge clk) begin
         fill_target_returned <= 1'b0;
         wide_fill_line <= 128'd0;
         wide_fill_install <= 1'b0;
+        fill_direct_r <= 1'b0;
+        fill_resp_valid_r <= 1'b0;
         snoop_set_r <= {SET_BITS{1'b0}};
         snoop_valid_r <= 1'b0;
         for (integer i = 0; i < STOREQ_DEPTH; i = i + 1)
@@ -631,6 +689,7 @@ always_ff @(posedge clk) begin
     end else begin
         ready_r <= (state == S_IDLE) && ready_when_idle;
         resp_valid_r <= 1'b0;
+        fill_resp_valid_r <= 1'b0;
         snoop_valid_r <= snoop_valid;
         if (snoop_valid)
             snoop_set_r <= snoop_set;
@@ -693,6 +752,23 @@ always_ff @(posedge clk) begin
                     ready_r <= 1'b0;
                     req_valid_r <= 1'b1;
                     state <= S_LOOKUP;
+                end else if (vipt_fill_start_now) begin
+                    ready_r <= 1'b0;
+                    req_addr_r <= vipt_resolve_phys_addr;
+                    fill_set <= vipt_resolve_phys_addr[SET_MSB:SET_LSB];
+                    fill_tag <= vipt_resolve_tag;
+                    fill_way <= plru_victim(rd_plru_r);
+                    fill_plru_r <= rd_plru_r;
+                    fill_count <= LINE_WRAP
+                        ? vipt_resolve_phys_addr[LINE_OFFSET_BITS-1:BYTE_OFFSET_BITS]
+                        : {WORD_OFFSET_BITS{1'b0}};
+                    fill_target_word <=
+                        vipt_resolve_phys_addr[LINE_OFFSET_BITS-1:BYTE_OFFSET_BITS];
+                    fill_requested <= 1'b0;
+                    fill_target_returned <= 1'b0;
+                    wide_fill_install <= 1'b0;
+                    fill_direct_r <= 1'b1;
+                    state <= S_FILL;
                 end
                 lookup_wr_room_r <= (storeq_count <= STOREQ_CNT_BITS'(STOREQ_DEPTH - 2));
             end
@@ -763,11 +839,12 @@ always_ff @(posedge clk) begin
                     fill_tag <= req_tag_r;
                     fill_way <= plru_victim(rd_plru_r);
                     fill_plru_r <= rd_plru_r;
-                    fill_count <= {WORD_OFFSET_BITS{1'b0}};
+                    fill_count <= LINE_WRAP ? req_word_r : {WORD_OFFSET_BITS{1'b0}};
                     fill_target_word <= req_word_r;
                     fill_requested <= 1'b0;
                     fill_target_returned <= 1'b0;
                     wide_fill_install <= 1'b0;
+                    fill_direct_r <= 1'b0;
                     state <= S_FILL;
                 end
             end
@@ -776,7 +853,8 @@ always_ff @(posedge clk) begin
                 if (!fill_requested && !mem_valid_r && !mem_busy) begin
                     mem_valid_r <= 1'b1;
                     mem_write_r <= 1'b0;
-                    mem_addr_r <= {req_addr_r[31:4], 4'b0000};
+                    mem_addr_r <= LINE_WRAP ? {req_addr_r[31:4], fill_target_word, 2'b00}
+                                            : {req_addr_r[31:4], 4'b0000};
                     mem_din_r <= 32'h0;
                     mem_be_r <= 4'hF;
                     mem_burstcount_r <= 8'd4;
@@ -784,7 +862,7 @@ always_ff @(posedge clk) begin
                 end
 
                 if (wide_fill_install) begin
-                    if (fill_count == {WORD_OFFSET_BITS{1'b1}}) begin
+                    if (fill_last_word) begin
                         plru_set[fill_set] <= plru_update(fill_plru_r, fill_way);
                         wide_fill_install <= 1'b0;
                         state <= S_IDLE;
@@ -795,16 +873,22 @@ always_ff @(posedge clk) begin
                     wide_fill_line <= wide_line_data;
                     wide_fill_install <= 1'b1;
                     dout_r <= wide_line_data[{fill_target_word, 5'b0} +: 32];
-                    resp_valid_r <= 1'b1;
+                    if (fill_direct_r)
+                        fill_resp_valid_r <= 1'b1;
+                    else
+                        resp_valid_r <= 1'b1;
                     fill_target_returned <= 1'b1;
                 end else if (mem_resp_valid) begin
                     if (fill_count == fill_target_word && !fill_target_returned) begin
                         dout_r <= fill_word_data;
-                        resp_valid_r <= 1'b1;
+                        if (fill_direct_r)
+                            fill_resp_valid_r <= 1'b1;
+                        else
+                            resp_valid_r <= 1'b1;
                         fill_target_returned <= 1'b1;
                     end
 
-                    if (fill_count == {WORD_OFFSET_BITS{1'b1}}) begin
+                    if (fill_last_word) begin
                         // Do NOT restore the other ways' valid bits from the
                         // fill-START snapshot -- a snoop invalidation landing
                         // DURING this fill must survive (same bug as l1_icache).
@@ -840,7 +924,8 @@ always_ff @(posedge clk) begin
     // legal finalize state rather than a cache ownership collision. A
     // protected (ROM-window) store leaves S_LOOKUP without touching the RAM
     // and is not forwarded, so the probe reads the unchanged data.
-    if (!reset && vipt_resolve_valid && state != S_IDLE &&
+    // A probe that preread during a fill resolves in the fill or just after.
+    if (!reset && vipt_resolve_valid && state != S_IDLE && state != S_FILL &&
         !(state == S_LOOKUP && req_valid_r && req_write_r))
         $fatal(1, "VIPT resolve while cache is not idle");
 end

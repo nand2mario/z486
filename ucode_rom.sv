@@ -302,16 +302,16 @@ endfunction
 wire [39:0] q_mem_a;
 wire [39:0] q_mem_b;
 
-// Two read ports from one copy: in true dual-port mode an M10K is 512 x 20
-// per port, so 2,560 x 40 takes the same ten blocks as single-port 256 x 40.
+// Two read ports from one copy. Quartus maps it in the M10K's 4K x 2 mode:
+// twenty blocks side by side, no output mux, for any depth up to 4,096.
 altsyncram #(
     .operation_mode("BIDIR_DUAL_PORT"),
     .width_a(40),
     .widthad_a(12),
-    .numwords_a(2560),
+    .numwords_a(UCODE_ROM_DEPTH),
     .width_b(40),
     .widthad_b(12),
-    .numwords_b(2560),
+    .numwords_b(UCODE_ROM_DEPTH),
     .outdata_reg_a("UNREGISTERED"),
     .outdata_reg_b("UNREGISTERED"),
     .address_reg_b("CLOCK1"),
@@ -354,9 +354,9 @@ altsyncram #(
 );
 `else
 `ifdef Z486_USE_LOGIC_UCODE_ROM
-(* ramstyle = "logic" *) reg [39:0] microcode_rom [0:2559];
+(* ramstyle = "logic" *) reg [39:0] microcode_rom [0:UCODE_ROM_DEPTH-1];
 `else
-`Z486_BLOCK_RAM reg [39:0] microcode_rom [0:2559];
+`Z486_BLOCK_RAM reg [39:0] microcode_rom [0:UCODE_ROM_DEPTH-1];
 `endif
 reg [39:0] q_mem_a;
 reg [39:0] q_mem_b;

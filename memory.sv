@@ -5,6 +5,7 @@
 module memory #(
     parameter PROTECT_UMA_ROM = 0,
     parameter DCACHE_SET_BITS = 7,
+    parameter DCACHE_LINE_WRAP = 0,
     parameter ICACHE_SET_BITS = 7,
     parameter ENABLE_X87 = 0,
     parameter ENABLE_DEVICE_MMIO = 0,
@@ -57,6 +58,10 @@ module memory #(
     input      [31:0]  dcache_vipt_resolve_phys_addr_raw,
     output             dcache_vipt_resolve_hit,
     output     [31:0]  dcache_vipt_resolve_data,
+    input              dcache_vipt_resolve_fill,
+    output             dcache_vipt_fill_start,
+    output             dcache_vipt_fill_resp_valid,
+    output     [31:0]  dcache_vipt_fill_resp_data,
 
     // x87 data-port response
     output             x87_req_selected,    // Route demand request to x87 port space
@@ -122,7 +127,7 @@ wire dcache_read_pending;
 wire direct_rd_pending;
 wire ext_valid_r;
 wire icache_read_pending;
-cache_unit #(.PROTECT_UMA_ROM(PROTECT_UMA_ROM), .DCACHE_SET_BITS(DCACHE_SET_BITS), .ICACHE_SET_BITS(ICACHE_SET_BITS), .ENABLE_DEVICE_MMIO(ENABLE_DEVICE_MMIO), .DEVICE_MMIO_MASK(DEVICE_MMIO_MASK)) cache_unit_inst (
+cache_unit #(.PROTECT_UMA_ROM(PROTECT_UMA_ROM), .DCACHE_SET_BITS(DCACHE_SET_BITS), .DCACHE_LINE_WRAP(DCACHE_LINE_WRAP), .ICACHE_SET_BITS(ICACHE_SET_BITS), .ENABLE_DEVICE_MMIO(ENABLE_DEVICE_MMIO), .DEVICE_MMIO_MASK(DEVICE_MMIO_MASK)) cache_unit_inst (
     // Clock, reset and board configuration
     .clk(clk),
     .reset_n(reset_n),
@@ -156,6 +161,10 @@ cache_unit #(.PROTECT_UMA_ROM(PROTECT_UMA_ROM), .DCACHE_SET_BITS(DCACHE_SET_BITS
     .dcache_vipt_resolve_phys_addr_raw(dcache_vipt_resolve_phys_addr_raw),
     .dcache_vipt_resolve_hit(dcache_vipt_resolve_hit),
     .dcache_vipt_resolve_data(dcache_vipt_resolve_data),
+    .dcache_vipt_resolve_fill(dcache_vipt_resolve_fill),
+    .dcache_vipt_fill_start(dcache_vipt_fill_start),
+    .dcache_vipt_fill_resp_valid(dcache_vipt_fill_resp_valid),
+    .dcache_vipt_fill_resp_data(dcache_vipt_fill_resp_data),
     // Paging unit: instruction line request (prefetch)
     .icache_req_valid(icache_req_valid),
     .icache_req_phys_addr_raw(icache_req_phys_addr_raw),

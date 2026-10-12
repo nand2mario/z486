@@ -64,8 +64,8 @@ logic [6:0] grp;
 logic [15:0] first, final_e;
 logic has_modrm;
 initial begin
-    $readmemh("pla_entry_rom.hex", entry_rom);
-    $readmemh("pla_group_entry.hex", group_entry_rom);
+    $readmemh("pla_entry_base.hex", entry_rom);
+    $readmemh("pla_group_base.hex", group_entry_rom);
     fo = $fopen("cls.txt", "w");
     for (int f = 0; f < 2; f++)
     for (int op = 0; op < 256; op++)
@@ -110,7 +110,7 @@ endmodule
 
 def evaluate(work: Path) -> list[str]:
     (work / "tb.sv").write_text(TB)
-    for name in ("pla_entry_rom.hex", "pla_group_entry.hex"):
+    for name in ("pla_entry_base.hex", "pla_group_base.hex"):
         shutil.copy(CORE / name, work / name)
     subprocess.run(
         ["verilator", "--binary", "-Wno-fatal", "-Wno-lint", "-Wno-style",

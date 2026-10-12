@@ -9,6 +9,9 @@ module z486
 #(
     parameter PROTECT_UMA_ROM = 0,
     parameter DCACHE_SET_BITS = 7,   // dcache size: 7 = 8KB, 8 = 16KB
+    // 1: D-cache fills ask for the missing dword first; memory returns the
+    // line's dwords in wrapping order from the requested one.
+    parameter DCACHE_LINE_WRAP = 0,
     parameter ICACHE_SET_BITS = 7,   // icache size: 7 = 8KB, 8 = 16KB
     parameter ENABLE_X87 = 0,
     parameter ENABLE_DEVICE_MMIO = 0,
@@ -394,6 +397,10 @@ wire        dcache_vipt_resolve_valid;
 wire [31:0] dcache_vipt_resolve_phys_addr;
 wire        dcache_vipt_resolve_hit;
 wire [31:0] dcache_vipt_resolve_data;
+wire        dcache_vipt_resolve_fill;   // a direct-load miss may fill at once
+wire        dcache_vipt_fill_start;
+wire        dcache_vipt_fill_resp_valid;
+wire [31:0] dcache_vipt_fill_resp_data;
 wire        vipt_tlb_hit;
 wire [31:0] vipt_tlb_phys_addr;
 wire        vipt_tlb_writable;
@@ -703,7 +710,7 @@ wire       pb_load_ready = !x87_direct_candidate && !d2_vipt_ea_hazard &&
     (!d2_vipt_rmw_candidate ||
      (dcache_vipt_probe_ready && !vipt_load_replay_r.valid && !vipt_load_slow_busy &&
       !rmw_fast_active_r && !mem_servicing)) &&
-    ((z486_pkg::recipe_early_kind(i_bus.entry_point) != RECIPE_EARLY_LOAD &&
+    ((i_bus.recipe_early != RECIPE_EARLY_LOAD &&
       !d2_vipt_candidate) ||
      ((d2_vipt_candidate ? (d2_vipt_load &&
                             (!vipt_load_ex_r.valid || vipt_load_ex_probed_r))
@@ -775,6 +782,7 @@ wire [31:0] pf_flush_addr;          // Prefetch flush address
 memory #(
     .PROTECT_UMA_ROM(PROTECT_UMA_ROM),
     .DCACHE_SET_BITS(DCACHE_SET_BITS),
+    .DCACHE_LINE_WRAP(DCACHE_LINE_WRAP),
     .ICACHE_SET_BITS(ICACHE_SET_BITS),
     .ENABLE_X87(ENABLE_X87),
     .ENABLE_DEVICE_MMIO(ENABLE_DEVICE_MMIO),
@@ -819,6 +827,10 @@ memory #(
     .dcache_vipt_resolve_phys_addr_raw(dcache_vipt_resolve_phys_addr),
     .dcache_vipt_resolve_hit(dcache_vipt_resolve_hit),
     .dcache_vipt_resolve_data(dcache_vipt_resolve_data),
+    .dcache_vipt_resolve_fill(dcache_vipt_resolve_fill),
+    .dcache_vipt_fill_start(dcache_vipt_fill_start),
+    .dcache_vipt_fill_resp_valid(dcache_vipt_fill_resp_valid),
+    .dcache_vipt_fill_resp_data(dcache_vipt_fill_resp_data),
 
     .x87_req_selected(x87_req_selected),
     .x87_req_accepted(x87_req_accepted),
@@ -1832,12 +1844,16 @@ data_access data_access_inst (
     .dcache_vipt_probe_ready(dcache_vipt_probe_ready),
     .dcache_vipt_resolve_data(dcache_vipt_resolve_data),
     .dcache_vipt_resolve_hit(dcache_vipt_resolve_hit),
+    .dcache_vipt_fill_start(dcache_vipt_fill_start),
+    .dcache_vipt_fill_resp_valid(dcache_vipt_fill_resp_valid),
+    .dcache_vipt_fill_resp_data(dcache_vipt_fill_resp_data),
     .dcache_wr_ready(dcache_wr_ready),
     .fast_store_accepted(fast_store_accepted),
     .dcache_vipt_probe_offset(dcache_vipt_probe_offset),
     .dcache_vipt_probe_valid(dcache_vipt_probe_valid),
     .dcache_vipt_resolve_phys_addr(dcache_vipt_resolve_phys_addr),
     .dcache_vipt_resolve_valid(dcache_vipt_resolve_valid),
+    .dcache_vipt_resolve_fill(dcache_vipt_resolve_fill),
     .fast_store_be(fast_store_be),
     .fast_store_valid(fast_store_valid),
     .fast_store_wdata(fast_store_wdata),
@@ -1948,6 +1964,7 @@ data_access data_access_inst (
     .uc_addr_mem_r(uc_addr_mem_r),
     .uc_buscode(uc_buscode),
     .uc_busreq(uc_busreq),
+    .uc_bus_or_dly(uc_bus_or_dly),
     .uc_data_busreq(uc_data_busreq),
     .uc_exec(uc_exec),
     .uc_is_check_write(uc_is_check_write),

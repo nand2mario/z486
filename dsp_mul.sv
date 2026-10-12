@@ -53,30 +53,29 @@ module dsp_mul (
                                          : {1'b0, multiplier[15:0]};
     wire signed [33:0] p16 = a16_s * b16_s;
 
+    // 32-bit: the four partial products are summed in two stages, each a
+    // DSP multiply plus one 64-bit add: the start cycle forms the low pair
+    // (p0 + p1 << 16) and the high pair (p2 << 16 + p3 << 32), the next cycle
+    // adds them.
     reg [1:0] cycle_count;
     reg [63:0] acc;
+    reg [63:0] part_lo;
+    reg [63:0] part_hi;
 
     always_ff @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
             cycle_count <= 2'd0;
             acc <= 64'd0;
+            part_lo <= 64'd0;
+            part_hi <= 64'd0;
             active <= 1'b0;
         end else if (start && cycle_count == 2'd0 && op_size == 2'd2) begin
-            // Cycle 0: Start 32-bit multiply, load p0
-            acc <= {32'd0, p0[31:0]};  // p0 is always positive, take lower 32 bits
+            part_lo <= {32'd0, p0[31:0]} + {{16{p1[33]}}, p1, 16'b0};
+            part_hi <= {{16{p2[33]}}, p2, 16'b0} + {p3[31:0], 32'b0};
             cycle_count <= 2'd1;
             active <= 1'b1;
         end else if (cycle_count == 2'd1) begin
-            // Cycle 1: Add p1 << 16 (sign-extend p1 to 48 bits, then shift)
-            acc <= acc + {{16{p1[33]}}, p1, 16'b0};
-            cycle_count <= 2'd2;
-        end else if (cycle_count == 2'd2) begin
-            // Cycle 2: Add p2 << 16
-            acc <= acc + {{16{p2[33]}}, p2, 16'b0};
-            cycle_count <= 2'd3;
-        end else if (cycle_count == 2'd3) begin
-            // Cycle 3: Add p3 << 32
-            acc <= acc + {p3[31:0], 32'b0};
+            acc <= part_lo + part_hi;
             cycle_count <= 2'd0;
             active <= 1'b0;
         end
@@ -89,8 +88,8 @@ module dsp_mul (
         end else begin
             // Done pulses high when:
             // - 8/16-bit: one cycle after start
-            // - 32-bit: when cycle_count transitions from 3 to 0
-            done_r <= (start && op_size != 2'd2) || (cycle_count == 2'd3);
+            // - 32-bit: one cycle after the two partial sums are added
+            done_r <= (start && op_size != 2'd2) || (cycle_count == 2'd1);
         end
     end
 

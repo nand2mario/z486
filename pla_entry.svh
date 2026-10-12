@@ -603,7 +603,7 @@ function automatic logic [6:0] pla_group_lookup(
         11'b?_01101011_?_0: pla_group_lookup = 7'b1001001;
         11'b?_10000000_?_0: pla_group_lookup = 7'b1000110;
         11'b?_10000001_?_0: pla_group_lookup = 7'b1000110;
-        11'b?_10000010_?_0: pla_group_lookup = 7'b1000110;
+        11'b?_10000010_?_0: pla_group_lookup = 7'b1111101;
         11'b?_10000011_?_0: pla_group_lookup = 7'b1000110;
         11'b?_10000100_?_0: pla_group_lookup = 7'b1000111;
         11'b?_10000101_?_0: pla_group_lookup = 7'b1000111;
@@ -630,7 +630,7 @@ function automatic logic [6:0] pla_group_lookup(
         11'b?_11010011_?_0: pla_group_lookup = 7'b1011010;
         11'b?_11011000_?_0: pla_group_lookup = 7'b1101000;
         11'b?_11011001_?_0: pla_group_lookup = 7'b1101011;
-        11'b?_11011010_?_0: pla_group_lookup = 7'b1101000;
+        11'b?_11011010_?_0: pla_group_lookup = 7'b1111111;
         11'b?_11011011_?_0: pla_group_lookup = 7'b1110111;
         11'b?_11011100_?_0: pla_group_lookup = 7'b1110110;
         11'b?_11011101_?_0: pla_group_lookup = 7'b1101010;
@@ -652,8 +652,8 @@ function automatic logic [6:0] pla_group_lookup(
         11'b?_00000011_1_1: pla_group_lookup = 7'b1100011;
         11'b?_00010000_?_1: pla_group_lookup = 7'b1001010;
         11'b?_00010001_?_1: pla_group_lookup = 7'b1001010;
-        11'b?_00010010_?_1: pla_group_lookup = 7'b1001011;
-        11'b?_00010011_?_1: pla_group_lookup = 7'b1001011;
+        11'b?_00010010_?_1: pla_group_lookup = 7'b1111110;
+        11'b?_00010011_?_1: pla_group_lookup = 7'b1111110;
         11'b?_00100000_?_1: pla_group_lookup = 7'b1110011;
         11'b?_00100001_?_1: pla_group_lookup = 7'b1110101;
         11'b?_00100010_?_1: pla_group_lookup = 7'b1110010;

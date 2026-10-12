@@ -204,6 +204,7 @@ logic        muldiv_counter_early_exit;
 logic        muldiv_quotient_zero;
 logic [5:0]  muldiv_div_flags;
 logic        muldiv_flag_overflow;
+logic        muldiv_imul_overflow;
 
 logic sh_flags_commit;
 logic sh_flags_we_zsp;
@@ -1351,6 +1352,10 @@ always_ff @(posedge clk) begin
                     eflags[0]  <= muldiv_flag_overflow;
                     eflags[11] <= muldiv_flag_overflow;
                 end
+                ALUJMP_USTEP_IMUL_FLAGS: begin
+                    eflags[0]  <= muldiv_imul_overflow;
+                    eflags[11] <= muldiv_imul_overflow;
+                end
                 default: ;
             endcase
 
@@ -1685,7 +1690,8 @@ mul_div mul_div_inst (
     .div_overflow(div_overflow),
     .div_quotient_zero(muldiv_quotient_zero),
     .div_flags(muldiv_div_flags),
-    .mul_flag_overflow(muldiv_flag_overflow)
+    .mul_flag_overflow(muldiv_flag_overflow),
+    .imul_product_overflow(muldiv_imul_overflow)
 );
 
 endmodule

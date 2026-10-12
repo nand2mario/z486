@@ -28,7 +28,8 @@ module mul_div
     output logic        div_overflow,
     output logic        div_quotient_zero,
     output logic [5:0]  div_flags,          // {OF,SF,ZF,AF,PF,CF} of the last divide step
-    output logic        mul_flag_overflow
+    output logic        mul_flag_overflow,
+    output logic        imul_product_overflow // high product != sign of the low product
 );
 
 localparam logic DIV_OP_MASK   = 1'b0;
@@ -67,6 +68,9 @@ wire        mul_start = exec && mul_is_active_op && !dsp_active &&
                         !dsp_completed && !dsp_done;
 
 assign result = result_r;
+// The DSP product puts the low half's sign bit at bit 31 for every size.
+assign imul_product_overflow =
+    mul_overflow_by_size(mul_upper, is_signed_mul && mul_product[31], op_size);
 assign counter_early_exit = dsp_done && repeat_active && mul_is_active_op;
 assign div_quotient_zero = div_op_by_size(DIV_OP_MASK, divtmp, op_size) == 32'd0;
 

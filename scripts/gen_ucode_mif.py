@@ -12,7 +12,7 @@ import argparse
 from pathlib import Path
 
 
-ROM_DEPTH = 2560
+ROM_DEPTH = 2560          # UCODE_ROM_DEPTH in z486_pkg.sv
 UCODE_BITS = 40
 
 

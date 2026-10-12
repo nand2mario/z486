@@ -74,7 +74,8 @@ logic jcc_issue_valid_r;
 // Recipe classification and active execution state
 //=============================================================================
 
-assign issue_recipe = recipe_metadata(issue_instr);
+// Registered at the D1 handoff from the decode ROMs' recipe ID.
+assign issue_recipe = issue_instr.recipe;
 assign issue_hardwired = issue_recipe.hardwired && !disabled;
 assign x87_direct_candidate =
     issue_recipe.commit_sel == RECIPE_ACTION_X87_DIRECT && !disabled;
@@ -220,7 +221,7 @@ always_ff @(posedge clk)
 function automatic logic pb_b1_type(input dec_entry_t e, input recipe_meta_t r);
     logic [2:0] k;
     begin
-        k = recipe_early_kind(e.entry_point);
+        k = e.recipe_early;
         pb_b1_type = r.hardwired &&
                      ((k == RECIPE_EARLY_BRANCH) ||
                       (e.rel_branch_kind == REL_BRANCH_CALL) ||

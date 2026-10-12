@@ -20,7 +20,9 @@ from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
 
-ROM_DEPTH = 2560
+BASE_DEPTH = 2560          # Extracted 80386 CROM words (000-9FF).
+ROM_DEPTH = 2560          # ROM words; grow in 512-word steps (UCODE_ROM_DEPTH too)
+                          # when optimizer-owned words go past 9FF.
 UCODE_BITS = 37
 ROM_BITS = 40
 SRC_TMPC = 0x0C            # Canonical CROM source encoding.
@@ -34,10 +36,12 @@ DEST_USTEP_ALU = 0x7E       # Optimizer-owned: commit this word's ALU result to 
 DEST_USTEP_BSWAP = 0x7C     # Optimizer-owned: byte-swap SRCREG into itself.
 ALUJMP_JDESCA = 0x20        # Optimizer-owned: jump if descriptor A bit is set.
 ALUJMP_USTEP_AAD_SHIFT = 0x21 # Optimizer-owned: AAD barrel result and CF clear.
+ALUJMP_USTEP_IMUL_FLAGS = 0x1E # Optimizer-owned: IMUL CF/OF from the DSP product.
 ALUJMP_USTEP_FAULT_DONE = 0x22 # Optimizer-owned: fault delivery completion.
 ALUJMP_PASS = 0x14
 SRC_USTEP_SEG_INDEX = 0x3A  # Optimizer-owned: decoded segment as legacy IRF selector.
 SRC_FOP = 0x3B              # Architectural x87 ESC/ModR/M command.
+SRC_MDTMP = 0x1D            # Multiplier low product / quotient.
 
 # field name -> (shift, width)
 FIELDS = {
@@ -376,6 +380,22 @@ PATCHES = [
     Patch(0x268, "REP STOS: skip redundant per-element count check",
           fields=dict(alusrc=0x3D, aluop=0x47)),
 
+    # ---- IMUL r,r/m(,imm) 17 -> 12 cycles -----------------------------
+    # The 80386 shift-and-add multiplier left the product split across
+    # SIGMA/MDTMP and realigned it in six words (1B6-1BB: LDBSRM, two SHIFTs,
+    # IMCS). The DSP multiplier delivers the low product (MDTMP source) and
+    # the high product (SIGMA) already aligned when the 1B5 IMUL4 repeat
+    # exits, so retire straight away: SRCREG takes the low product and the
+    # new micro-op sets CF = OF = (high product != sign extension of the low
+    # one), as IMCS did. SF/ZF/AF/PF stay unchanged as before.
+    #   patched:  1B5 IMUL4 RPT / 1B6 MDTMP->SRCREG IMUL_FLAGS RNI / 1B7 slot
+    #   was:      1B5 IMUL4 RPT / 1B6-1BB realign + IMCS + RNI / 1BC slot
+    Patch(0x1B6, "IMUL2_COMMON: low product -> SRCREG, CF/OF from the product, RNI",
+          copy_from=0x030, fields=dict(src=SRC_MDTMP, dst=DEST_SRCREG,
+                                       aluop=ALUJMP_USTEP_IMUL_FLAGS, op=0)),
+    Patch(0x1B7, "IMUL2_COMMON: blank RNI delay slot",
+          copy_from=0x030),
+
     # ---- direct ALU usteps -------------------------------------------
     # Every hardwired ALU retire word owns its architectural write through one
     # destination encoding. This replaces the parallel RECIPE_COMMIT_ALU write
@@ -601,9 +621,10 @@ def read_words(path: Path) -> list[int]:
         if not 0 <= word < (1 << UCODE_BITS):
             raise ValueError(f"{path}:{lineno}: word out of {UCODE_BITS}-bit range: 0x{word:x}")
         words.append(word)
-    if len(words) != ROM_DEPTH:
-        raise ValueError(f"{path}: expected {ROM_DEPTH} words, found {len(words)}")
-    return words
+    if len(words) != BASE_DEPTH:
+        raise ValueError(f"{path}: expected {BASE_DEPTH} words, found {len(words)}")
+    # Words beyond the extracted CROM start as the CROM's unused-word value.
+    return words + [(1 << UCODE_BITS) - 1] * (ROM_DEPTH - BASE_DEPTH)
 
 
 def render_hex(words: list[int]) -> str:

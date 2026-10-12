@@ -17,10 +17,10 @@ module gen_pla_entry_rom;
         for (a10 = 0; a10 < N; a10 = a10 + 1)
             rom[a10] = {entry(a10[9:0], 1'b1, 1'b1), entry(a10[9:0], 1'b1, 1'b0),
                         entry(a10[9:0], 1'b0, 1'b1), entry(a10[9:0], 1'b0, 1'b0)};
-        $writememh("pla_entry_rom.hex", rom);
+        $writememh("pla_entry_base.hex", rom);
 
         // 2. Exhaustive check: read back, compare every lane to the function.
-        $readmemh("pla_entry_rom.hex", back);
+        $readmemh("pla_entry_base.hex", back);
         mism = 0;
         for (a10 = 0; a10 < N; a10 = a10 + 1)
             for (d32 = 0; d32 < 2; d32 = d32 + 1)
@@ -35,7 +35,7 @@ module gen_pla_entry_rom;
                     end
                 end
 
-        $display("Wrote pla_entry_rom.hex (%0d x 64-bit entries)", N);
+        $display("Wrote pla_entry_base.hex (%0d x 64-bit entries)", N);
         $display("Exhaustive check: %0d / %0d mismatches", mism, N*4);
         if (mism == 0)
             $display("PASS: ROM image == pla_entry_lookup for ALL %0d {addr,d32,pe}", N*4);

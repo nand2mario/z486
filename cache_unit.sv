@@ -7,6 +7,7 @@ module cache_unit
 #(
     parameter PROTECT_UMA_ROM = 0,
     parameter DCACHE_SET_BITS = 7,
+    parameter DCACHE_LINE_WRAP = 0,
     parameter ICACHE_SET_BITS = 7,
     parameter ENABLE_DEVICE_MMIO = 0,
     parameter [31:0] DEVICE_MMIO_MASK = 32'hff00_0000
@@ -47,6 +48,10 @@ module cache_unit
     input  logic [31:0] dcache_vipt_resolve_phys_addr_raw,
     output logic dcache_vipt_resolve_hit,
     output logic [31:0] dcache_vipt_resolve_data,
+    input  logic dcache_vipt_resolve_fill,      // a miss may fill at once
+    output logic dcache_vipt_fill_start,        // the miss's fill started
+    output logic dcache_vipt_fill_resp_valid,   // its missing dword
+    output logic [31:0] dcache_vipt_fill_resp_data,
 
     // Paging unit: instruction line request (prefetch)
     input  logic icache_req_valid,
@@ -241,7 +246,8 @@ end
 
 l1_cache #(
     .PROTECT_UMA_ROM(PROTECT_UMA_ROM),
-    .SET_BITS(DCACHE_SET_BITS)
+    .SET_BITS(DCACHE_SET_BITS),
+    .LINE_WRAP(DCACHE_LINE_WRAP)
 ) dcache_inst (
     .clk(clk),
     .reset(!reset_n),
@@ -275,6 +281,11 @@ l1_cache #(
     .vipt_resolve_valid(dcache_vipt_resolve_valid),
     .vipt_resolve_data(dcache_vipt_resolve_data),
     .vipt_resolve_hit(dcache_vipt_resolve_hit_cache),
+    // Device windows are not cacheable: their misses take the CPU port.
+    .vipt_resolve_fill(dcache_vipt_resolve_fill && !dcache_vipt_is_device_mmio),
+    .vipt_fill_start(dcache_vipt_fill_start),
+    .vipt_fill_resp_valid(dcache_vipt_fill_resp_valid),
+    .vipt_fill_resp_data(dcache_vipt_fill_resp_data),
     .mem_addr(dcache_mem_addr),
     .mem_din(dcache_mem_din),
     .mem_dout(din),

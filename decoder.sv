@@ -101,7 +101,11 @@ wire [7:0] modrm  = k1q[15:8];
 wire [7:0] sib_b  = k1q[23:16];
 wire       data32 = code32_r ^ prefix_66;
 wire       addr32 = code32_r ^ prefix_67;
-wire [15:0] entry_rom_sel;
+// A decode-ROM slot: {recipe ID, 80386 PLA bits 15:12, effective entry}
+// (scripts/gen_recipe_rom.py).
+localparam int ENTRY_SLOT_BITS = 16 + RECIPE_ID_BITS;
+logic [ENTRY_SLOT_BITS-1:0] entry_rom_sel;
+logic [ENTRY_SLOT_BITS-1:0] group_rom_sel;
 
 wire consume_prefix = !prefix_0f && is_prefix(opcode) &&
                       (k1q_avail >= 6'd1);
@@ -113,9 +117,9 @@ logic [2:0]    struct_len;
 // Some simulators do not include signals referenced only inside a task in an
 // always_comb sensitivity set. Pass the task's live decode inputs explicitly
 // so structural decode is reevaluated when the D1 window advances.
-wire [53:0] struct_work_inputs = {
+wire [53+16+2*RECIPE_ID_BITS:0] struct_work_inputs = {
     opcode, modrm, sib_b, prefix_0f, prefix_rep, prefix_count, data32, addr32,
-    prefix_rep_lock, prefix_seg, entry_rom_sel, pe_enable
+    prefix_rep_lock, prefix_seg, entry_rom_sel, group_rom_sel, pe_enable
 };
 always_comb build_struct_work(struct_work_inputs, struct_work, struct_len);
 
@@ -163,49 +167,72 @@ end
 
 wire [9:0] entry_rom_addr = {k1q_early[7:0],
                              prefix_rep_early, prefix_0f_early};
-`Z486_BLOCK_RAM reg [63:0] entry_rom [0:1023];
+`Z486_BLOCK_RAM reg [4*ENTRY_SLOT_BITS-1:0] entry_rom [0:1023];
 initial $readmemh("pla_entry_rom.hex", entry_rom);
-reg [63:0] entry_rom_q;
+reg [4*ENTRY_SLOT_BITS-1:0] entry_rom_q;
 always_ff @(posedge clk)
     entry_rom_q <= entry_rom[entry_rom_addr];
 
-reg [63:0] entry_rom_hold_r;
+// The second-level group entries are preread the same way, from the
+// predicted opcode's group row (as in 16-bit protected mode, which keeps every
+// group distinct) and the predicted ModR/M.reg and memory bit. A held window
+// was predicted to hand off, so its ModR/M byte was already in view.
+wire [6:0] group_early = pla_group_lookup({1'b0, k1q_early[7:0], 1'b1,
+                                           prefix_0f_early});
+wire [9:0] group_rom_addr = {group_early[5:0], k1q_early[13:11],
+                             (k1q_early[15:14] != 2'b11)};
+`Z486_BLOCK_RAM reg [4*ENTRY_SLOT_BITS-1:0] group_entry_rom [0:1023];
+initial $readmemh("pla_group_entry.hex", group_entry_rom);
+reg [4*ENTRY_SLOT_BITS-1:0] group_rom_q;
+always_ff @(posedge clk)
+    group_rom_q <= group_entry_rom[group_rom_addr];
+
+reg [4*ENTRY_SLOT_BITS-1:0] entry_rom_hold_r;
+reg [4*ENTRY_SLOT_BITS-1:0] group_rom_hold_r;
 reg        entry_rom_use_q_r;
 always_ff @(posedge clk or negedge reset_n) begin
     if (!reset_n) begin
-        entry_rom_hold_r <= 64'd0;
+        entry_rom_hold_r <= '0;
+        group_rom_hold_r <= '0;
         entry_rom_use_q_r <= 1'b0;
     end else begin
-        if (entry_rom_use_q_r)
+        if (entry_rom_use_q_r) begin
             entry_rom_hold_r <= entry_rom_q;
+            group_rom_hold_r <= group_rom_q;
+        end
         entry_rom_use_q_r <= q_flush || (k1p_adv == k1p_preread_adv);
     end
 end
-wire [63:0] entry_rom_current = entry_rom_use_q_r
+wire [4*ENTRY_SLOT_BITS-1:0] entry_rom_current = entry_rom_use_q_r
                               ? entry_rom_q : entry_rom_hold_r;
-assign entry_rom_sel = entry_rom_current[{data32, pe_enable}*16 +: 16];
+wire [4*ENTRY_SLOT_BITS-1:0] group_rom_current = entry_rom_use_q_r
+                              ? group_rom_q : group_rom_hold_r;
+// An explicit 4:1 select: a variable part-select with a non-power-of-two
+// stride synthesizes as a shifter.
+always_comb begin
+    unique case ({data32, pe_enable})
+        2'd0: entry_rom_sel = entry_rom_current[0*ENTRY_SLOT_BITS +: ENTRY_SLOT_BITS];
+        2'd1: entry_rom_sel = entry_rom_current[1*ENTRY_SLOT_BITS +: ENTRY_SLOT_BITS];
+        2'd2: entry_rom_sel = entry_rom_current[2*ENTRY_SLOT_BITS +: ENTRY_SLOT_BITS];
+        default: entry_rom_sel = entry_rom_current[3*ENTRY_SLOT_BITS +: ENTRY_SLOT_BITS];
+    endcase
+    unique case ({data32, pe_enable})
+        2'd0: group_rom_sel = group_rom_current[0*ENTRY_SLOT_BITS +: ENTRY_SLOT_BITS];
+        2'd1: group_rom_sel = group_rom_current[1*ENTRY_SLOT_BITS +: ENTRY_SLOT_BITS];
+        2'd2: group_rom_sel = group_rom_current[2*ENTRY_SLOT_BITS +: ENTRY_SLOT_BITS];
+        default: group_rom_sel = group_rom_current[3*ENTRY_SLOT_BITS +: ENTRY_SLOT_BITS];
+    endcase
+end
 
-// The first-level group code already encodes data-size and opcode-map mode.
-// Keep the ModR/M-dependent second-level entry table in an asynchronous ROM so
-// Quartus can constant-fold it as one compact lookup rather than retaining the
-// original deep priority PLA on the D1 -> microcode-address cone.
-`Z486_DISTRIBUTED_RAM reg [15:0] group_entry_rom [0:1023];
-initial $readmemh("pla_group_entry.hex", group_entry_rom);
 
 decoder_work_t handoff_work;
 always_comb begin
     handoff_work = struct_work.need_sib ? capture_sib(struct_work, sib_b)
                                         : struct_work;
 end
-wire [11:0] handoff_entry_point = recipe_effective_entry(
-    handoff_work.entry.entry_point,
-    handoff_work.entry.opcode,
-    handoff_work.entry.modrm);
 decoder_work_t handoff_d2;
 always_comb begin
     handoff_d2 = handoff_work;
-    handoff_d2.entry.entry_point = handoff_entry_point;
-    handoff_d2.entry.ucode_action = recipe_action(handoff_entry_point);
     // Resolve the direct ALU memory-load class in D1. Re-decoding opcode and
     // ModR/M from i_bus put this classification in series with VIPT hit
     // resolution and same-edge chained issue on the microcode-ROM address path.
@@ -522,7 +549,7 @@ always_comb begin
     push_entry.displacement = d2_final.entry.displacement;
     // Literals do not affect recipe register dependencies. Use the registered
     // D1 skeleton so a second literal phase cannot enter this hazard path.
-    push_entry.recipe_gpr_read_mask = recipe_gpr_read_mask(skel.entry);
+    push_entry.recipe_gpr_read_mask = recipe_read_mask(skel.entry);
 end
 
 assign d2_entry = push_entry;
@@ -546,6 +573,21 @@ recipe_meta_t push_recipe_fc;
 assign push_recipe_fc = recipe_metadata(push_entry);
 reg recipe_cov_en = 1'b0;
 initial recipe_cov_en = $test$plusargs("recipe_cov");
+// The decode-ROM recipe (gen_recipe_rom.py) must equal the specification.
+always @(posedge clk) begin
+    if (reset_n && d2_done &&
+        ((push_entry.recipe !== push_recipe_fc) ||
+         (push_entry.recipe_early !== push_recipe_early) ||
+         (push_entry.ucode_action !== recipe_action(push_entry.entry_point)) ||
+         (push_recipe_fc.hardwired &&
+          (push_entry.recipe_gpr_read_mask !== recipe_gpr_read_mask(push_entry)))))
+        $fatal(1, "decode-ROM recipe mismatch: entry=%03x opcode=%02x modrm=%02x 0f=%b rl=%0d rom=%04x/%0d/%0d/%02x spec=%04x/%0d/%0d/%02x",
+               push_entry.entry_point, push_entry.opcode, push_entry.modrm,
+               push_entry.has_0f, push_entry.rep_lock, push_entry.recipe,
+               push_entry.recipe_early, push_entry.ucode_action,
+               push_entry.recipe_gpr_read_mask, push_recipe_fc, push_recipe_early,
+               recipe_action(push_entry.entry_point), recipe_gpr_read_mask(push_entry));
+end
 always @(posedge clk) begin
     if (reset_n && d2_done && push_recipe_fc.hardwired) begin
         if (push_recipe_early == RECIPE_EARLY_SEQ)
@@ -624,16 +666,16 @@ assign decq_has_jmp_call =
 //=============================================================================
 
 task automatic build_struct_work(
-    input logic [53:0]    sensitivity_inputs,
+    input logic [53+RECIPE_ID_BITS:0] sensitivity_inputs,
     output decoder_work_t w,
     output logic [2:0]    s_len
 );
     logic [11:0] ctl_bits;
-    logic [15:0] entry_first;
-    logic [15:0] entry_final;
+    logic [ENTRY_SLOT_BITS-1:0] entry_first;
+    logic [ENTRY_SLOT_BITS-1:0] entry_final;
+    recipe_rom_t rom_recipe;
     logic [6:0]  group_dec;
     logic        entry_group;
-    logic [5:0]  group_code;
     logic        has_modrm;
     logic        has_sib;
     logic [2:0]  disp_size;
@@ -684,12 +726,8 @@ task automatic build_struct_work(
         // Decode group validity and row in parallel with entry_first. This
         // keeps the group select off the first-level entry PLA result.
         group_dec = pla_group_lookup({data32, opcode, pe_enable, prefix_0f});
-        group_code = group_dec[5:0];
         entry_group = group_dec[6] && has_modrm;
-        entry_final = entry_group ?
-            group_entry_rom[{group_code, modrm[5:3],
-                             (modrm[7:6] != 2'b11)}] :
-            entry_first;
+        entry_final = entry_group ? group_rom_sel : entry_first;
         invalid_lock = check_lock_invalid(prefix_rep_lock, prefix_0f, opcode,
                                           has_modrm, modrm);
         instr_bswap = prefix_0f && (opcode[7:3] == 5'b11001);
@@ -753,6 +791,21 @@ task automatic build_struct_work(
                             instr_invd) ? 1'b0 : entry_final[13];
         w.entry.stack_dir = (invalid_lock || instr_bswap || instr_xadd || instr_cmpxchg ||
                              instr_invd) ? 1'b0 : entry_final[12];
+        // The decode ROMs hold the effective (overlay-resolved) entry and its
+        // recipe ID. A REP or LOCK prefix leaves no hardwired recipe; an
+        // invalid LOCK's #UD entry has no early kind or entry action. ADC/SBB
+        // read the carry flag (reads_carry); the operand-byte bit is the
+        // opcode's.
+        rom_recipe = recipe_id_decode(entry_final[ENTRY_SLOT_BITS-1:16]);
+        w.entry.recipe = (prefix_rep_lock == PREFIX_NOREPLOCK)
+                       ? rom_recipe.meta : '0;
+        w.entry.recipe.reads_flags = w.entry.recipe.reads_flags ||
+            ((prefix_rep_lock == PREFIX_NOREPLOCK) && rom_recipe.reads_carry &&
+             ((w.entry.decoded_alu_op == ALU_ADC) ||
+              (w.entry.decoded_alu_op == ALU_SBB)));
+        w.entry.recipe.op_byte = recipe_op_byte(prefix_0f, opcode);
+        w.entry.recipe_early = invalid_lock ? RECIPE_EARLY_SEQ : rom_recipe.early;
+        w.entry.ucode_action = invalid_lock ? RECIPE_ACTION_NONE : rom_recipe.action;
         // BSWAP has a fixed r32 operand even in a 16-bit code segment.
         if (instr_bswap)
             w.entry.data32 = 1'b1;
@@ -915,14 +968,61 @@ endtask
 // is live. The X guard excludes only the startup preread.
 wire [15:0] pla_entry_now =
     pla_entry_lookup({data32, opcode, prefix_rep, pe_enable, 1'b1, prefix_0f});
+// The preread group entry is the direct lookup of the D1 window.
+reg [4*ENTRY_SLOT_BITS-1:0] group_rom_ref [0:1023];
+initial $readmemh("pla_group_entry.hex", group_rom_ref);
+wire [6:0]  group_row_now = pla_group_lookup({1'b0, opcode, 1'b1, prefix_0f});
+wire [6:0]  group_dec_now = pla_group_lookup({data32, opcode, pe_enable, prefix_0f});
+wire [11:0] group_ctl_now = pla_control_opcode_lookup(prefix_0f, opcode);
+wire [4*ENTRY_SLOT_BITS-1:0] group_ref_word =
+    group_rom_ref[{group_row_now[5:0], modrm[5:3], (modrm[7:6] != 2'b11)}];
+always_ff @(posedge clk) begin
+    if (reset_n && d1_handoff && group_dec_now[6] && group_ctl_now[2] &&
+        !group_ctl_now[0] &&
+        (group_rom_sel !==
+         group_ref_word[{data32, pe_enable}*ENTRY_SLOT_BITS +: ENTRY_SLOT_BITS]))
+        $fatal(1, "group ROM preread mismatch: op=%02x modrm=%02x 0f=%b rom=%06x ref=%06x",
+               opcode, modrm, prefix_0f, group_rom_sel,
+               group_ref_word[{data32, pe_enable}*ENTRY_SLOT_BITS +: ENTRY_SLOT_BITS]);
+end
+
+// The ROM holds the PLA entry, or its opcode-qualified overlay entry.
 always_ff @(posedge clk) begin
     if (reset_n && !q_flush &&
         (^{entry_rom_sel, pla_entry_now} !== 1'bx) &&
-        (entry_rom_sel !== pla_entry_now))
+        ((entry_rom_sel[15:12] !== pla_entry_now[15:12]) ||
+         ((entry_rom_sel[11:0] !== pla_entry_now[11:0]) &&
+          (entry_rom_sel[11:0] !==
+           recipe_effective_entry(pla_entry_now[11:0], opcode, 8'h00)))))
         $fatal(1, "entry ROM mismatch: op=%02x rom=%04x pla=%04x",
-               opcode, entry_rom_sel, pla_entry_now);
+               opcode, entry_rom_sel[15:0], pla_entry_now);
 end
 // synthesis translate_on
+
+// Byte-operand recipes: the hazard checks address byte registers by
+// {high, reg[1:0]}.
+function automatic logic recipe_op_byte(input logic       has_0f_in,
+                                        input logic [7:0] opcode_in);
+    if (opcode_in[7:4] == 4'h4 || opcode_in[7:4] == 4'h5)
+        recipe_op_byte = 1'b0;
+    else if (opcode_in[7:4] == 4'hB && !has_0f_in)
+        recipe_op_byte = !opcode_in[3];
+    else
+        recipe_op_byte = !opcode_in[0];
+endfunction
+
+// Architectural GPR inputs of a hardwired recipe, from its operand classes.
+function automatic logic [7:0] recipe_read_mask(input dec_entry_t e);
+    logic [7:0] mask;
+    logic [2:0] dst_idx, src_idx;
+    mask = e.stack_op ? 8'h10 : 8'h00;
+    dst_idx = e.recipe.op_byte ? {1'b0, e.dst_reg_sel[1:0]} : e.dst_reg_sel;
+    src_idx = e.recipe.op_byte ? {1'b0, e.src_reg_sel[1:0]} : e.src_reg_sel;
+    if (e.recipe.reads_dst) mask[dst_idx] = 1'b1;
+    if (e.recipe.reads_src) mask[src_idx] = 1'b1;
+    if (e.recipe.reads_ecx) mask[3'd1] = 1'b1;
+    recipe_read_mask = mask;
+endfunction
 
 function automatic decoder_work_t capture_sib(input decoder_work_t in,
                                               input logic [7:0]   sib_byte);
