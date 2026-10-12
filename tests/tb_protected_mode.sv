@@ -6,7 +6,8 @@
 module tb_protected_mode #(
     parameter ENABLE_X87 = 0,
     parameter MEM_SIZE = 1 << 19,
-    parameter DCACHE_SET_BITS = 7
+    parameter DCACHE_SET_BITS = 7,
+    parameter DCACHE_LINE_WRAP = 1
 );
     // Segment cache array indices (from z486_pkg)
     localparam SEG_ES = 0, SEG_CS = 1, SEG_SS = 2, SEG_DS = 3;
@@ -39,7 +40,8 @@ module tb_protected_mode #(
     // Instantiate the z486 CPU
     z486 #(
         .ENABLE_X87(ENABLE_X87),
-        .DCACHE_SET_BITS(DCACHE_SET_BITS)
+        .DCACHE_SET_BITS(DCACHE_SET_BITS),
+        .DCACHE_LINE_WRAP(DCACHE_LINE_WRAP)
     ) dut (
         .clk(clk),
         .reset_n(reset_n),
@@ -59,6 +61,8 @@ module tb_protected_mode #(
         .intr(intr),
         .nmi(nmi),
         .inta(inta),
+        .x87_ferr(),
+        .x87_ignne(1'b0),
         .snoop_addr(32'h0),
         .snoop_valid(1'b0),
         .a20_enable(1'b1),
@@ -633,6 +637,11 @@ module tb_protected_mode #(
     reg [7:0] rd_remaining = 8'd0;
     reg [7:0] rd_index = 8'd0;
     reg rd_io_pending = 1'b0;
+    // A 4-dword read is a cache line: return it in wrapping order from the
+    // requested dword (critical word first; in order for an aligned request).
+    reg rd_line = 1'b0;
+    // Idle cycles between dwords (+mem_beat_gap=N; 1 models x16 SDRAM).
+    int mem_beat_gap = 0;
     wire rd_busy = (rd_wait_count != 0) || (rd_remaining != 0) || inta_resp_pending;
 
     // Memory behavior with configurable latency (ready/valid protocol)
@@ -657,11 +666,14 @@ module tb_protected_mode #(
             rd_wait_count <= rd_wait_count - 1;
         end else if (rd_remaining != 8'd0) begin
             reg [31:0] byte_addr;
-            byte_addr = rd_byte_addr + {22'd0, rd_index, 2'b00};
+            byte_addr = rd_line
+                ? {rd_byte_addr[31:4], rd_byte_addr[3:2] + rd_index[1:0], 2'b00}
+                : rd_byte_addr + {22'd0, rd_index, 2'b00};
             if (byte_addr >= MEM_SIZE)
                 byte_addr = byte_addr & (MEM_SIZE - 1);
 
             resp_valid <= 1'b1;
+            rd_wait_count <= mem_beat_gap;
             if (rd_io_pending) begin
                 din <= (rd_byte_addr[15:0] == 16'h00FC) ? cycle : 32'hFFFFFFFF;
             end else begin
@@ -713,8 +725,9 @@ module tb_protected_mode #(
                 reg [7:0] burst_len;
                 burst_len = io ? 8'd1 : burstcount;
                 rd_byte_addr <= {addr, 2'b00};
+                rd_line <= !io && (burst_len == 8'd4);
                 rd_index <= (mem_latency <= 1) ? 8'd1 : 8'd0;
-                rd_wait_count <= (mem_latency <= 1) ? 0 : (mem_latency - 1);
+                rd_wait_count <= (mem_latency <= 1) ? mem_beat_gap : (mem_latency - 1);
                 rd_io_pending <= io;
 
                 if (!io) begin
@@ -1102,6 +1115,7 @@ module tb_protected_mode #(
         // Get max cycles
         if ($value$plusargs("cycles=%d", max_cycles))
             $display("[TB] Max cycles: %0d", max_cycles);
+        void'($value$plusargs("mem_beat_gap=%d", mem_beat_gap));
         if ($value$plusargs("mem_latency=%d", mem_latency))
             $display("[TB] Memory latency: %0d cycles", mem_latency);
         if ($test$plusargs("continue_on_hlt"))

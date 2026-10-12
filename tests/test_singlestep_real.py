@@ -299,15 +299,14 @@ def run_test(test, global_mask, cpu_mode='486', notrace=False):
     _, opcode, data32 = decode_opcode_and_width(nbytes, init_regs)
     is_pushfd = cpu_mode == '486' and opcode == 0x9C and data32
     is_popfd = cpu_mode == '486' and opcode == 0x9D and data32
+    is_popad = cpu_mode == '486' and opcode == 0x61 and data32
     reads = 0
     if nbytes:
         reads = (len(nbytes) + 3) // 4  # Round up to 32-bit reads
 
+    # A 16-bit count of 17..31 is checked too: the shifter models the 386's
+    # dest:src:src (SHLD) and src:src:dest (SHRD) result.
     shxd_count, shxd_width = get_shxd_count_width(nbytes, init_regs)
-    if shxd_count is not None and shxd_width is not None and shxd_count > shxd_width:
-        if VERBOSE:
-            print(f"Skipping SHxD test (count {shxd_count} > width {shxd_width})")
-        return True, [], "SKIP: SHxD count > width"
 
     # Skip POP tests that expect segment limit faults
     # In real mode, stack accesses with 16-bit addressing wrap (8086 compat)
@@ -474,6 +473,13 @@ def run_test(test, global_mask, cpu_mode='486', notrace=False):
                 popped = sum(init_mem[stack_addr + offset] << (8 * offset)
                              for offset in range(4))
                 expected_val = (expected_val & ~0x00040000) | (popped & 0x00040000)
+
+        # The 386 captures' POPAD on the real-mode (16-bit) stack loads ESP's
+        # high word from the popped ESP slot; the i486 PRM discards that slot,
+        # so only SP advances.
+        if reg == 'esp' and is_popad:
+            expected_val = ((init_regs.get('esp', 0) & 0xFFFF0000) |
+                            (expected_val & 0x0000FFFF))
 
         # Apply mask if available
         mask_val = None

@@ -20,12 +20,11 @@ X87_COMMAND_GEN := $(X87_DIR)/x87_command_decode.svh \
 			$(X87_DIR)/x87_command_decode.mif
 X87_LOGEXP_GEN := $(X87_DIR)/x87_logexp_tables.svh \
 			$(X87_DIR)/x87_logexp_tables.mif
-X87_GEN := $(X87_UCODE_GEN) $(X87_COMMAND_GEN) $(X87_LOGEXP_GEN)
+X87_POLY_GEN := $(X87_DIR)/x87_poly_rom.svh
+X87_GEN := $(X87_UCODE_GEN) $(X87_COMMAND_GEN) $(X87_LOGEXP_GEN) $(X87_POLY_GEN)
 X87_RTL := $(X87_DIR)/x87_pkg.sv \
 			$(X87_DIR)/x87_ucode_pkg.sv \
 			$(X87_DIR)/x87_bridge.sv \
-			$(X87_DIR)/x87_cordic_rom.sv \
-			$(X87_DIR)/x87_cordic_scratch.sv \
 			$(X87_DIR)/x87_ucode_rom.sv \
 			$(X87_DIR)/x87_sequencer.sv \
 			$(X87_DIR)/x87_executor.sv \
@@ -211,29 +210,23 @@ obj_dir/Vtb_x87_sequencer: $(X87_DIR)/x87_ucode.svh $(X87_DIR)/x87_entries.svh \
 obj_dir/Vtb_x87_executor: $(X87_DIR)/x87_ucode.svh $(X87_DIR)/x87_entries.svh \
 		$(X87_DIR)/x87_pkg.sv $(X87_REF_DIR)/x87_roundint.sv \
 		$(X87_REF_DIR)/x87_addsub.sv $(X87_REF_DIR)/x87_mul.sv \
-		$(X87_REF_DIR)/x87_divsqrt.sv $(X87_DIR)/x87_cordic_rom.sv \
-		$(X87_REF_DIR)/x87_cordic_atan_q80.svh \
-		$(X87_REF_DIR)/x87_trans.sv \
+		$(X87_REF_DIR)/x87_divsqrt.sv \
 		$(X87_DIR)/x87_ucode_pkg.sv $(X87_DIR)/x87_ucode_rom.sv \
 		$(X87_DIR)/x87_sequencer.sv $(X87_DIR)/x87_executor.sv \
-		$(X87_DIR)/x87_cordic_scratch.sv \
 		$(TB_X87_EXECUTOR_SRCS) $(CPP_X87_EXECUTOR_SRCS)
 	@echo "Building x87 executor unit test with Verilator..."
 	$(VERILATOR) $(VFLAGS_NOTRACE) --top-module tb_x87_executor \
 		$(X87_DIR)/x87_pkg.sv $(X87_DIR)/x87_ucode_pkg.sv \
 		$(TB_X87_EXECUTOR_SRCS) $(X87_REF_DIR)/x87_roundint.sv \
 		$(X87_REF_DIR)/x87_addsub.sv $(X87_REF_DIR)/x87_mul.sv \
-		$(X87_REF_DIR)/x87_divsqrt.sv $(X87_DIR)/x87_cordic_rom.sv \
-		$(X87_DIR)/x87_cordic_scratch.sv \
-		$(X87_REF_DIR)/x87_trans.sv \
+		$(X87_REF_DIR)/x87_divsqrt.sv \
 		$(X87_DIR)/x87_ucode_rom.sv $(X87_DIR)/x87_sequencer.sv \
 		$(X87_DIR)/x87_executor.sv $(CPP_X87_EXECUTOR_SRCS)
 	@echo "Build complete: obj_dir/Vtb_x87_executor"
 
 obj_dir_x87_testfloat/Vtb_x87_testfloat: \
 		$(X87_DIR)/x87_ucode.svh $(X87_DIR)/x87_entries.svh \
-		$(X87_DIR)/x87_pkg.sv $(X87_DIR)/x87_cordic_rom.sv \
-		$(X87_DIR)/x87_cordic_scratch.sv \
+		$(X87_DIR)/x87_pkg.sv \
 		$(X87_DIR)/x87_ucode_pkg.sv $(X87_DIR)/x87_ucode_rom.sv \
 		$(X87_DIR)/x87_sequencer.sv $(X87_DIR)/x87_executor.sv \
 		$(TB_X87_TESTFLOAT_SRCS) $(CPP_X87_TESTFLOAT_SRCS)
@@ -241,16 +234,14 @@ obj_dir_x87_testfloat/Vtb_x87_testfloat: \
 	$(VERILATOR) $(VFLAGS_NOTRACE) --Mdir obj_dir_x87_testfloat \
 		--top-module tb_x87_testfloat \
 		$(X87_DIR)/x87_pkg.sv $(X87_DIR)/x87_ucode_pkg.sv \
-		$(TB_X87_TESTFLOAT_SRCS) $(X87_DIR)/x87_cordic_rom.sv \
-		$(X87_DIR)/x87_cordic_scratch.sv \
+		$(TB_X87_TESTFLOAT_SRCS) \
 		$(X87_DIR)/x87_ucode_rom.sv $(X87_DIR)/x87_sequencer.sv \
 		$(X87_DIR)/x87_executor.sv $(CPP_X87_TESTFLOAT_SRCS)
 	@echo "Build complete: obj_dir_x87_testfloat/Vtb_x87_testfloat"
 
 obj_dir_x87_core/Vtb_x87_core: $(X87_DIR)/x87_ucode.svh \
 		$(X87_DIR)/x87_entries.svh $(X87_DIR)/x87_pkg.sv \
-		$(X87_DIR)/x87_cordic_rom.sv \
-		$(X87_DIR)/x87_cordic_scratch.sv $(X87_DIR)/x87_ucode_pkg.sv \
+		$(X87_DIR)/x87_ucode_pkg.sv \
 		$(X87_DIR)/x87_ucode_rom.sv $(X87_DIR)/x87_sequencer.sv \
 		$(X87_DIR)/x87_executor.sv \
 		$(X87_DIR)/x87_transfer_fifo.sv \
@@ -262,8 +253,7 @@ obj_dir_x87_core/Vtb_x87_core: $(X87_DIR)/x87_ucode.svh \
 	@echo "Building x87 core unit test with Verilator..."
 	$(VERILATOR) $(VFLAGS_NOTRACE) --Mdir obj_dir_x87_core \
 		--top-module tb_x87_core $(TB_X87_CORE_SRCS) \
-		$(X87_DIR)/x87_pkg.sv $(X87_DIR)/x87_cordic_rom.sv \
-		$(X87_DIR)/x87_cordic_scratch.sv \
+		$(X87_DIR)/x87_pkg.sv \
 		$(X87_DIR)/x87_ucode_pkg.sv $(X87_DIR)/x87_ucode_rom.sv \
 		$(X87_DIR)/x87_sequencer.sv $(X87_DIR)/x87_executor.sv \
 		$(X87_DIR)/x87_transfer_fifo.sv \
@@ -343,7 +333,7 @@ test-x87-core: obj_dir_x87_core/Vtb_x87_core
 
 test-x87-integration: obj_dir_x87/Vtb_protected_mode
 	@echo "Running x87-enabled CPU protocol tests..."
-	Z486_ENABLE_X87=1 Z486_TESTBENCH=$(CURDIR)/obj_dir_x87/Vtb_protected_mode ./test_protected_mode.py x87_protocol x87_env32 x87_arithmetic x87_m32_page_fault x87_heap32 x87_qemu_special x87_qemu_exceptions x87_off_sx
+	Z486_ENABLE_X87=1 Z486_TESTBENCH=$(CURDIR)/obj_dir_x87/Vtb_protected_mode ./test_protected_mode.py x87_protocol x87_env32 x87_arithmetic x87_m32_page_fault x87_heap32 x87_qemu_special x87_qemu_exceptions x87_off_sx x87_387_ops x87_trans_poly x87_bcd_alias
 
 test-x87-integer: obj_dir_x87_int/Vtb_z486
 	@echo "Running integer regressions with x87 enabled..."

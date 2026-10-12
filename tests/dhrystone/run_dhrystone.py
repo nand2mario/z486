@@ -48,7 +48,6 @@ CORE_FILES = {
 
 X87_RTL = [
     "x87_bridge.sv",
-    "x87_cordic_rom.sv",
     "x87_ucode_rom.sv",
     "x87_sequencer.sv",
     "x87_executor.sv",
@@ -65,7 +64,6 @@ LEGACY_X87_RTL = [
     "x87_mul.sv",
     "x87_divsqrt.sv",
     "x87_roundint.sv",
-    "x87_cordic_rom.sv",
     "x87_trans.sv",
     "x87_control.sv",
 ]

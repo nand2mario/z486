@@ -39,7 +39,8 @@ module tb_z486 #(
 
     // Instantiate the z486 CPU
     z486 #(
-        .ENABLE_X87(ENABLE_X87)
+        .ENABLE_X87(ENABLE_X87),
+        .DCACHE_LINE_WRAP(1)
     ) dut (
         .clk(clk),
         .reset_n(reset_n),
@@ -59,6 +60,8 @@ module tb_z486 #(
         .intr(intr),
         .nmi(nmi),
         .inta(inta),
+        .x87_ferr(),
+        .x87_ignne(1'b0),
         .snoop_addr(32'h0),
         .snoop_valid(1'b0),
         .a20_enable(1'b1),
@@ -111,6 +114,8 @@ module tb_z486 #(
     reg [31:0] read_base = 32'h0;
     reg [7:0] read_remaining = 8'd0;
     reg [7:0] read_index = 8'd0;
+    // A 4-dword read is a cache line: wrapping order from the requested dword.
+    reg read_line = 1'b0;
 
     // Memory behavior with same-cycle ready/valid accept when idle.
     always @(posedge clk) begin
@@ -120,7 +125,9 @@ module tb_z486 #(
 
         if (read_active) begin
             reg [31:0] byte_addr;
-            byte_addr = read_base + {22'h0, read_index, 2'b00};
+            byte_addr = read_line
+                ? {read_base[31:4], read_base[3:2] + read_index[1:0], 2'b00}
+                : read_base + {22'h0, read_index, 2'b00};
             resp_valid <= 1'b1;
             din <= {mem[byte_addr+3], mem[byte_addr+2],
                     mem[byte_addr+1], mem[byte_addr+0]};
@@ -153,6 +160,7 @@ module tb_z486 #(
                     ready <= (burst_len <= 8'd1);
                     read_active <= (burst_len > 8'd1);
                     read_base <= byte_addr;
+                    read_line <= (burst_len == 8'd4);
                     read_remaining <= (burst_len > 8'd1) ? (burst_len - 8'd1) : 8'd0;
                     read_index <= 8'd1;
 

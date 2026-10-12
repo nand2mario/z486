@@ -14,7 +14,6 @@ logic [1:0] precision_control;
 logic [1:0] rounding_mode;
 logic quiet_compare;
 logic trans_cosine;
-logic trans_tangent_pair;
 logic trans_atan2;
 x87_reg_t operand;
 x87_reg_t operand_b;
@@ -23,7 +22,6 @@ logic v2_busy;
 logic v2_done;
 logic [2:0] v2_commit;
 x87_reg_t v2_result;
-x87_reg_t v2_auxiliary_result;
 logic [63:0] v2_transfer;
 logic v2_invalid;
 logic v2_inexact;
@@ -119,7 +117,8 @@ always_ff @(posedge clk) begin
             latency_min[active_operation] <= latency;
         if (latency > latency_max[active_operation])
             latency_max[active_operation] <= latency;
-        assert (v2_commit == expected_v2_commit)
+        // TRANS's commit (none for a program) is checked by test_trans_classify.
+        assert ((v2_commit == expected_v2_commit) || (exec_op == X87_ARITH_TRANS))
             else $fatal(1, "commit action mismatch: got %0d expected %0d",
                         v2_commit, expected_v2_commit);
     end
@@ -158,15 +157,6 @@ logic v1_divsqrt_overflow;
 logic v1_divsqrt_underflow;
 logic v1_divsqrt_inexact;
 logic v1_divsqrt_denormal_operand;
-logic v1_trans_start;
-logic v1_trans_busy;
-logic v1_trans_done;
-x87_reg_t v1_trans_result;
-x87_reg_t v1_trans_auxiliary_result;
-logic v1_trans_invalid;
-logic v1_trans_inexact;
-logic v1_trans_denormal_operand;
-logic v1_trans_range_incomplete;
 
 always #5 clk = ~clk;
 
@@ -194,7 +184,6 @@ x87_executor dut (
     .rounding_mode(rounding_mode),
     .quiet_compare(quiet_compare),
     .trans_cosine(trans_cosine),
-    .trans_tangent_pair(trans_tangent_pair),
     .trans_atan2(trans_atan2),
     .operand(operand),
     .operand_b(operand_b),
@@ -203,7 +192,6 @@ x87_executor dut (
     .done(v2_done),
     .commit_action(v2_commit),
     .result(v2_result),
-    .auxiliary_result(v2_auxiliary_result),
     .transfer_out(v2_transfer),
     .invalid(v2_invalid),
     .inexact(v2_inexact),
@@ -274,27 +262,6 @@ x87_divsqrt v1_divide_square_root (
     .denormal_operand(v1_divsqrt_denormal_operand)
 );
 
-x87_trans v1_transcendental (
-    .clk(clk),
-    .reset(reset),
-    .start(v1_trans_start),
-    .cosine(trans_cosine),
-    .tangent_pair(trans_tangent_pair),
-    .atan2_mode(trans_atan2),
-    .precision_control(precision_control),
-    .rounding_mode(rounding_mode),
-    .operand(operand),
-    .operand_b(operand_b),
-    .busy(v1_trans_busy),
-    .done(v1_trans_done),
-    .result(v1_trans_result),
-    .auxiliary_result(v1_trans_auxiliary_result),
-    .invalid(v1_trans_invalid),
-    .inexact(v1_trans_inexact),
-    .denormal_operand(v1_trans_denormal_operand),
-    .range_incomplete(v1_trans_range_incomplete)
-);
-
 task automatic pulse_start(input logic also_v1);
     begin
         @(negedge clk);
@@ -306,68 +273,42 @@ task automatic pulse_start(input logic also_v1);
     end
 endtask
 
-task automatic test_transcendental(
+// TRANS only classifies: special and out-of-range operands commit a result,
+// finite ones finish with no commit (x87_control runs the program).
+task automatic test_trans_classify(
     input x87_reg_t a,
     input x87_reg_t b,
     input logic cosine,
-    input logic tangent_pair,
     input logic atan2_mode,
-    input logic [1:0] precision,
-    input logic [1:0] mode
+    input logic [2:0] expected_commit,
+    input x87_reg_t expected_result,
+    input logic expected_invalid,
+    input logic expected_inexact,
+    input logic expected_range_incomplete
 );
-    x87_reg_t expected_result;
-    x87_reg_t expected_auxiliary;
-    logic expected_invalid;
-    logic expected_inexact;
-    logic expected_denormal;
-    logic expected_range_incomplete;
     begin
         operand = a;
         operand_b = b;
         exec_op = X87_ARITH_TRANS;
         trans_cosine = cosine;
-        trans_tangent_pair = tangent_pair;
         trans_atan2 = atan2_mode;
-        precision_control = precision;
-        rounding_mode = mode;
-        @(negedge clk);
-        start = 1'b1;
-        v1_trans_start = 1'b1;
-        @(negedge clk);
-        start = 1'b0;
-        v1_trans_start = 1'b0;
-        fork
-            begin
-                wait (v1_trans_done);
-                expected_result = v1_trans_result;
-                expected_auxiliary = v1_trans_auxiliary_result;
-                expected_invalid = v1_trans_invalid;
-                expected_inexact = v1_trans_inexact;
-                expected_denormal = v1_trans_denormal_operand;
-                expected_range_incomplete = v1_trans_range_incomplete;
-            end
-            begin
-                wait (v2_done);
-            end
-        join
-        if ((v2_result !== expected_result) ||
-            (tangent_pair &&
-             (v2_auxiliary_result !== expected_auxiliary)) ||
-            (v2_invalid !== expected_invalid) ||
-            (v2_inexact !== expected_inexact) ||
-            (v2_denormal_operand !== expected_denormal) ||
-            (v2_range_incomplete !== expected_range_incomplete)) begin
-            $display("trans cos/tan/atan=%b%b%b precision=%0d mode=%0d",
-                     cosine, tangent_pair, atan2_mode, precision, mode);
-            $display("a=%h b=%h", a, b);
-            $display("v1 result/aux=%h/%h flags=%b%b%b%b",
-                     expected_result, expected_auxiliary, expected_invalid,
-                     expected_inexact, expected_denormal,
+        precision_control = 2'd3;
+        rounding_mode = 2'd0;
+        pulse_start(1'b0);
+        wait (v2_done);
+        if ((v2_commit !== expected_commit) ||
+            ((expected_commit != X87_COMMIT_NONE) &&
+             ((v2_result !== expected_result) ||
+              (v2_invalid !== expected_invalid) ||
+              (v2_inexact !== expected_inexact) ||
+              (v2_range_incomplete !== expected_range_incomplete)))) begin
+            $display("trans cos/atan=%b%b a=%h b=%h", cosine, atan2_mode, a, b);
+            $display("expected commit=%0d result=%h flags=%b%b%b", expected_commit,
+                     expected_result, expected_invalid, expected_inexact,
                      expected_range_incomplete);
-            $display("v2 result/aux=%h/%h flags=%b%b%b%b",
-                     v2_result, v2_auxiliary_result, v2_invalid, v2_inexact,
-                     v2_denormal_operand, v2_range_incomplete);
-            if (!$test$plusargs("trans_continue")) $fatal(1, "x87 transcendental mismatch");
+            $display("got      commit=%0d result=%h flags=%b%b%b", v2_commit,
+                     v2_result, v2_invalid, v2_inexact, v2_range_incomplete);
+            $fatal(1, "x87 transcendental classification mismatch");
         end
     end
 endtask
@@ -668,14 +609,12 @@ initial begin
     v1_add_start = 1'b0;
     v1_mul_start = 1'b0;
     v1_divsqrt_start = 1'b0;
-    v1_trans_start = 1'b0;
     exec_op = X87_CONVERT_FRNDINT;
     integer_size = 2'd2;
     precision_control = 2'd2;
     rounding_mode = 2'd0;
     quiet_compare = 1'b0;
     trans_cosine = 1'b0;
-    trans_tangent_pair = 1'b0;
     trans_atan2 = 1'b0;
     operand = x87_empty();
     operand_b = x87_empty();
@@ -879,53 +818,46 @@ initial begin
     end
     test_divsqrt(x87_one(), x87_zero(1'b0), X87_ARITH_DIV,
                  2'd2, 2'd0);
-    for (mode = 0; mode < 4; mode = mode + 1) begin
-        test_transcendental(x87_from_m64(64'h3fe0_0000_0000_0000),
-                            x87_empty(), 1'b0, 1'b0, 1'b0,
-                            2'd0, 2'(mode)); // sin(0.5)
-        test_transcendental(x87_from_m64(64'hbff0_0000_0000_0000),
-                            x87_empty(), 1'b1, 1'b0, 1'b0,
-                            2'd2, 2'(mode)); // cos(-1)
-        test_transcendental(x87_from_m64(64'h4009_21fb_5444_2d18),
-                            x87_empty(), 1'b0, 1'b1, 1'b0,
-                            2'd2, 2'(mode)); // sin/cos(pi)
-        test_transcendental(x87_from_m64(64'h3fe0_0000_0000_0000),
-                            x87_from_m64(64'h4000_0000_0000_0000),
-                            1'b0, 1'b0, 1'b1,
-                            2'd2, 2'(mode)); // atan2(0.5, 2)
-    end
-    test_transcendental(x87_zero(1'b1), x87_one(),
-                        1'b0, 1'b0, 1'b1, 2'd2, 2'd0);
-    test_transcendental(x87_one(), x87_zero(1'b0),
-                        1'b0, 1'b0, 1'b1, 2'd2, 2'd0);
-    test_transcendental(x87_from_m64(64'h43e0_0000_0000_0000),
-                        x87_empty(), 1'b0, 1'b0, 1'b0, 2'd2, 2'd0);
-    test_transcendental(x87_from_m64(64'h7ff8_1234_5678_9abc),
-                        x87_empty(), 1'b0, 1'b0, 1'b0, 2'd2, 2'd0);
-    // Randomized sweep: arguments from 2^-40 to 2^62 (range reduction over
-    // the whole significand) for sin/cos/tan, then atan2 pairs, all modes.
     begin
-        logic [63:0] trans_seed;
-        logic [63:0] trans_arg;
-        logic [63:0] trans_arg_b;
-        integer trans_case;
-        trans_seed = 64'h9e37_79b9_7f4a_7c15;
-        for (trans_case = 0; trans_case < 400; trans_case = trans_case + 1) begin
-            trans_seed = trans_seed ^ (trans_seed << 13);
-            trans_seed = trans_seed ^ (trans_seed >> 7);
-            trans_seed = trans_seed ^ (trans_seed << 17);
-            trans_arg = {trans_seed[63], 11'(983 + (trans_seed[62:56] % 103)),
-                         trans_seed[51:0]};
-            trans_arg_b = {trans_seed[55], 11'(1013 + (trans_seed[54:50] % 21)),
-                           trans_seed[49:0], trans_seed[63:62]};
-            if (trans_case < 300)
-                test_transcendental(x87_from_m64(trans_arg), x87_empty(),
-                                    trans_seed[1], trans_seed[2] && !trans_seed[1],
-                                    1'b0, 2'd2, trans_seed[4:3]);
-            else
-                test_transcendental(x87_from_m64(trans_arg_b), x87_from_m64(trans_arg),
-                                    1'b0, 1'b0, 1'b1, 2'd2, trans_seed[4:3]);
-        end
+        x87_reg_t pio2;
+        x87_reg_t pi3o4;
+        pio2 = x87_from_m64(64'h3ff9_21fb_5444_2d18);
+        pi3o4 = x87_from_m64(64'h4002_d97c_7f33_21d2);
+        test_trans_classify(x87_from_m64(64'h3fe0_0000_0000_0000), x87_empty(),
+                            1'b0, 1'b0, X87_COMMIT_NONE, x87_empty(),
+                            1'b0, 1'b0, 1'b0);                    // sin(0.5)
+        test_trans_classify(x87_from_m64(64'h3fe0_0000_0000_0000),
+                            x87_from_m64(64'hc000_0000_0000_0000),
+                            1'b0, 1'b1, X87_COMMIT_NONE, x87_empty(),
+                            1'b0, 1'b0, 1'b0);                    // atan2(0.5, -2)
+        test_trans_classify(x87_zero(1'b1), x87_empty(), 1'b0, 1'b0,
+                            X87_COMMIT_REPLACE_ST0, x87_zero(1'b1),
+                            1'b0, 1'b0, 1'b0);                    // sin(-0)
+        test_trans_classify(x87_zero(1'b0), x87_empty(), 1'b1, 1'b0,
+                            X87_COMMIT_REPLACE_ST0, x87_one(),
+                            1'b0, 1'b0, 1'b0);                    // cos(0)
+        test_trans_classify(x87_from_m64(64'h3e10_0000_0000_0000), x87_empty(),
+                            1'b0, 1'b0, X87_COMMIT_REPLACE_ST0,
+                            x87_from_m64(64'h3e10_0000_0000_0000),
+                            1'b0, 1'b1, 1'b0);                    // sin(2^-30)
+        test_trans_classify(x87_from_m64(64'h43e0_0000_0000_0000), x87_empty(),
+                            1'b0, 1'b0, X87_COMMIT_REPLACE_ST0,
+                            x87_from_m64(64'h43e0_0000_0000_0000),
+                            1'b0, 1'b0, 1'b1);                    // sin(2^63)
+        test_trans_classify(x87_from_m64(64'h7ff8_1234_5678_9abc), x87_empty(),
+                            1'b0, 1'b0, X87_COMMIT_REPLACE_ST0,
+                            x87_from_m64(64'h7ff8_1234_5678_9abc),
+                            1'b0, 1'b0, 1'b0);                    // sin(QNaN)
+        test_trans_classify(x87_zero(1'b1), x87_one(), 1'b0, 1'b1,
+                            X87_COMMIT_REPLACE_ST0, x87_zero(1'b1),
+                            1'b0, 1'b0, 1'b0);                    // atan2(-0, 1)
+        test_trans_classify(x87_one(), x87_zero(1'b0), 1'b0, 1'b1,
+                            X87_COMMIT_REPLACE_ST0, pio2,
+                            1'b0, 1'b1, 1'b0);                    // atan2(1, +0)
+        test_trans_classify(x87_from_m64(64'h7ff0_0000_0000_0000),
+                            x87_from_m64(64'hfff0_0000_0000_0000), 1'b0, 1'b1,
+                            X87_COMMIT_REPLACE_ST0, pi3o4,
+                            1'b0, 1'b1, 1'b0);                    // atan2(inf, -inf)
     end
     for (case_index = 0; case_index < 10; case_index = case_index + 1) begin
         test_arithmetic(x87_from_m64(arith_a[case_index]),

@@ -98,6 +98,8 @@ module tb_dhrystone;
         .intr(intr),
         .nmi(nmi),
         .inta(inta),
+        .x87_ferr(),
+        .x87_ignne(1'b0),
 `ifndef DHRY_INTERNAL_CPU_CACHE
         .cache_lookup(cache_lookup),
         .cache_lookup_addr(cache_lookup_addr),

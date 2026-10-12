@@ -246,6 +246,10 @@ start:
 
     ; Unmasked arithmetic does not commit its result. ERROR# remains active
     ; until FWAIT enters vector 16 and the handler clears the exception.
+    ; Vector 16 needs CR0.NE; with NE=0 the error goes to IRQ13 instead.
+    mov eax, cr0
+    or eax, 0x20
+    mov cr0, eax
     fninit
     fldcw word [unmask_divide_by_zero]
     fldz

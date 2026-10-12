@@ -30,7 +30,9 @@ module tb_test386;
     wire        inta;
 
     // Instantiate the z486 CPU
-    z486 dut (
+    z486 #(
+        .DCACHE_LINE_WRAP(1)
+    ) dut (
         .clk(clk),
         .reset_n(reset_n),
         .addr(addr),
@@ -49,6 +51,8 @@ module tb_test386;
         .intr(intr),
         .nmi(nmi),
         .inta(inta),
+        .x87_ferr(),
+        .x87_ignne(1'b0),
         .snoop_addr(32'h0),
         .snoop_valid(1'b0),
         .a20_enable(1'b1),
@@ -88,6 +92,8 @@ module tb_test386;
     reg [7:0] rd_index = 8'd0;
     reg [31:0] rd_byte_addr = 32'h0;
     reg rd_io_pending = 1'b0;
+    // A 4-dword read is a cache line: wrapping order from the requested dword.
+    reg rd_line = 1'b0;
 
     // Memory behavior with 1-cycle ready/valid latency
     always @(posedge clk) begin
@@ -97,7 +103,9 @@ module tb_test386;
 
         if (rd_remaining != 8'd0) begin
             reg [31:0] byte_addr;
-            byte_addr = rd_byte_addr + {22'd0, rd_index, 2'b00};
+            byte_addr = rd_line
+                ? {rd_byte_addr[31:4], rd_byte_addr[3:2] + rd_index[1:0], 2'b00}
+                : rd_byte_addr + {22'd0, rd_index, 2'b00};
             if (byte_addr >= MEM_SIZE)
                 byte_addr = byte_addr & (MEM_SIZE - 1);
             resp_valid <= 1'b1;
@@ -118,6 +126,7 @@ module tb_test386;
                 rd_index <= 8'd0;
                 rd_remaining <= io ? 8'd1 : ((burstcount == 8'd0) ? 8'd1 : burstcount);
                 rd_io_pending <= io;
+                rd_line <= !io && (burstcount == 8'd4);
 
                 if (!io) begin
                     if (byte_addr >= MEM_SIZE)
