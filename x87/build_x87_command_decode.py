@@ -93,7 +93,7 @@ def fields(fop: int) -> dict[str, int]:
         "arithmetic": int(is_addsub(fop) or is_compare(fop) or is_mul(fop) or
                           is_div(fop) or is_memory_math(fop) or
                           fop in (0x1FA, 0x1F2, 0x1F3, 0x1FE, 0x1FF, 0x1FC,
-                                  0x1FB)),
+                                  0x1FB, 0x1F4)),
         "status": int(reads_status(fop) or key == 0x138),
     }
 

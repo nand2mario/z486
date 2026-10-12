@@ -169,7 +169,6 @@ logic                   v2_exec_busy;     // Numeric microsequencer is active.
 logic                   v2_exec_done;     // Registered terminal pulse from executor.
 logic             [2:0] v2_exec_commit;   // Provisional action; control applies exceptions.
 x87_reg_t               v2_exec_result;
-x87_reg_t               v2_exec_auxiliary_result;
 logic            [63:0] v2_exec_transfer_out;
 logic                   v2_exec_invalid;
 logic                   v2_exec_inexact;
@@ -191,12 +190,46 @@ logic [2:0]   arith_dest_index;
 x87_reg_t     arith_operand_a;
 x87_reg_t     arith_operand_b;
 logic         trans_cosine;
-logic         trans_tangent_pair;
 logic         trans_atan2;
 logic         fptan_trans_pending;       // CORDIC tangent pair has not returned.
 logic         fptan_div_pending;         // Shared divide is producing tan = sin/cos.
 logic         fptan_push_after_result;   // Tangent write precedes architectural push 1.0.
 logic         fptan_sincos;              // FSINCOS: push cos(x) instead of 1.0, no divide.
+
+// Transcendental programs (build_x87_poly.py): FSIN/FCOS/FSINCOS/FPTAN/FPATAN
+// of finite, non-special operands run as sequences of the executor's own
+// operations; the executor's TRANS operation only classifies (special results
+// commit directly, the rest finish with no commit and start a program).
+`include "x87_poly_rom.svh"
+typedef enum logic [2:0] {
+    POLY_IDLE,
+    POLY_LOAD_B,       // second input into the scratch
+    POLY_DECODE,       // program word read
+    POLY_FETCH_A,      // predicate; operand A read
+    POLY_FETCH_B,      // operand B read
+    POLY_ISSUE,        // start the executor operation (or AUX)
+    POLY_WAIT          // executor result into the scratch / predicates
+} poly_phase_t;
+poly_phase_t     poly_phase;
+logic [6:0]      poly_pc;
+x87_poly_word_t  poly_word;
+logic [1:0]      poly_quadrant;            // n mod 4 of the pi/2 reduction
+logic            poly_swap;                // atan2: |y| > |x|
+logic [1:0]      poly_id;                  // atan2: reduction table index
+logic            poly_xneg, poly_yneg;
+logic            poly_cosine;
+logic            poly_final;               // the executor runs the last operation
+logic            poly_denormal;            // the classified operand was denormal
+x87_reg_t        poly_aux;                 // cos(x) for FPTAN and FSINCOS
+x87_reg_t        poly_opa;
+x87_reg_t        poly_scratch [0:15];      // temporaries (x87_reg_t, no conversion)
+x87_reg_t        poly_scratch_q;
+x87_reg_t        poly_const_q;
+logic            poly_we;
+logic [3:0]      poly_waddr;
+x87_reg_t        poly_wdata;
+logic [3:0]      poly_saddr;
+logic [5:0]      poly_caddr;
 x87_reg_t     fptan_push_value;          // Value pushed after the ST0 write (1.0 or cos).
 typedef enum logic [2:0] {
     FPREM_IDLE,
@@ -212,6 +245,8 @@ logic [2:0]   fprem_quotient_bits;
 logic         fprem_nearest;             // FPREM1: round the quotient to nearest.
 logic         fyl2xp1_add_pending;       // FYL2XP1: ST0 + 1.0 precedes the FYL2X path.
 x87_reg_t     fyl2xp1_y;                 // FYL2XP1's ST(1), held across the add.
+logic         fxtract_exp_pending;       // FXTRACT: the FILD of the exponent writes here.
+logic [2:0]   fxtract_exp_index;
 typedef enum logic [1:0] {
     FSCALE_IDLE,
     FSCALE_SHIFT,
@@ -271,19 +306,31 @@ assign push_pending_value = x87_from_m80(push_pending_raw);
 wire command_is_arithmetic = command_decode.arithmetic;
 wire v2_exec_math_done = v2_exec_done &&
                             (v2_exec_owner == EXEC_MATH);
-wire trans_done = v2_exec_math_done &&
-                  (v2_exec_op == X87_ARITH_TRANS);
+wire trans_exec_done = v2_exec_math_done &&
+                       (v2_exec_op == X87_ARITH_TRANS);
+// The executor classified a finite operand: a program computes the result.
+wire trans_compute = trans_exec_done && (v2_exec_commit == X87_COMMIT_NONE);
+wire poly_active = (poly_phase != POLY_IDLE);
+wire poly_internal = poly_active && !poly_final;
+wire poly_final_done = v2_exec_math_done && poly_final;
+wire trans_done = (trans_exec_done && !trans_compute) || poly_final_done;
+wire trans_inexact = v2_exec_inexact || poly_final_done;
+wire trans_denormal_operand = v2_exec_denormal_operand ||
+                              (poly_final_done && poly_denormal);
+x87_reg_t trans_aux;
+assign trans_aux = poly_final_done ? poly_aux : x87_one();
 wire math_done = v2_exec_math_done && (fprem_phase == FPREM_IDLE) &&
-                 !(trans_done && fptan_trans_pending) && !fyl2xp1_add_pending;
+                 !(trans_done && fptan_trans_pending) && !fyl2xp1_add_pending &&
+                 !trans_compute && !poly_internal;
 wire math_invalid = v2_exec_invalid;
-wire math_inexact = v2_exec_inexact;
+wire math_inexact = trans_inexact;
 wire [74:0] math_result = v2_exec_result;
 wire math_divide_by_zero = v2_exec_math_done &&
                            v2_exec_divide_by_zero;
 wire math_overflow = v2_exec_math_done && v2_exec_overflow;
 wire math_underflow = v2_exec_math_done && v2_exec_underflow;
 wire math_denormal_operand = v2_exec_math_done &&
-                              v2_exec_denormal_operand;
+                              trans_denormal_operand;
 wire math_range_incomplete = trans_done &&
                              v2_exec_range_incomplete;
 wire math_unmasked_exception =
@@ -705,7 +752,8 @@ wire core_cmd_ready = ((rx_kind == RX_NONE) || restartable_rx_command) &&
                    !fptan_trans_pending && !fptan_div_pending &&
                    !fptan_push_after_result &&
                    (fscale_phase == FSCALE_IDLE) &&
-                   (logexp_phase == LOGEXP_IDLE) && !read_resp_valid;
+                   (logexp_phase == LOGEXP_IDLE) && !poly_active &&
+                   !read_resp_valid;
 // Direct memory commands remain ordered ahead of later bridge commands. Only
 // masked-exception mode permits capture while a predecessor is still active.
 assign direct_m32_ready = !direct_m32_pending && !cmd_valid && queue_safe;
@@ -756,13 +804,14 @@ wire signed [32:0] fscale_scaled_exp =
     $signed({18'b0, fscale_value.exp}) + fscale_delta;
 assign busy_n = !(((v2_exec_owner == EXEC_MATH) &&
                    (v2_exec_pending || v2_exec_busy)) ||
+                  poly_active ||
                   bcd_convert_pending ||
                   (fscale_phase != FSCALE_IDLE) ||
                   (command_pending && command_is_arithmetic));
 // PEREQ releases the 80386 coprocessor-wait microcode as well as requesting
 // operand transfers. Keep it asserted throughout an accepted command because
 // a one-cycle completion pulse can precede the CPU's CORWAIT sample.
-assign pereq = (rx_kind != RX_NONE) ||
+assign pereq = (rx_kind != RX_NONE) || poly_active ||
                ((tx_kind != TX_NONE) && transfer_pop_valid) ||
                direct_m32_pending || command_pending ||
                stack_write_a || stack_write_b ||
@@ -926,7 +975,49 @@ x87_logexp_rom logexp_rom (
     .q(logexp_data)
 );
 
+// Scratch writes: the two inputs when a program starts, then each result.
+always_comb begin
+    poly_we = 1'b0;
+    poly_waddr = 4'd0;
+    poly_wdata = arith_operand_a;
+    if (trans_compute) begin
+        poly_we = 1'b1;
+    end else if (poly_phase == POLY_LOAD_B) begin
+        poly_we = 1'b1;
+        poly_waddr = 4'd1;
+        poly_wdata = arith_operand_b;
+    end else if ((poly_phase == POLY_WAIT) && v2_exec_math_done && !poly_final &&
+                 (poly_word.op != X87_POLY_OP_CMP)) begin
+        poly_we = 1'b1;
+        poly_waddr = poly_word.dest;
+        poly_wdata = v2_exec_result;
+    end
+end
+// Operand reads: A while the predicate is checked, B the cycle after.
+always_comb begin
+    if (poly_phase == POLY_FETCH_B) begin
+        poly_saddr = poly_word.b_index[3:0];
+        poly_caddr = poly_word.b_index + (poly_word.b_id ? {4'd0, poly_id} : 6'd0);
+    end else begin
+        poly_saddr = poly_word.a_index[3:0];
+        poly_caddr = poly_word.a_index + (poly_word.a_id ? {4'd0, poly_id} : 6'd0);
+    end
+end
+always_ff @(posedge clk) begin
+    if (poly_we)
+        poly_scratch[poly_waddr] <= poly_wdata;
+    poly_scratch_q <= poly_scratch[poly_saddr];
+    poly_const_q <= x87_reg_t'(x87_poly_const(poly_caddr));
+end
+x87_reg_t poly_opb_read;
+x87_reg_t poly_opa_read;
+logic [2:0] poly_round_low3;               // n mod 8 of the RND result's magnitude
+assign poly_opb_read = poly_word.b_const ? poly_const_q : poly_scratch_q;
+assign poly_opa_read = poly_word.a_const ? poly_const_q : poly_scratch_q;
+assign poly_round_low3 = x87_integer_low3(v2_exec_result);
+
 wire [1:0] executor_rounding_mode =
+    poly_internal                ? 2'b00 :
     (fprem_phase == FPREM_ROUND) ? (fprem_nearest ? 2'b00 : 2'b11)
                                  : control_word[11:10];
 
@@ -936,11 +1027,10 @@ x87_executor executor (
     .start(v2_exec_start),
     .exec_op(v2_exec_op_port),
     .integer_size(v2_exec_size),
-    .precision_control(control_word[9:8]),
+    .precision_control(poly_internal ? 2'b11 : control_word[9:8]),
     .rounding_mode(executor_rounding_mode),
     .quiet_compare(arith_quiet_compare),
     .trans_cosine(trans_cosine),
-    .trans_tangent_pair(trans_tangent_pair),
     .trans_atan2(trans_atan2),
     .operand(arith_operand_a),
     .operand_b(arith_operand_b),
@@ -949,7 +1039,6 @@ x87_executor executor (
     .done(v2_exec_done),
     .commit_action(v2_exec_commit),
     .result(v2_exec_result),
-    .auxiliary_result(v2_exec_auxiliary_result),
     .transfer_out(v2_exec_transfer_out),
     .invalid(v2_exec_invalid),
     .inexact(v2_exec_inexact),
@@ -1044,17 +1133,31 @@ always_ff @(posedge clk) begin
         arith_operand_a <= x87_empty();
         arith_operand_b <= x87_empty();
         trans_cosine <= 1'b0;
-        trans_tangent_pair <= 1'b0;
         trans_atan2 <= 1'b0;
         fptan_trans_pending <= 1'b0;
         fptan_div_pending <= 1'b0;
         fptan_push_after_result <= 1'b0;
         fptan_sincos <= 1'b0;
         fptan_push_value <= x87_one();
+        poly_phase <= POLY_IDLE;
+        poly_pc <= 7'd0;
+        poly_word <= '0;
+        poly_quadrant <= 2'd0;
+        poly_swap <= 1'b0;
+        poly_id <= 2'd0;
+        poly_xneg <= 1'b0;
+        poly_yneg <= 1'b0;
+        poly_cosine <= 1'b0;
+        poly_final <= 1'b0;
+        poly_denormal <= 1'b0;
+        poly_aux <= x87_one();
+        poly_opa <= x87_empty();
         fprem_phase <= FPREM_IDLE;
         fprem_nearest <= 1'b0;
         fyl2xp1_add_pending <= 1'b0;
         fyl2xp1_y <= x87_empty();
+        fxtract_exp_pending <= 1'b0;
+        fxtract_exp_index <= 3'd0;
         fprem_dividend <= x87_empty();
         fprem_divisor <= x87_empty();
         fprem_quotient_bits <= 3'b000;
@@ -1188,9 +1291,19 @@ always_ff @(posedge clk) begin
         if (v2_exec_done) begin
             case (v2_exec_commit)
                 X87_COMMIT_PUSH: begin
-                    push_pending_raw <= x87_to_m80(v2_exec_result);
-                    push_pending_tag <= x87_tag(v2_exec_result);
-                    push_pending <= 1'b1;
+                    if (fxtract_exp_pending) begin
+                        // FXTRACT's exponent, converted by FILD, replaces
+                        // the operand under the pushed significand.
+                        fxtract_exp_pending <= 1'b0;
+                        result_write_index <= fxtract_exp_index;
+                        result_write_raw <= x87_to_m80(v2_exec_result);
+                        result_write_pending <= 1'b1;
+                        command_complete_pulse <= 1'b1;
+                    end else begin
+                        push_pending_raw <= x87_to_m80(v2_exec_result);
+                        push_pending_tag <= x87_tag(v2_exec_result);
+                        push_pending <= 1'b1;
+                    end
                     if (v2_exec_invalid)
                         raise_invalid();
                 end
@@ -1309,7 +1422,7 @@ always_ff @(posedge clk) begin
 
             if (v2_exec_invalid)
                 raise_invalid();
-            if (v2_exec_denormal_operand) begin
+            if (trans_denormal_operand) begin
                 status_flags[1] <= 1'b1;
                 if (!control_word[1]) begin
                     status_flags[7] <= 1'b1;
@@ -1328,21 +1441,21 @@ always_ff @(posedge clk) begin
                     fptan_push_after_result <= 1'b1;
                     command_complete_pulse <= 1'b0;
                 end
-            end else if (v2_exec_denormal_operand && !control_word[1]) begin
+            end else if (trans_denormal_operand && !control_word[1]) begin
                 command_complete_pulse <= 1'b1;
             end else if (fptan_sincos) begin
                 // FSINCOS: sin(x) replaces ST0, then cos(x) is pushed.
-                if (v2_exec_inexact)
+                if (trans_inexact)
                     status_flags[5] <= 1'b1;
                 result_write_index <= arith_dest_index;
                 result_write_raw <= x87_to_m80(v2_exec_result);
                 result_write_pending <= 1'b1;
-                fptan_push_value <= v2_exec_auxiliary_result;
+                fptan_push_value <= trans_aux;
                 fptan_push_after_result <= 1'b1;
                 command_complete_pulse <= 1'b0;
             end else begin
                 arith_operand_a <= v2_exec_result;
-                arith_operand_b <= v2_exec_auxiliary_result;
+                arith_operand_b <= trans_aux;
                 v2_exec_op <= X87_ARITH_DIV;
                 v2_exec_owner <= EXEC_MATH;
                 v2_exec_size <= 2'd0;
@@ -1554,6 +1667,96 @@ always_ff @(posedge clk) begin
                 logexp_phase <= LOGEXP_LOOKUP;
             end
         end
+
+        // Transcendental program: each word reads A and B, runs one executor
+        // operation (round to nearest, 53 bits) and writes the scratch; the
+        // final word rounds per the control word and retires as the TRANS
+        // result (trans_done), with cos(x) in poly_aux.
+        if (trans_compute) begin
+            poly_phase <= POLY_LOAD_B;
+            poly_pc <= trans_atan2 ? X87_POLY_ENTRY_ATAN : X87_POLY_ENTRY_SINCOS;
+            poly_quadrant <= 2'd0;
+            poly_swap <= 1'b0;
+            poly_id <= 2'd0;
+            poly_yneg <= arith_operand_a.sign;       // FPATAN: A = Y (ST1)
+            poly_xneg <= arith_operand_b.sign;       //         B = X (ST0)
+            poly_cosine <= trans_cosine;
+            poly_final <= 1'b0;
+            poly_denormal <= v2_exec_denormal_operand;
+            command_complete_pulse <= 1'b0;
+        end
+        case (poly_phase)
+            POLY_LOAD_B: poly_phase <= POLY_DECODE;
+            POLY_DECODE: begin
+                poly_word <= x87_poly_word_t'(x87_poly_word(poly_pc));
+                poly_phase <= POLY_FETCH_A;
+            end
+            POLY_FETCH_A: begin
+                if (x87_poly_pred(poly_word.pred, poly_quadrant, poly_cosine,
+                                  poly_swap, poly_xneg, poly_yneg)) begin
+                    poly_phase <= POLY_FETCH_B;
+                end else begin
+                    poly_pc <= poly_pc + 7'd1;
+                    poly_phase <= POLY_DECODE;
+                end
+            end
+            POLY_FETCH_B: begin
+                poly_opa <= poly_opa_read;
+                if (poly_word.a_abs)
+                    poly_opa.sign <= 1'b0;
+                else if (poly_word.a_neg)
+                    poly_opa.sign <= !poly_opa_read.sign;
+                poly_phase <= POLY_ISSUE;
+            end
+            POLY_ISSUE: begin
+                if (poly_word.op == X87_POLY_OP_AUX) begin
+                    poly_aux <= poly_opa;
+                    poly_pc <= poly_pc + 7'd1;
+                    poly_phase <= POLY_DECODE;
+                end else begin
+                    arith_operand_a <= poly_opa;
+                    arith_operand_b <= poly_opb_read;
+                    if (poly_word.b_abs)
+                        arith_operand_b.sign <= 1'b0;
+                    case (poly_word.op)
+                        X87_POLY_OP_ADD: v2_exec_op <= X87_ARITH_ADD;
+                        X87_POLY_OP_SUB: v2_exec_op <= X87_ARITH_SUB;
+                        X87_POLY_OP_DIV: v2_exec_op <= X87_ARITH_DIV;
+                        X87_POLY_OP_RND: v2_exec_op <= X87_CONVERT_FRNDINT;
+                        X87_POLY_OP_CMP: v2_exec_op <= X87_ARITH_COMPARE;
+                        default:         v2_exec_op <= X87_ARITH_MUL;
+                    endcase
+                    v2_exec_owner <= EXEC_MATH;
+                    v2_exec_size <= 2'd0;
+                    v2_exec_transfer <= 64'h0;
+                    v2_exec_pending <= 1'b1;
+                    poly_final <= poly_word.final_op;
+                    poly_phase <= POLY_WAIT;
+                end
+            end
+            POLY_WAIT: begin
+                if (v2_exec_math_done) begin
+                    if (poly_final) begin
+                        poly_final <= 1'b0;
+                        poly_phase <= POLY_IDLE;
+                    end else begin
+                        if (poly_word.op == X87_POLY_OP_CMP) begin
+                            if (poly_word.setp == X87_POLY_SETP_SWAP)
+                                poly_swap <= v2_compare_less;
+                            else if (!v2_compare_less)
+                                poly_id <= poly_id + 2'd1;
+                        end
+                        if (poly_word.op == X87_POLY_OP_RND)
+                            poly_quadrant <= v2_exec_result.sign
+                                ? 2'd0 - poly_round_low3[1:0]
+                                : poly_round_low3[1:0];
+                        poly_pc <= poly_pc + 7'd1;
+                        poly_phase <= POLY_DECODE;
+                    end
+                end
+            end
+            default: ;
+        endcase
 
         if (math_done) begin
             command_complete_pulse <= 1'b1;
@@ -1839,7 +2042,6 @@ always_ff @(posedge clk) begin
                         arith_operand_a <= stack_read_data_a;
                         arith_operand_b <= x87_empty();
                         trans_cosine <= 1'b0;
-                        trans_tangent_pair <= 1'b1;
                         trans_atan2 <= 1'b0;
                         v2_exec_op <= X87_ARITH_TRANS;
                         v2_exec_owner <= EXEC_MATH;
@@ -1870,7 +2072,6 @@ always_ff @(posedge clk) begin
                         arith_operand_a <= stack_read_data_b; // Y = ST(1)
                         arith_operand_b <= stack_read_data_a; // X = ST(0)
                         trans_cosine <= 1'b0;
-                        trans_tangent_pair <= 1'b0;
                         trans_atan2 <= 1'b1;
                         v2_exec_op <= X87_ARITH_TRANS;
                         v2_exec_owner <= EXEC_MATH;
@@ -2025,7 +2226,6 @@ always_ff @(posedge clk) begin
                         arith_operand_a <= stack_read_data_a;
                         arith_operand_b <= x87_empty();
                         trans_cosine <= command_decode.argument[0];
-                        trans_tangent_pair <= 1'b0;
                         trans_atan2 <= 1'b0;
                         v2_exec_op <= X87_ARITH_TRANS;
                         v2_exec_owner <= EXEC_MATH;
@@ -2059,16 +2259,22 @@ always_ff @(posedge clk) begin
                 end
                 X87_CMD_FXTRACT: begin
                     // ST0 = exponent (as a real) and push the significand
-                    // with exponent 3FFFh. Zero: -inf and ZE; inf: +inf.
+                    // with exponent 3FFFh. Zero: -inf and ZE; inf: +inf. The
+                    // exponent of a finite operand goes through the FILD
+                    // conversion into the old ST0 slot.
                     logic [2:0] new_top;
                     x87_reg_t fx_exp;
                     x87_reg_t fx_sig;
                     logic fx_write;
+                    logic fx_convert;
+                    logic [5:0] fx_lead;
 
                     new_top = top - 3'd1;
                     fx_write = control_word[0];
+                    fx_convert = 1'b0;
                     fx_exp = x87_indefinite();
                     fx_sig = x87_indefinite();
+                    fx_lead = x87_leading_zeros(stack_read_data_a.sig);
                     if (stack_empty(st0_index)) begin
                         raise_stack_fault(1'b0);
                     end else if (!stack_empty(new_top)) begin
@@ -2093,24 +2299,34 @@ always_ff @(posedge clk) begin
                             end
                             X87_DENORMAL: begin
                                 status_flags[1] <= 1'b1;        // DE
-                                fx_exp = x87_from_exponent(
-                                    17'sd1 - 17'sd16383 -
-                                    17'(x87_leading_zeros(stack_read_data_a.sig)));
-                                fx_sig.sig = stack_read_data_a.sig <<
-                                    x87_leading_zeros(stack_read_data_a.sig);
+                                fx_convert = 1'b1;
+                                fx_sig.sig = stack_read_data_a.sig << fx_lead;
                                 fx_sig.exp = 15'h3fff;
                                 fx_sig.class_id = X87_NORMAL;
                             end
                             default: begin
-                                fx_exp = x87_from_exponent(
-                                    $signed({2'b00, stack_read_data_a.exp}) -
-                                    17'sd16383);
+                                fx_convert = 1'b1;
                                 fx_sig.exp = 15'h3fff;
                             end
                         endcase
                     end
                     if (fx_write) begin
-                        write_stack(top, fx_exp);
+                        if (fx_convert) begin
+                            command_complete_pulse <= 1'b0;
+                            fxtract_exp_pending <= 1'b1;
+                            fxtract_exp_index <= top;
+                            v2_exec_op <= X87_CONVERT_FILD;
+                            v2_exec_owner <= EXEC_LOAD;
+                            v2_exec_size <= 2'd0;              // 16-bit integer
+                            v2_exec_transfer <= {48'h0,
+                                ((stack_read_data_a.class_id == X87_DENORMAL)
+                                     ? 16'(-16'sd16382 - $signed({10'b0, fx_lead}))
+                                     : 16'($signed({1'b0, stack_read_data_a.exp}) -
+                                           16'sd16383))};
+                            v2_exec_pending <= 1'b1;
+                        end else begin
+                            write_stack(top, fx_exp);
+                        end
                         stack_addr_b <= new_top;
                         stack_write_data_b <= x87_to_m80(fx_sig);
                         stack_write_b <= 1'b1;

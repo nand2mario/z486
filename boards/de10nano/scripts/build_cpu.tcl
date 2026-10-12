@@ -58,7 +58,6 @@ foreach image [list \
         [file join $cpu_dir ucode.mif] \
         [file join $cpu_dir x87 x87_ucode.mif] \
         [file join $cpu_dir x87 x87_command_decode.mif] \
-        [file join $cpu_dir x87 x87_cordic_atan.mif] \
         [file join $cpu_dir x87 x87_logexp_tables.mif]] {
     file copy -force $image [file join $build_dir [file tail $image]]
     set_global_assignment -name MIF_FILE $image

@@ -26,8 +26,6 @@ cache_unit.sv
 l1_cache.sv
 l1_icache.sv
 x87/x87_bridge.sv
-x87/x87_cordic_rom.sv
-x87/x87_cordic_scratch.sv
 x87/x87_ucode_rom.sv
 x87/x87_sequencer.sv
 x87/x87_executor.sv

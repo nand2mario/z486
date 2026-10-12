@@ -33,17 +33,7 @@ COND = {
     "SHIFT_RIGHT": 13,
     "SHIFT_RIGHT_MORE": 14,
     "ADDSUB_NORMALIZE_MORE": 15,
-    "CORDIC_LIMB_MORE": 16,
-    "CORDIC_LOAD_MORE": 17,
-    "CORDIC_ALIGN_MORE": 18,
     "ARITH_DIRECT": 19,
-    "RANGE_LIMB_MORE": 20,
-    "RANGE_NONNEG": 21,
-    "RANGE_NOT_GREATER": 22,
-    # Operation-local aliases preserve the existing condition encoding. These values
-    # are never tested by the same microprogram as their generic names.
-    "TRANS_NEEDS_AUX": 3,
-    "TRANS_ATAN2": 8,
 }
 
 SRC = {
@@ -62,9 +52,6 @@ STATE = {
     "RESTORE_COUNT": 1,
     "FORMAT_EXP_DEC": 2,
     "FORMAT_EXP_INC": 3,
-    "TRANS_SELECT": 4,
-    "TRANS_NORMALIZE": 5,
-    "TRANS_LOAD_AUX": 6,
 }
 
 PREPARE = {
@@ -97,26 +84,7 @@ ENGINE = {
     "MUL_ACCUMULATE": 2,
     "DIV_ITERATE": 3,
     "SQRT_ITERATE": 4,
-    "TRANS_RANGE_BEGIN_STEP": 5,
-    "TRANS_RANGE_STEP": 6,
-    "TRANS_RANGE_BEGIN_CORRECT": 7,
-    "TRANS_CORDIC_PREP": 8,
-    "CORDIC_ALIGN_PREP": 9,
     "ADDSUB_ALIGN": 10,
-    "CORDIC_X_PREP": 11,
-    "CORDIC_Y_PREP": 12,
-    "CORDIC_Z_PREP": 13,
-    "CORDIC_NEXT": 14,
-    "CORDIC_OUTPUT_PREP": 15,
-    "CORDIC_AUX_PREP": 16,
-    "CORDIC_BEGIN": 17,
-    "CORDIC_OUTPUT_CAPTURE": 18,
-    "TRANS_RANGE_BEGIN_COMPARE": 19,
-    "TRANS_RANGE_BEGIN_FOLD": 20,
-    "TRANS_ABS_BEGIN_PRIMARY": 21,
-    "TRANS_ABS_BEGIN_AUX": 22,
-    "TRANS_ABS_SIGN": 23,
-    "TRANS_ABS_STEP": 24,
 }
 
 PACK = {
@@ -134,7 +102,6 @@ PACK = {
     "PACK_ADDSUB": 11,
     "PACK_MUL": 12,
     "PACK_DIVSQRT": 13,
-    "PACK_TRANS": 14,
 }
 
 ALU_ROUTE = {
@@ -145,7 +112,6 @@ ALU_ROUTE = {
     "PREP_ROUND_ADDSUB": 4,
     "PREP_ROUND_MUL": 5,
     "PREP_ROUND_DIVSQRT": 6,
-    "PREP_ROUND_TRANS": 7,
 }
 
 SHIFT_ROUTE = {
@@ -167,24 +133,10 @@ SIDE = {"NONE": 0, "SET_STATUS": 1, "QUIET_NAN": 2, "SET_INEXACT": 3}
 
 SCRATCH_READ = {
     "HOLD": 0,
-    "ALIGN": 1,
-    "X_LOW": 2,
-    "X_HIGH": 3,
-    "Y_LOW": 4,
-    "Y_HIGH": 5,
-    "Z": 6,
-    "OUTPUT": 7,
 }
 
 SCRATCH_WRITE = {
     "HOLD": 0,
-    "LOAD": 1,
-    "ALIGN": 2,
-    "X": 3,
-    "Y": 4,
-    "Z": 5,
-    "PRIMARY": 6,
-    "AUX": 7,
 }
 
 
@@ -360,11 +312,9 @@ PROGRAM: list[ProgramItem] = [
                         commit="REPLACE_ST0")),
 
     ("entry_div", UOp(src_a="OPERAND_A", src_b="OPERAND_B",
-                       classify="DIVSQRT")),
+                       classify="DIVSQRT", prepare="DIV", count="LOAD")),
     (None, UOp(flow="BRANCH", target="divsqrt_commit",
                condition="DIRECT_READY")),
-    (None, UOp(src_a="OPERAND_A", src_b="OPERAND_B",
-               prepare="DIV", count="LOAD")),
     ("div_iterate", UOp(flow="LOOP", target="div_iterate",
                          condition="COUNT_MORE", engine="DIV_ITERATE",
                          count="DEC")),
@@ -378,10 +328,9 @@ PROGRAM: list[ProgramItem] = [
                             commit="REPLACE_ST0")),
 
     ("entry_sqrt", UOp(src_a="OPERAND_A",
-                        classify="DIVSQRT")),
+                        classify="DIVSQRT", prepare="SQRT", count="LOAD")),
     (None, UOp(flow="BRANCH", target="divsqrt_commit",
                condition="DIRECT_READY")),
-    (None, UOp(src_a="OPERAND_A", prepare="SQRT", count="LOAD")),
     ("sqrt_iterate", UOp(flow="LOOP", target="sqrt_iterate",
                           condition="COUNT_MORE", engine="SQRT_ITERATE",
                           count="DEC")),
@@ -397,116 +346,8 @@ PROGRAM: list[ProgramItem] = [
                          classify="TRANS")),
     (None, UOp(flow="BRANCH", target="trans_commit",
                condition="DIRECT_READY")),
-    (None, UOp(flow="BRANCH", target="trans_normalize_enter",
-               condition="SPECIAL")),
-    (None, UOp(flow="BRANCH", target="trans_atan_start",
-               condition="TRANS_ATAN2")),
-    # One non-restoring pass over the five remainder limbs per quotient bit.
-    ("trans_range", UOp(engine="TRANS_RANGE_BEGIN_STEP")),
-    ("trans_range_step", UOp(flow="LOOP", target="trans_range_step",
-                              condition="RANGE_LIMB_MORE",
-                              engine="TRANS_RANGE_STEP")),
-    (None, UOp(flow="LOOP", target="trans_range",
-               condition="COUNT_MORE", count="DEC")),
-    (None, UOp(flow="BRANCH", target="trans_range_compare",
-               condition="RANGE_NONNEG")),
-    (None, UOp(engine="TRANS_RANGE_BEGIN_CORRECT")),
-    ("trans_range_correct", UOp(flow="LOOP", target="trans_range_correct",
-                                 condition="RANGE_LIMB_MORE",
-                                 engine="TRANS_RANGE_STEP")),
-    ("trans_range_compare", UOp(engine="TRANS_RANGE_BEGIN_COMPARE")),
-    ("trans_range_compare_step", UOp(flow="LOOP",
-                                      target="trans_range_compare_step",
-                                      condition="RANGE_LIMB_MORE",
-                                      engine="TRANS_RANGE_STEP")),
-    (None, UOp(flow="BRANCH", target="trans_cordic_prepare",
-               condition="RANGE_NOT_GREATER")),
-    (None, UOp(engine="TRANS_RANGE_BEGIN_FOLD")),
-    ("trans_range_fold", UOp(flow="LOOP", target="trans_range_fold",
-                              condition="RANGE_LIMB_MORE",
-                              engine="TRANS_RANGE_STEP")),
-    (None, UOp(flow="JUMP", target="trans_cordic_prepare")),
-    ("trans_atan_start", UOp(flow="JUMP", target="trans_cordic_prepare")),
-    ("trans_cordic_prepare", UOp(engine="TRANS_CORDIC_PREP")),
-    ("trans_cordic_load", UOp(
-        flow="LOOP", target="trans_cordic_load",
-        condition="CORDIC_LOAD_MORE", scratch_write="LOAD")),
-    (None, UOp(flow="BRANCH", target="trans_atan_align_check",
-               condition="TRANS_ATAN2")),
-    (None, UOp(flow="JUMP", target="trans_cordic_begin")),
-    ("trans_atan_align_check", UOp(
-        flow="BRANCH", target="trans_cordic_begin",
-        condition="COUNT_ZERO")),
-    ("trans_atan_align_prepare", UOp(engine="CORDIC_ALIGN_PREP")),
-    ("trans_atan_align_read", UOp(scratch_read="ALIGN")),
-    ("trans_atan_align_write", UOp(
-        flow="LOOP", target="trans_atan_align_read",
-        condition="CORDIC_ALIGN_MORE", scratch_write="ALIGN")),
-    (None, UOp(flow="LOOP", target="trans_atan_align_prepare",
-               condition="COUNT_MORE", count="DEC")),
-    ("trans_cordic_begin", UOp(engine="CORDIC_BEGIN")),
-    ("trans_cordic_x_prepare", UOp(engine="CORDIC_X_PREP")),
-    ("trans_cordic_x_low", UOp(scratch_read="X_LOW")),
-    (None, UOp(scratch_read="X_HIGH")),
-    ("trans_cordic_x_write", UOp(
-        flow="LOOP", target="trans_cordic_x_low",
-        condition="CORDIC_LIMB_MORE", scratch_write="X")),
-    (None, UOp(engine="CORDIC_Y_PREP")),
-    ("trans_cordic_y_low", UOp(scratch_read="Y_LOW")),
-    (None, UOp(scratch_read="Y_HIGH")),
-    ("trans_cordic_y_write", UOp(
-        flow="LOOP", target="trans_cordic_y_low",
-        condition="CORDIC_LIMB_MORE", scratch_write="Y")),
-    (None, UOp(engine="CORDIC_Z_PREP")),
-    ("trans_cordic_z_read", UOp(scratch_read="Z")),
-    ("trans_cordic_z_write", UOp(
-        flow="LOOP", target="trans_cordic_z_read",
-        condition="CORDIC_LIMB_MORE", scratch_write="Z")),
-    (None, UOp(flow="LOOP", target="trans_cordic_x_prepare",
-               condition="COUNT_MORE", engine="CORDIC_NEXT",
-               count="DEC")),
-    (None, UOp(engine="CORDIC_OUTPUT_PREP")),
-    ("trans_cordic_output_read", UOp(scratch_read="OUTPUT")),
-    (None, UOp(engine="CORDIC_OUTPUT_CAPTURE")),
-    ("trans_cordic_output_write", UOp(
-        flow="LOOP", target="trans_cordic_output_read",
-        condition="CORDIC_LIMB_MORE", scratch_write="PRIMARY")),
-    (None, UOp(engine="CORDIC_AUX_PREP")),
-    ("trans_cordic_aux_read", UOp(scratch_read="OUTPUT")),
-    (None, UOp(engine="CORDIC_OUTPUT_CAPTURE")),
-    ("trans_cordic_aux_write", UOp(
-        flow="LOOP", target="trans_cordic_aux_read",
-        condition="CORDIC_LIMB_MORE", scratch_write="AUX")),
-    # Magnitude and sign of the primary result from its scratch limbs.
-    (None, UOp(engine="TRANS_ABS_BEGIN_PRIMARY")),
-    (None, UOp(engine="TRANS_ABS_SIGN")),
-    ("trans_abs_step", UOp(flow="LOOP", target="trans_abs_step",
-                            condition="CORDIC_LIMB_MORE",
-                            engine="TRANS_ABS_STEP")),
-    ("trans_normalize_enter", UOp(flow="BRANCH", target="trans_commit",
-                                   condition="ZERO")),
-    ("trans_normalize", UOp(flow="LOOP", target="trans_normalize",
-                             condition="NORMALIZE_MORE",
-                             state="TRANS_NORMALIZE",
-                             destination="WORK", shift_route="FORMAT")),
-    ("trans_round", UOp(alu_route="PREP_ROUND_TRANS",
-                         destination="WORK", grs="LOAD")),
-    (None, UOp(src_a="WORK", alu_route="ROUND",
-               destination="WORK")),
-    (None, UOp(flow="BRANCH", target="trans_aux",
-               condition="TRANS_NEEDS_AUX")),
-    (None, UOp(src_a="WORK", pack="PACK_TRANS",
-               destination="RESULT")),
-    (None, UOp(flow="JUMP", target="trans_commit")),
-    ("trans_aux", UOp(src_a="WORK", pack="PACK_TRANS",
-                       destination="RESULT")),
-    (None, UOp(engine="TRANS_ABS_BEGIN_AUX", destination="WORK")),
-    (None, UOp(engine="TRANS_ABS_SIGN")),
-    ("trans_abs_aux_step", UOp(flow="LOOP", target="trans_abs_aux_step",
-                                condition="CORDIC_LIMB_MORE",
-                                engine="TRANS_ABS_STEP")),
-    (None, UOp(flow="BRANCH", target="trans_commit", condition="ZERO")),
-    (None, UOp(flow="JUMP", target="trans_normalize")),
+    # A finite operand: no commit; x87_control runs the program (x87_poly_rom).
+    (None, UOp(flow="FINISH")),
     ("trans_commit", UOp(flow="FINISH", src_a="RESULT",
                           commit="REPLACE_ST0")),
 
@@ -540,7 +381,8 @@ def validate_horizontal_controls(address: int, uop: UOp) -> None:
     )
     classify_prepare_pair = (
         (uop.classify == "ADDSUB" and uop.prepare == "ADDSUB") or
-        (uop.classify == "MUL" and uop.prepare == "MUL")
+        (uop.classify == "MUL" and uop.prepare == "MUL") or
+        (uop.classify == "DIVSQRT" and uop.prepare in {"DIV", "SQRT"})
     )
     if sum(major_lanes) > 1 and not (
         classify_prepare_pair and sum(major_lanes) == 2

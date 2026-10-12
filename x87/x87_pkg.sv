@@ -68,25 +68,6 @@ function automatic logic [5:0] x87_leading_zeros(input logic [52:0] sig);
     return count;
 endfunction
 
-// A small signed integer (FXTRACT's unbiased exponent) as a register value.
-function automatic x87_reg_t x87_from_exponent(input logic signed [16:0] n);
-    x87_reg_t value;
-    logic [16:0] magnitude;
-    logic [4:0] msb;
-    value = x87_zero(1'b0);
-    if (n != 0) begin
-        magnitude = n[16] ? 17'(-n) : 17'(n);
-        msb = 5'd0;
-        for (int i = 0; i < 17; i++)
-            if (magnitude[i]) msb = 5'(i);
-        value.sign = n[16];
-        value.exp = 15'(15'd16383 + 15'(msb));
-        value.sig = 53'(magnitude) << (6'd52 - 6'(msb));
-        value.class_id = X87_NORMAL;
-    end
-    return value;
-endfunction
-
 function automatic x87_reg_t x87_indefinite();
     x87_reg_t value;
     value = '0;
