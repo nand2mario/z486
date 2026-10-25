@@ -75,8 +75,8 @@ wire use_captured_source = is_shift2 ||
     ((aluop == ALUJMP_SHIFT) && (source_class == 4'd3));
 wire [5:0] width = op_size == 2'd0 ? 6'd8 :
                    op_size == 2'd1 ? 6'd16 : 6'd32;
-wire [31:0] width_mask = op_size == 2'd0 ? 32'h0000_00ff :
-                         op_size == 2'd1 ? 32'h0000_ffff : 32'hffff_ffff;
+wire dst_sign = op_size == 2'd0 ? alu_dst[7] :
+                op_size == 2'd1 ? alu_dst[15] : alu_dst[31];
 
 assign data_size = use_captured_source ? shift1_size : op_size;
 assign count_nonzero = count_raw_r != 5'd0;
@@ -255,15 +255,16 @@ always_comb begin
     setup_result = alu_dst;
     if (!instr_is_shxd) begin
         case (shift_operation)
-            RCL:     setup_result = (instr_cf << (width-1)) |
-                                    ((alu_dst & width_mask) >> 1);
+            // Width is only 8/16/32: fixed taps avoid a width-dependent
+            // bit-placement mux and mask/shift chain in SHIFT1 setup.
+            RCL:     setup_result = op_size == 2'd0 ? {24'd0, instr_cf, alu_dst[7:1]} :
+                                    op_size == 2'd1 ? {16'd0, instr_cf, alu_dst[15:1]} :
+                                                         {instr_cf, alu_dst[31:1]};
             RCR:     setup_result = {alu_dst, instr_cf};
             SHL,
             SHR,
             SAL:     setup_result = 32'd0;
-            SAR:     setup_result = op_size == 2'd0 ? {32{alu_dst[7]}} :
-                                    op_size == 2'd1 ? {32{alu_dst[15]}} :
-                                                        {32{alu_dst[31]}};
+            SAR:     setup_result = {32{dst_sign}};
             default: setup_result = alu_dst;
         endcase
     end
@@ -302,7 +303,7 @@ always_ff @(posedge clk) begin
                     eq_width <= raw_count == width &&
                                 (shift_operation == SHL || shift_operation == SAL ||
                                  shift_operation == SHR || shift_operation == SAR);
-                    eq_width_cf <= shift_operation[0] ? alu_dst[width-1] : alu_dst[0];
+                    eq_width_cf <= shift_operation[0] ? dst_sign : alu_dst[0];
                     case (shift_operation)
                         ROL:     count <= width - reduced_count;
                         ROR:     count <= reduced_count[4:0];

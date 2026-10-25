@@ -96,6 +96,11 @@ logic [53:0] mul_p00;
 logic [55:0] mul_p01;
 logic [55:0] mul_p10;
 logic [57:0] mul_p11;
+logic [52:0] mul_p01_core, mul_p10_core;
+logic [51:0] mul_p11_core;
+logic [29:0] mul_p01_tail, mul_p10_tail, mul_p11_cross;
+logic [5:0] mul_p11_top;
+logic [57:0] mul_p11_r;
 logic [28:0] mul_limb1_r;
 logic [30:0] mul_limb2_r;
 logic [28:0] mul_limb1_sum;
@@ -198,18 +203,36 @@ assign rounded_work = arithmetic_result;
 
 assign mul_sig_a = {operand.sig, operand.guard_bit, operand.round_bit, operand.sticky_bit};
 assign mul_sig_b = {operand_b.sig, operand_b.guard_bit, operand_b.round_bit, operand_b.sticky_bit};
+// The original 53-bit multiplier used 27x27/27x26/26x27/26x26 DSP products.
+// Keep those shapes: a 29-bit upper limb otherwise spills into extra DSPs.
+// Its top three bits are cheap shift/add corrections, not extra multipliers.
+function automatic logic [29:0] mul_27x3(input logic [26:0] a,
+                                        input logic [2:0] b);
+    return ({30{b[0]}} & {3'd0, a}) +
+           ({30{b[1]}} & {2'd0, a, 1'b0}) +
+           ({30{b[2]}} & {1'd0, a, 2'd0});
+endfunction
 assign mul_p00 = mul_sig_a[26:0] * mul_sig_b[26:0];
-assign mul_p01 = mul_sig_a[26:0] * mul_sig_b[55:27];
-assign mul_p10 = mul_sig_a[55:27] * mul_sig_b[26:0];
-assign mul_p11 = mul_sig_a[55:27] * mul_sig_b[55:27];
+assign mul_p01_core = mul_sig_a[26:0] * mul_sig_b[52:27];
+assign mul_p10_core = mul_sig_a[52:27] * mul_sig_b[26:0];
+assign mul_p11_core = mul_sig_a[52:27] * mul_sig_b[52:27];
+assign mul_p01_tail = mul_27x3(mul_sig_a[26:0], mul_sig_b[55:53]);
+assign mul_p10_tail = mul_27x3(mul_sig_b[26:0], mul_sig_a[55:53]);
+assign mul_p11_cross = mul_27x3({1'b0, mul_sig_a[52:27]}, mul_sig_b[55:53]) +
+                        mul_27x3({1'b0, mul_sig_b[52:27]}, mul_sig_a[55:53]);
+assign mul_p11_top = 6'(mul_27x3({24'd0, mul_sig_a[55:53]}, mul_sig_b[55:53]));
+assign mul_p01 = {3'd0, mul_p01_core} + {mul_p01_tail, 26'd0};
+assign mul_p10 = {3'd0, mul_p10_core} + {mul_p10_tail, 26'd0};
+assign mul_p11 = {6'd0, mul_p11_core} + {2'd0, mul_p11_cross, 26'd0} +
+                  {mul_p11_top, 52'd0};
 assign mul_limb1_sum = {2'b0, mul_p00[53:27]} +
                        {2'b0, mul_p01[26:0]} +
                        {2'b0, mul_p10[26:0]};
 assign mul_limb2_sum = {2'b0, mul_p01[55:27]} +
                        {2'b0, mul_p10[55:27]} +
-                       {4'b0, mul_p11[26:0]} +
+                       {4'b0, mul_p11_r[26:0]} +
                        {{29{1'b0}}, mul_limb1_r[28:27]};
-assign mul_top_sum = {1'b0, mul_p11[57:27]} +
+assign mul_top_sum = {1'b0, mul_p11_r[57:27]} +
                      {{28{1'b0}}, mul_limb2_r[30:27]};
 assign mul_product = {mul_top_sum[30:0],
                       mul_limb2_r[26:0],
@@ -1592,10 +1615,11 @@ always_ff @(posedge clk) begin
     end
 end
 
-// Four radix-2^27 partial products run in parallel in DSPs. The MUL prepare
-// step propagates the two limb carries and captures the middle 54 bits.
+// Capture the corrected high product in the existing prepare step: it is
+// first consumed by the following accumulate step, so no cycle is added.
 always_ff @(posedge clk) begin
     if (reset) begin
+        mul_p11_r <= 58'd0;
         mul_limb1_r <= 29'h0;
         mul_limb2_r <= 31'h0;
         mul_exp_r <= 15'h0;
@@ -1617,10 +1641,19 @@ always_ff @(posedge clk) begin
             mul_exp_r <= mul_exp_r + 15'd1;
 
         if (uop.prepare == X87_PREPARE_MUL) begin
+            mul_p11_r <= mul_p11;
             mul_exp_r <= operand.exp + operand_b.exp - 15'h3fff;
             mul_limb1_r <= mul_limb1_sum;
         end
     end
 end
+
+// synthesis translate_off
+always @(posedge clk)
+    if (!reset && seq_exec_valid && (uop.alu_route == X87_ALU_PREP_ROUND_MUL)) begin
+        if (mul_product !== (112'(mul_sig_a) * 112'(mul_sig_b)))
+            $fatal(1, "x87 partial-product reconstruction mismatch");
+    end
+// synthesis translate_on
 
 endmodule
