@@ -5,7 +5,8 @@
 `include "z486_platform.svh"
 module l1_icache #(
     // 8KB icache (128 sets x 4 ways x 16 B); use SET_BITS=8 for 16KB.
-    parameter integer SET_BITS = 7
+    parameter integer SET_BITS = 7,
+    parameter ENABLE_SHARED_MAILBOX = 0
 ) (
     input         clk,
     input         reset,
@@ -69,7 +70,8 @@ wire [SET_BITS-1:0] patch_set = patch_addr[SET_MSB:SET_LSB];
 wire [WORD_OFFSET_BITS-1:0] patch_word = patch_addr[LINE_OFFSET_BITS-1:BYTE_OFFSET_BITS];
 // The prefetcher consumes whole 16-byte lines, so an uncacheable fetch reads
 // the full line like a fill and delivers it without installing it.
-wire cpu_uncacheable = !cache_enable;
+wire cpu_uncacheable = !cache_enable ||
+                      (ENABLE_SHARED_MAILBOX && (cpu_addr[31:13] == 19'h67));
 reg  fill_uncached_r;                  // the current fill must not install
 
 `Z486_BLOCK_RAM reg [TAG_RAM_BITS-1:0] tag_way0 [0:NUM_SETS-1];

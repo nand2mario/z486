@@ -1,6 +1,6 @@
 `timescale 1ns/1ns
 
-module tb_l1_icache;
+module tb_l1_icache #(parameter ENABLE_SHARED_MAILBOX = 0);
     reg clk = 0;
     always #5 clk = ~clk;
 
@@ -32,7 +32,7 @@ module tb_l1_icache;
     reg [31:0] invalidate_addr = 32'h0;
     reg invalidate_valid = 1'b0;
 
-    l1_icache #(.SET_BITS(3)) dut (
+    l1_icache #(.SET_BITS(3), .ENABLE_SHARED_MAILBOX(ENABLE_SHARED_MAILBOX)) dut (
         .clk(clk),
         .reset(reset),
         .cpu_addr(cpu_addr),
@@ -98,7 +98,7 @@ module tb_l1_icache;
                 default: mem_get32 = 32'hAA55_FF00;
             endcase
         end else begin
-            mem_get32 = {mem[addr + 3], mem[addr + 2], mem[addr + 1], mem[addr + 0]};
+            mem_get32 = {mem[addr[11:0] + 3], mem[addr[11:0] + 2], mem[addr[11:0] + 1], mem[addr[11:0] + 0]};
         end
     endfunction
 
@@ -405,6 +405,16 @@ module tb_l1_icache;
             $fatal(1);
         end
 
+        if (ENABLE_SHARED_MAILBOX) begin
+            mem_put_line(32'h500, 1, 2, 3, 4);
+            mem_request_before = mem_request_count;
+            cache_read(32'h000ce500, 128'h00000004_00000003_00000002_00000001);
+            mem_put_line(32'h500, 5, 6, 7, 8);
+            cache_read(32'h000ce500, 128'h00000008_00000007_00000006_00000005);
+            if (mem_request_count != mem_request_before + 2)
+                $fatal(1, "shared instruction line was installed");
+            $display("Shared mailbox I-cache PASS: uncached line bursts");
+        end
         $display("L1 PIPT instruction cache unit test PASS");
         $finish;
     end

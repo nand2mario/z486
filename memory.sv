@@ -4,6 +4,7 @@
 //
 module memory #(
     parameter PROTECT_UMA_ROM = 0,
+    parameter ENABLE_SHARED_MAILBOX = 0,
     parameter DCACHE_SET_BITS = 7,
     parameter DCACHE_LINE_WRAP = 0,
     parameter ICACHE_SET_BITS = 7,
@@ -127,7 +128,7 @@ wire dcache_read_pending;
 wire direct_rd_pending;
 wire ext_valid_r;
 wire icache_read_pending;
-cache_unit #(.PROTECT_UMA_ROM(PROTECT_UMA_ROM), .DCACHE_SET_BITS(DCACHE_SET_BITS), .DCACHE_LINE_WRAP(DCACHE_LINE_WRAP), .ICACHE_SET_BITS(ICACHE_SET_BITS), .ENABLE_DEVICE_MMIO(ENABLE_DEVICE_MMIO), .DEVICE_MMIO_MASK(DEVICE_MMIO_MASK)) cache_unit_inst (
+cache_unit #(.PROTECT_UMA_ROM(PROTECT_UMA_ROM), .ENABLE_SHARED_MAILBOX(ENABLE_SHARED_MAILBOX), .DCACHE_SET_BITS(DCACHE_SET_BITS), .DCACHE_LINE_WRAP(DCACHE_LINE_WRAP), .ICACHE_SET_BITS(ICACHE_SET_BITS), .ENABLE_DEVICE_MMIO(ENABLE_DEVICE_MMIO), .DEVICE_MMIO_MASK(DEVICE_MMIO_MASK)) cache_unit_inst (
     // Clock, reset and board configuration
     .clk(clk),
     .reset_n(reset_n),

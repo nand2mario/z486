@@ -5,6 +5,7 @@
 
 module tb_protected_mode #(
     parameter ENABLE_X87 = 0,
+    parameter ENABLE_SHARED_MAILBOX = 0,
     parameter MEM_SIZE = 1 << 19,
     parameter DCACHE_SET_BITS = 7,
     parameter DCACHE_LINE_WRAP = 1
@@ -40,6 +41,7 @@ module tb_protected_mode #(
     // Instantiate the z486 CPU
     z486 #(
         .ENABLE_X87(ENABLE_X87),
+        .ENABLE_SHARED_MAILBOX(ENABLE_SHARED_MAILBOX),
         .DCACHE_SET_BITS(DCACHE_SET_BITS),
         .DCACHE_LINE_WRAP(DCACHE_LINE_WRAP)
     ) dut (

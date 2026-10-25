@@ -8,6 +8,7 @@ module l1_cache #(
     // cache (128 sets x 4 ways x 16 B); use 8 for 16KB.
     parameter integer SET_BITS = 7,
     parameter PROTECT_UMA_ROM = 0,
+    parameter ENABLE_SHARED_MAILBOX = 0,
     // 1: a line fill requests the missing dword first and memory returns the
     // line's dwords in wrapping order from it (critical word first).
     parameter LINE_WRAP = 0
@@ -121,7 +122,12 @@ wire [SET_BITS-1:0] vipt_probe_set = vipt_probe_offset[SET_MSB:SET_LSB];
 wire [WORD_OFFSET_BITS-1:0] vipt_probe_word =
     vipt_probe_offset[LINE_OFFSET_BITS-1:BYTE_OFFSET_BITS];
 wire [SET_BITS-1:0] snoop_set = snoop_addr[SET_MSB:SET_LSB];
-wire request_uncacheable = !cache_enable || cpu_uncacheable;
+// These addresses are already translated and A20-gated by cache_unit. Never
+// use a linear-address test: paged aliases must see host updates as well.
+wire shared_request = ENABLE_SHARED_MAILBOX && (cpu_addr[31:13] == 19'h67);
+wire shared_resolve = ENABLE_SHARED_MAILBOX &&
+                      (vipt_resolve_phys_addr[31:13] == 19'h67);
+wire request_uncacheable = !cache_enable || cpu_uncacheable || shared_request;
 `ifdef VERILATOR
 // Simulation harness switch: a loaded snapshot whose BIOS keeps state in its
 // shadow (SeaBIOS runs interrupt handlers on a stack at 0xE0000-0xEFFFF)
@@ -133,7 +139,7 @@ wire sim_uma_rom_writable = 1'b0;
 // Decode the full address: a partial compare also protects the 32MB aliases
 // (0x20C0000-0x20FFFFF, ...) and silently drops writes to that RAM.
 wire cpu_protect_write = PROTECT_UMA_ROM && !sim_uma_rom_writable && cpu_write &&
-                         (cpu_addr[31:18] == 14'h0003);
+                         (cpu_addr[31:18] == 14'h0003) && !shared_request;
 
 // Tag/data storage.
 // Keep validity in the otherwise under-filled tag RAM word. This removes four
@@ -412,6 +418,7 @@ assign vipt_resolve_data = vipt_lookup_store_match
                          ? merge32(vipt_way_data, req_din_r, req_be_r)
                          : vipt_way_data;
 assign vipt_resolve_hit = vipt_resolve_valid && cache_enable &&
+                          !shared_resolve &&
                           // Device pages (z486_pkg::is_device_page): VGA window
                           // A0000-BFFFF and the SVGA linear framebuffer 0F800000.
                           (vipt_resolve_phys_addr[31:17] != 15'h5) &&
@@ -423,6 +430,7 @@ assign vipt_resolve_hit = vipt_resolve_valid && cache_enable &&
 // during a fill may miss a line that fill has just installed, so it takes
 // the CPU port, whose lookup sees the installed tag.
 wire vipt_fill_start_now = vipt_resolve_valid && vipt_resolve_fill && cache_enable &&
+                           !shared_resolve &&
                            (vipt_resolve_phys_addr[31:17] != 15'h5) &&
                            !(|vipt_hit_vec) && !probe_in_fill_r &&
                            (state == S_IDLE) && ready_r && !cpu_valid;

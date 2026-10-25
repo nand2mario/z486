@@ -8,6 +8,7 @@ module z486
     import z486_pkg::*;
 #(
     parameter PROTECT_UMA_ROM = 0,
+    parameter ENABLE_SHARED_MAILBOX = 0, // Uncached, writable CE000-CFFFF host mailbox.
     parameter DCACHE_SET_BITS = 7,   // dcache size: 7 = 8KB, 8 = 16KB
     // 1: D-cache fills ask for the missing dword first; memory returns the
     // line's dwords in wrapping order from the requested one.
@@ -818,6 +819,7 @@ wire [31:0] pf_flush_addr;          // Prefetch flush address
 
 memory #(
     .PROTECT_UMA_ROM(PROTECT_UMA_ROM),
+    .ENABLE_SHARED_MAILBOX(ENABLE_SHARED_MAILBOX),
     .DCACHE_SET_BITS(DCACHE_SET_BITS),
     .DCACHE_LINE_WRAP(DCACHE_LINE_WRAP),
     .ICACHE_SET_BITS(ICACHE_SET_BITS),

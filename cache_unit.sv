@@ -6,6 +6,7 @@ module cache_unit
     import z486_pkg::*;
 #(
     parameter PROTECT_UMA_ROM = 0,
+    parameter ENABLE_SHARED_MAILBOX = 0,
     parameter DCACHE_SET_BITS = 7,
     parameter DCACHE_LINE_WRAP = 0,
     parameter ICACHE_SET_BITS = 7,
@@ -246,6 +247,7 @@ end
 
 l1_cache #(
     .PROTECT_UMA_ROM(PROTECT_UMA_ROM),
+    .ENABLE_SHARED_MAILBOX(ENABLE_SHARED_MAILBOX),
     .SET_BITS(DCACHE_SET_BITS),
     .LINE_WRAP(DCACHE_LINE_WRAP)
 ) dcache_inst (
@@ -304,6 +306,7 @@ l1_cache #(
 );
 
 l1_icache #(
+    .ENABLE_SHARED_MAILBOX(ENABLE_SHARED_MAILBOX),
     .SET_BITS(ICACHE_SET_BITS)
 ) icache_inst (
     .clk(clk),

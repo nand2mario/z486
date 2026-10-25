@@ -1,10 +1,11 @@
 `timescale 1ns/1ns
 
-module tb_l1_cache;
+module tb_l1_cache #(parameter ENABLE_SHARED_MAILBOX = 0);
     reg clk = 0;
     always #5 clk = ~clk;
 
     reg reset = 1;
+    reg cache_enable = 1;
 
     reg  [31:0] cpu_addr = 32'h0;
     reg  [31:0] cpu_din = 32'h0;
@@ -23,6 +24,8 @@ module tb_l1_cache;
     reg         vipt_resolve_valid = 1'b0;
     wire [31:0] vipt_resolve_data;
     wire        vipt_resolve_hit;
+    reg         vipt_resolve_fill = 0;
+    wire        vipt_fill_start;
 
     wire [31:0] mem_addr;
     wire [31:0] mem_din;
@@ -52,6 +55,8 @@ module tb_l1_cache;
     reg         snoop_valid = 1'b0;
 
     l1_cache #(
+        .ENABLE_SHARED_MAILBOX(ENABLE_SHARED_MAILBOX),
+        .PROTECT_UMA_ROM(ENABLE_SHARED_MAILBOX),
         .SET_BITS(3)
     ) dut (
         .clk(clk),
@@ -78,6 +83,8 @@ module tb_l1_cache;
         .vipt_resolve_valid(vipt_resolve_valid),
         .vipt_resolve_data(vipt_resolve_data),
         .vipt_resolve_hit(vipt_resolve_hit),
+        .vipt_resolve_fill(vipt_resolve_fill),
+        .vipt_fill_start(vipt_fill_start),
 
         .mem_addr(mem_addr),
         .mem_din(mem_din),
@@ -95,7 +102,7 @@ module tb_l1_cache;
         .snoop_addr(snoop_addr),
         .snoop_valid(snoop_valid),
         .store_patch_busy(1'b0),
-        .cache_enable(1'b1)
+        .cache_enable(cache_enable)
     );
 
     reg [7:0] mem [0:4095];
@@ -126,6 +133,8 @@ module tb_l1_cache;
         vipt_resolve_phys_addr = physical_addr;
         vipt_resolve_valid = 1'b1;
         #1;
+        if (ENABLE_SHARED_MAILBOX && physical_addr[31:13] == 19'h67 && vipt_fill_start)
+            $fatal(1, "mailbox VIPT fill started");
         if (vipt_resolve_hit !== expected_hit) begin
             $display("L1 VIPT HIT FAIL la=%08x pa=%08x got=%0b expected=%0b",
                      linear_addr, physical_addr, vipt_resolve_hit, expected_hit);
@@ -365,6 +374,48 @@ module tb_l1_cache;
             $fatal(1);
         end
 
+        if (ENABLE_SHARED_MAILBOX) begin
+            mem_put32(32'h100, 32'h11223344);
+            mem_request_before = mem_request_count;
+            cache_read(32'h000ce100, 4'hf, 32'h11223344);
+            mem_put32(32'h100, 32'h55667788); // asynchronous host update
+            cache_read(32'h000ce100, 4'hf, 32'h55667788);
+            if (mem_request_count != mem_request_before + 2)
+                $fatal(1, "mailbox reads were cached");
+            vipt_resolve_fill = 1;
+            vipt_read(32'h00400100, 32'h000ce100, 0, 0);
+            vipt_resolve_fill = 0;
+            if (vipt_fill_start) $fatal(1, "mailbox VIPT fill started");
+            mem_stall = 1;
+            cache_write(32'h000ce000, 4'h3, 32'ha345);
+            cache_write(32'h000ce000, 4'h3, 32'h9346);
+            repeat (4) @(negedge clk);
+            if (dut.storeq_count != 2) $fatal(1, "mailbox activation store merged away");
+            mem_stall = 0;
+            cache_read(32'h000ce000, 4'hf, 32'h00009346);
+            cache_write(32'h000cfffc, 4'hf, 32'hcafef00d);
+            cache_read(32'h000cfffc, 4'hf, 32'hcafef00d);
+            mem_put32(32'h200, 32'h12345678);
+            cache_write(32'h000cd200, 4'hf, 32'hdeadbeef);
+            cache_read(32'h000cd200, 4'hf, 32'h12345678);
+            cache_write(32'h000d0200, 4'hf, 32'hdeadbeef);
+            cache_read(32'h000d0200, 4'hf, 32'h12345678);
+            cache_write(32'h040ce200, 4'hf, 32'h87654321);
+            cache_read(32'h040ce200, 4'hf, 32'h87654321);
+            // A critical-word response precedes completion of the wide fill;
+            // a probe during installation deliberately masks the filling way.
+            do @(negedge clk); while (!cpu_ready);
+            vipt_read(32'h00400200, 32'h040ce200, 1, 32'h87654321);
+            cache_enable = 0;
+            mem_put32(32'h100, 32'hc001d00d);
+            cache_read(32'h000ce100, 4'hf, 32'hc001d00d);
+            cache_write(32'h000ce100, 4'hf, 32'hfedcba98);
+            cache_read(32'h000ce100, 4'hf, 32'hfedcba98);
+            cache_enable = 1;
+            mem_put32(32'h100, 32'h1234abcd);
+            cache_read(32'h000ce100, 4'hf, 32'h1234abcd);
+            $display("Shared mailbox D-cache PASS: host updates, ordered stores, aliases, ROM boundaries");
+        end
         $display("L1 PIPT cache unit test PASS");
         $finish;
     end

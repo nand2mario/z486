@@ -154,6 +154,12 @@ obj_dir_quake_trace/Vtb_protected_mode: $(RTL_SRCS) $(RTL_DEPS) $(TB_PROT_SRCS) 
 		$(TB_PROT_SRCS) $(RTL_SRCS) $(CPP_QUAKE_SNAPSHOT_SRCS)
 	@echo "Build complete: obj_dir_quake_trace/Vtb_protected_mode"
 
+# Replay ordinary workloads with the MiSTer-only mailbox cache policy enabled.
+obj_dir_quake_shared/Vtb_protected_mode: $(RTL_SRCS) $(RTL_DEPS) $(TB_PROT_SRCS) $(TB_PROT_DEPS) $(CPP_QUAKE_SNAPSHOT_SRCS) Makefile
+	$(VERILATOR) $(VFLAGS_NOTRACE) --Mdir obj_dir_quake_shared \
+		-GENABLE_X87=1 -GENABLE_SHARED_MAILBOX=1 -GMEM_SIZE=67108864 \
+		--top-module tb_protected_mode $(RTL_SRCS) $(TB_PROT_SRCS) $(CPP_QUAKE_SNAPSHOT_SRCS)
+
 obj_dir_x87_int/Vtb_z486: $(RTL_SRCS) $(RTL_DEPS) $(TB_SRCS) $(CPP_SRCS)
 	@echo "Building x87-enabled integer testbench with Verilator..."
 	cp -f ../*.hex .
@@ -301,6 +307,19 @@ test-l1-icache: obj_dir/Vtb_l1_icache
 test-memory-order: obj_dir/Vtb_memory_order
 	@echo "Running device/store ordering unit test..."
 	./obj_dir/Vtb_memory_order
+
+.PHONY: test-shared-mailbox
+test-shared-mailbox: obj_dir_l1_shared/Vtb_l1_cache obj_dir_l1i_shared/Vtb_l1_icache
+	./obj_dir_l1_shared/Vtb_l1_cache
+	./obj_dir_l1i_shared/Vtb_l1_icache
+
+obj_dir_l1_shared/Vtb_l1_cache: tb_l1_cache.sv ../l1_cache.sv sim_main_l1_cache.cpp
+	$(VERILATOR) $(VFLAGS_NOTRACE) --Mdir obj_dir_l1_shared \
+		-GENABLE_SHARED_MAILBOX=1 --top-module tb_l1_cache $^
+
+obj_dir_l1i_shared/Vtb_l1_icache: tb_l1_icache.sv ../l1_icache.sv sim_main_l1_icache.cpp
+	$(VERILATOR) $(VFLAGS_NOTRACE) --Mdir obj_dir_l1i_shared \
+		-GENABLE_SHARED_MAILBOX=1 --top-module tb_l1_icache $^
 
 test-x87-bridge: obj_dir/Vtb_x87_bridge
 	@echo "Running x87 bridge unit test..."
