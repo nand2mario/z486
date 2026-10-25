@@ -333,7 +333,7 @@ test-x87-core: obj_dir_x87_core/Vtb_x87_core
 
 test-x87-integration: obj_dir_x87/Vtb_protected_mode
 	@echo "Running x87-enabled CPU protocol tests..."
-	Z486_ENABLE_X87=1 Z486_TESTBENCH=$(CURDIR)/obj_dir_x87/Vtb_protected_mode ./test_protected_mode.py x87_protocol x87_env32 x87_arithmetic x87_m32_page_fault x87_heap32 x87_qemu_special x87_qemu_exceptions x87_off_sx x87_387_ops x87_trans_poly x87_bcd_alias
+	Z486_ENABLE_X87=1 Z486_TESTBENCH=$(CURDIR)/obj_dir_x87/Vtb_protected_mode ./test_protected_mode.py x87_protocol x87_env32 x87_arithmetic x87_m32_page_fault x87_heap32 x87_qemu_special x87_qemu_exceptions x87_off_sx x87_387_ops x87_trans_poly x87_bcd_alias x87_m80_multiply
 
 test-x87-integer: obj_dir_x87_int/Vtb_z486
 	@echo "Running integer regressions with x87 enabled..."

@@ -87,16 +87,20 @@ logic fild_shift_four;
 logic fist_shift_four;
 logic addsub_shift_four;
 logic work_shift_four;
-logic [105:0] mul_product;  // Exact assembled 53-by-53 significand product.
+// Keep the raw m80 operand's G/R/S tail until the product is rounded. Dropping
+// it first biases BASIC's decimal scaling constants (VAL("5") becomes < 5).
+// Binary64 operands have a zero tail and retain their previous result/latency.
+logic [55:0] mul_sig_a, mul_sig_b;
+logic [111:0] mul_product;  // Assembled 56-by-56 product, including operand GRS.
 logic [53:0] mul_p00;
-logic [53:0] mul_p01;
-logic [53:0] mul_p10;
-logic [53:0] mul_p11;
+logic [55:0] mul_p01;
+logic [55:0] mul_p10;
+logic [57:0] mul_p11;
 logic [28:0] mul_limb1_r;
-logic [28:0] mul_limb2_r;
+logic [30:0] mul_limb2_r;
 logic [28:0] mul_limb1_sum;
-logic [28:0] mul_limb2_sum;
-logic [26:0] mul_top_sum;
+logic [30:0] mul_limb2_sum;
+logic [31:0] mul_top_sum;
 logic [14:0] mul_exp_r;
 logic mul_result_sign_r;
 // Divide and square root are non-restoring loops on the shared adder: WORK
@@ -192,20 +196,22 @@ assign arithmetic_result = arithmetic_subtract
                          : arithmetic_lhs + arithmetic_rhs;
 assign rounded_work = arithmetic_result;
 
-assign mul_p00 = operand.sig[26:0] * operand_b.sig[26:0];
-assign mul_p01 = operand.sig[26:0] * operand_b.sig[52:27];
-assign mul_p10 = operand.sig[52:27] * operand_b.sig[26:0];
-assign mul_p11 = operand.sig[52:27] * operand_b.sig[52:27];
+assign mul_sig_a = {operand.sig, operand.guard_bit, operand.round_bit, operand.sticky_bit};
+assign mul_sig_b = {operand_b.sig, operand_b.guard_bit, operand_b.round_bit, operand_b.sticky_bit};
+assign mul_p00 = mul_sig_a[26:0] * mul_sig_b[26:0];
+assign mul_p01 = mul_sig_a[26:0] * mul_sig_b[55:27];
+assign mul_p10 = mul_sig_a[55:27] * mul_sig_b[26:0];
+assign mul_p11 = mul_sig_a[55:27] * mul_sig_b[55:27];
 assign mul_limb1_sum = {2'b0, mul_p00[53:27]} +
                        {2'b0, mul_p01[26:0]} +
                        {2'b0, mul_p10[26:0]};
-assign mul_limb2_sum = {2'b0, mul_p01[53:27]} +
-                       {2'b0, mul_p10[53:27]} +
-                       {2'b0, mul_p11[26:0]} +
-                       {{27{1'b0}}, mul_limb1_r[28:27]};
-assign mul_top_sum = mul_p11[53:27] +
-                     {{25{1'b0}}, mul_limb2_r[28:27]};
-assign mul_product = {mul_top_sum[24:0],
+assign mul_limb2_sum = {2'b0, mul_p01[55:27]} +
+                       {2'b0, mul_p10[55:27]} +
+                       {4'b0, mul_p11[26:0]} +
+                       {{29{1'b0}}, mul_limb1_r[28:27]};
+assign mul_top_sum = {1'b0, mul_p11[57:27]} +
+                     {{28{1'b0}}, mul_limb2_r[30:27]};
+assign mul_product = {mul_top_sum[30:0],
                       mul_limb2_r[26:0],
                       mul_limb1_r[26:0],
                       mul_p00[26:0]};
@@ -890,16 +896,16 @@ always_ff @(posedge clk) begin
                     logic prepared_sticky;
                     logic prepared_increment;
 
-                    if (mul_product[105]) begin
-                        normalized_sig = mul_product[105:53];
-                        normalized_guard = mul_product[52];
-                        normalized_round = mul_product[51];
-                        normalized_sticky = |mul_product[50:0];
+                    if (mul_product[111]) begin
+                        normalized_sig = mul_product[111:59];
+                        normalized_guard = mul_product[58];
+                        normalized_round = mul_product[57];
+                        normalized_sticky = |mul_product[56:0];
                     end else begin
-                        normalized_sig = mul_product[104:52];
-                        normalized_guard = mul_product[51];
-                        normalized_round = mul_product[50];
-                        normalized_sticky = |mul_product[49:0];
+                        normalized_sig = mul_product[110:58];
+                        normalized_guard = mul_product[57];
+                        normalized_round = mul_product[56];
+                        normalized_sticky = |mul_product[55:0];
                     end
 
                     round_r <= 1'b0;
@@ -1590,7 +1596,7 @@ end
 always_ff @(posedge clk) begin
     if (reset) begin
         mul_limb1_r <= 29'h0;
-        mul_limb2_r <= 29'h0;
+        mul_limb2_r <= 31'h0;
         mul_exp_r <= 15'h0;
         mul_result_sign_r <= 1'b0;
     end else if (seq_exec_valid) begin
@@ -1606,7 +1612,7 @@ always_ff @(posedge clk) begin
             default: ;
         endcase
 
-        if ((uop.alu_route == X87_ALU_PREP_ROUND_MUL) && mul_product[105])
+        if ((uop.alu_route == X87_ALU_PREP_ROUND_MUL) && mul_product[111])
             mul_exp_r <= mul_exp_r + 15'd1;
 
         if (uop.prepare == X87_PREPARE_MUL) begin
