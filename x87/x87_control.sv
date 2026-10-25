@@ -1331,6 +1331,10 @@ always_ff @(posedge clk) begin
                         raise_invalid();
                 end
                 X87_COMMIT_TRANSFER: begin
+                    // FIST/FST/FBSTP report conversion rounding in C1, just
+                    // like arithmetic. Invalid/empty stores keep C1 clear.
+                    status_flags[9] <= !store_source_empty &&
+                                       !v2_exec_invalid && v2_exec_rounded_up;
                     if (store_bcd) begin
                         logic [63:0] bcd_magnitude;
                         bcd_magnitude = v2_exec_transfer_out[63]

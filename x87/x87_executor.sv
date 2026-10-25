@@ -1028,6 +1028,7 @@ always_ff @(posedge clk) begin
                 X87_PACK_ROUND_PACK_FST: begin
                     logic signed [16:0] packed_exp;
                     inexact <= round_discarded;
+                    rounded_up <= round_increment;
                     if (format_m32) begin
                         if (format_exp_r <= 0) begin
                             underflow <= round_discarded;
