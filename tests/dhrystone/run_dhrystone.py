@@ -481,13 +481,15 @@ def main() -> int:
     parser.add_argument(
         "--cpu-speed",
         type=int,
-        choices=range(4),
+        choices=range(8),
         default=0,
         metavar="SEL",
-        help="CPU speed selector: 0=full, 1=15 MHz, 2=30 MHz, 3=56 MHz",
+        help="CPU speed selector: 0=full, 1=15, 2=30, 3=56, 4=6, 5=5, 6=4, 7=3 MHz",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="show build commands/output")
     args = parser.parse_args()
+    if args.cpu_speed > 3 and args.core != "z486_current":
+        parser.error("extended speed selectors require the current eight-speed z486 core")
 
     if args.no_build:
         binary_file = (

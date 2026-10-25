@@ -53,7 +53,7 @@ module z486
     input              a20_enable,  // A20 gate input
 
     // Architectural execution rate: 0=full, 1=15, 2=30, 3=56 MHz.
-    input       [1:0]  cpu_speed_sel,
+    input       [2:0]  cpu_speed_sel,
     // Dev menu: run every instruction through the 386 microcode.
     input              fast_off_req,
     // Dev menu: L1 caches off (every access goes to memory).

@@ -138,7 +138,7 @@ z486 #(
     .snoop_addr(32'd0),
     .snoop_valid(1'b0),
     .a20_enable(1'b1),
-    .cpu_speed_sel(2'd0),
+    .cpu_speed_sel(3'd0),
     .fast_off_req(1'b0),
     .cache_off_req(1'b0),
     .x87_off_req(1'b0),
