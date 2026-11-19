@@ -510,6 +510,10 @@ always_ff @(posedge clk) begin
             error_code_flag <= 1'b0;
             interrupt_hw <= 1'b0;
         end
+        // IRQ/NMI/#DB entry can precede the first fault-handler instruction.
+        // Clear stale error-code state so the new entry cannot push an extra word.
+        if (interrupt_entry)
+            error_code_flag <= 1'b0;
         if (uc_exec) begin
             case (uc_aluop)
                 ALUJMP_SMISC1: misc1_flag <= 1'b1;

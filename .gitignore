@@ -5,6 +5,8 @@ obj_dir/
 *.log
 # test outputs
 tests/*.lst
+tests/*.hex
+tests/programs/*.lst
 tests/protected_mode_tests/*.lst
 tests/protected_mode_tests/traces/
 tests/result.txt
