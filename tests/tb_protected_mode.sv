@@ -631,6 +631,11 @@ module tb_protected_mode #(
     reg       inta_first = 0;          // Track first vs second INTA pair
     reg       inta_resp_pending = 0;
     reg [31:0] inta_resp_data = 32'h0;
+    // Opt-in #PF -> IRQ boundary trigger; no DUT state is forced.
+    int pf_irq_entry_eip = 32'h300;
+    bit pf_irq_requested = 1'b0;
+    bit pf_irq_entered = 1'b0;
+    bit pf_irq_handler_issued = 1'b0;
 
     // Configurable memory latency (default 1 cycle, +mem_latency=N for more)
     int mem_latency = 1;
@@ -801,6 +806,9 @@ module tb_protected_mode #(
                                     $fclose(fd);
                                 end
                             end
+                            if ($test$plusargs("check_pf_irq_entry") &&
+                                !(pf_irq_requested && pf_irq_entered && pf_irq_handler_issued))
+                                $fatal(1, "#PF -> IRQ regression did not exercise the required entry boundary");
                             $display("");
                             $display("========================================");
                             $display("  TEST PASSED!");
@@ -831,7 +839,7 @@ module tb_protected_mode #(
                 // Data port (0xE4) - debug/verification data
                 if (port == 16'h00E4) begin
                     test_data <= dout;
-                    if ($test$plusargs("trace_io"))
+                    if ($test$plusargs("trace_io") || $test$plusargs("check_pf_irq_entry"))
                         $display("TEST DATA: 0x%08X", dout);
                 end
 
@@ -1120,6 +1128,8 @@ module tb_protected_mode #(
         void'($value$plusargs("mem_beat_gap=%d", mem_beat_gap));
         if ($value$plusargs("mem_latency=%d", mem_latency))
             $display("[TB] Memory latency: %0d cycles", mem_latency);
+        if ($value$plusargs("pf_irq_entry=%d", pf_irq_entry_eip))
+            $display("[TB] #PF handler entry EIP: %08x", pf_irq_entry_eip);
         if ($test$plusargs("continue_on_hlt"))
             stop_on_hlt = 1'b0;
 
@@ -1616,6 +1626,30 @@ module tb_protected_mode #(
                 if ($test$plusargs("trace_io"))
                     $display("[TB] INTR asserted during hardwired load at cycle %0d",
                              cycle);
+            end
+
+            // Leave INTR pending throughout #PF delivery. Exercise this core's
+            // IRQ acceptance before the trap handler's first instruction.
+            if ($test$plusargs("check_pf_irq_entry")) begin
+                if (dut.page_fault && !pf_irq_requested) begin
+                    intr <= 1'b1;
+                    pf_irq_requested <= 1'b1;
+                    $display("[TB] #PF -> IRQ: assert INTR at cycle %0d", cycle);
+                end
+                if (dut.interrupt_entry && pf_irq_requested && !pf_irq_entered) begin
+                    if (pf_irq_handler_issued || dut.CS != 16'h0008 ||
+                        dut.EIP != 32'(pf_irq_entry_eip))
+                        $fatal(1, "IRQ did not preempt #PF at its first instruction: CS:EIP=%04x:%08x",
+                               dut.CS, dut.EIP);
+                    pf_irq_entered <= 1'b1;
+                    $display("[TB] #PF -> IRQ: accepted before handler issue at cycle %0d", cycle);
+                end
+                if (dut.i_issue && dut.CS == 16'h0008 &&
+                    dut.EIP == 32'(pf_irq_entry_eip)) begin
+                    if (!pf_irq_entered)
+                        $fatal(1, "#PF handler issued before the injected IRQ");
+                    pf_irq_handler_issued <= 1'b1;
+                end
             end
 
             if (intr_delay > 0) begin
